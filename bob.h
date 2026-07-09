@@ -33,12 +33,14 @@
 
 //TODO: Drawing triangles and circles
 //      Proper bitmap font support
+//      Fix the comparison against BOB_INIT_VERTEX_CAPACITY/BOB_INIT_INDEX_CAPACITY
 //      Support Custom Shaders
 //      Debug mode/Release mode building (turning asserts on and off)
 //      Figure out whether some functions will return error codes or not e.g. BOB_draw_char
 //      Add an arena to manage the total memory easily and get rid of BOB_MEMSET and BOB_MEMCPY
 //      since these should all take place within the arena
 //      Vulkan support
+//      Drawing arbitrary polygons?
 typedef float BOB_Mat4[4][4];
 
 typedef struct {
@@ -156,9 +158,9 @@ typedef struct {
 //Updates the current clipping rect by pushing the intersection of the new clipping region
 //with the old clipping regions to the front of the stack but maintains the clipping directions
 //specified in the original rect
-void BOB_push_clip_rect(BOB_Clip_Stack *stack, BOB_Clip_Rect rect);
+void BOB_start_clip(BOB_Clip_Stack *stack, BOB_Clip_Rect rect);
 //Removes the first clipping intersection from the stack and returns its value
-BOB_Clip_Rect BOB_pop_clip_rect(BOB_Clip_Stack* stack);
+BOB_Clip_Rect BOB_end_clip(BOB_Clip_Stack* stack);
 //Return the value of the element at the top of the stack without popping it
 #define BOB_peek_clip_rect(stack) (((stack)->size > 0) ? (stack)->elems[(stack)->size-1] : (BOB_Clip_Rect){0})
 
@@ -205,13 +207,16 @@ void BOB_draw_pixel_buffer(BOB_Renderer *r, BOB_PixelBuffer *pb, BOB_Quad dimens
 void BOB_draw_circle(BOB_Renderer *r, BOB_Vector2 centre, float radius, BOB_Vector4 colour, uint8_t layer);
 //Draws a filled quad
 void BOB_draw_quad(BOB_Renderer *r, BOB_Quad quad, BOB_Vector4 colour, uint8_t layer);
+//Draws a filled triangle
+void BOB_draw_triangle(BOB_Renderer *r, BOB_Vector2 a, BOB_Vector2 b, BOB_Vector2 c, BOB_Vector4 colour, uint8_t layer);
 //TODO:Draws an unfilled circle
 void BOB_draw_unfilled_circle(BOB_Renderer *r, BOB_Vector2 centre, float radius, BOB_Vector4 colour, uint8_t layer);
 //Draws an unfilled quad
 void BOB_draw_unfilled_quad(BOB_Renderer *r, BOB_Quad quad, float thickness, BOB_Vector4 colour, uint8_t layer);
+//Draws an unfilled triange
+void BOB_draw_unfilled_triangle(BOB_Renderer *r, BOB_Vector2 a, BOB_Vector2 b, BOB_Vector2 c, BOB_Vector4 colour, float thickness, uint8_t layer);
 //Draws a line between two points
 void BOB_draw_line(BOB_Renderer *r, BOB_Vector2 start_pos, BOB_Vector2 end_pos, float thickness, BOB_Vector4 colour, uint8_t layer);
-void BOB_draw_quad_bordered(BOB_Renderer *r, BOB_Quad quad, BOB_Vector4 q_col, BOB_Vector4 b_col, float thick, uint8_t layer);
 
 //Determines the projection matrix
 void BOB_ortho(float left, float right, float bottom, float top, float nearZ, float farZ, BOB_Mat4 dest);

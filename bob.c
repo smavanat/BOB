@@ -587,11 +587,13 @@ BOB_Quad BOB_atlas_pack(BOB_TextureAtlas *a, uint8_t* pixels, size_t w, size_t h
     return uv;
 }
 
-void BOBi_draw_triangle_strip(BOB_Renderer *r, BOB_Vector2 strip[4], BOB_Vector4 colour, uint8_t layer) {
+//Draws a mesh of triangles
+void BOBi_draw_mesh(BOB_Renderer *r, BOB_Vector2 *vertices, size_t vertex_count, uint32_t *indices, size_t index_count, BOB_Vector4 colour, uint8_t layer) {
     BOB_ASSERT(layer < BOB_MAX_LAYERS && "Invalid layer index\n");
 
-    if(BOB_GET_ATLAS_BATCH(r, layer, 0).vertex_count + BOB_VERTICIES_PER_QUAD >= BOB_GET_ATLAS_BATCH(r, layer, 0).vertex_size ||
-        BOB_GET_ATLAS_BATCH(r, layer, 0).index_count + BOB_INDECIES_PER_QUAD >= BOB_GET_ATLAS_BATCH(r, layer, 0).index_size) {
+    //TODO: fix this so its more dynamic
+    if(BOB_GET_ATLAS_BATCH(r, layer, 0).vertex_count + vertex_count >= BOB_GET_ATLAS_BATCH(r, layer, 0).vertex_size ||
+        BOB_GET_ATLAS_BATCH(r, layer, 0).index_count + index_count >= BOB_GET_ATLAS_BATCH(r, layer, 0).index_size) {
         BOBi_next_atlas_batch(r, layer, 0);
     }
 
@@ -608,20 +610,51 @@ void BOBi_draw_triangle_strip(BOB_Renderer *r, BOB_Vector2 strip[4], BOB_Vector4
         BOB_GET_ATLAS_BATCH(r, layer, 0).vertex_data = BOB_MALLOC(sizeof(BOB_Render_Vertex) * BOB_INIT_VERTEX_CAPACITY);
     }
 
-    for(int i = 0; i < BOB_VERTICIES_PER_QUAD; i++) {
-        BOB_GET_ATLAS_BATCH(r, layer, 0).vertex_data[BOB_GET_ATLAS_BATCH(r, layer, 0).vertex_count++] = (BOB_Render_Vertex){strip[i], colour};
+    for(size_t i = 0; i < vertex_count; i++) {
+        BOB_GET_ATLAS_BATCH(r, layer, 0).vertex_data[BOB_GET_ATLAS_BATCH(r, layer, 0).vertex_count++] = (BOB_Render_Vertex){vertices[i], colour};
     }
 
-    //Need to also add ebo data so we can remove overlapping vertices
-    //First triangle
-    BOB_GET_ATLAS_BATCH(r, layer, 0).index_data[BOB_GET_ATLAS_BATCH(r, layer, 0).index_count++] = base_index;
-    BOB_GET_ATLAS_BATCH(r, layer, 0).index_data[BOB_GET_ATLAS_BATCH(r, layer, 0).index_count++] = base_index + 1;
-    BOB_GET_ATLAS_BATCH(r, layer, 0).index_data[BOB_GET_ATLAS_BATCH(r, layer, 0).index_count++] = base_index + 2;
+    for(size_t i = 0; i < index_count; i++) {
+        BOB_GET_ATLAS_BATCH(r, layer, 0).index_data[BOB_GET_ATLAS_BATCH(r, layer, 0).index_count++] = base_index + indices[i];
+    }
+}
 
-    //Second triangle
-    BOB_GET_ATLAS_BATCH(r, layer, 0).index_data[BOB_GET_ATLAS_BATCH(r, layer, 0).index_count++] = base_index + 1;
-    BOB_GET_ATLAS_BATCH(r, layer, 0).index_data[BOB_GET_ATLAS_BATCH(r, layer, 0).index_count++] = base_index + 2;
-    BOB_GET_ATLAS_BATCH(r, layer, 0).index_data[BOB_GET_ATLAS_BATCH(r, layer, 0).index_count++] = base_index + 3;
+void BOBi_draw_triangle_strip(BOB_Renderer *r, BOB_Vector2 strip[4], BOB_Vector4 colour, uint8_t layer) {
+    BOBi_draw_mesh(r, strip, 4, (uint32_t[6]){0,1,2,1,2,3}, 6, colour, layer);
+    // BOB_ASSERT(layer < BOB_MAX_LAYERS && "Invalid layer index\n");
+    //
+    // if(BOB_GET_ATLAS_BATCH(r, layer, 0).vertex_count + BOB_VERTICIES_PER_QUAD >= BOB_GET_ATLAS_BATCH(r, layer, 0).vertex_size ||
+    //     BOB_GET_ATLAS_BATCH(r, layer, 0).index_count + BOB_INDECIES_PER_QUAD >= BOB_GET_ATLAS_BATCH(r, layer, 0).index_size) {
+    //     BOBi_next_atlas_batch(r, layer, 0);
+    // }
+    //
+    // //Update the vertex count and vertex data stored in the renderer
+    // uint32_t base_index = BOB_GET_ATLAS_BATCH(r, layer, 0).vertex_count;
+    //
+    // //Update the earliest atlas used
+    // if(r->layers[layer].earliest_atlas_used != 0)
+    //     r->layers[layer].earliest_atlas_used = 0;
+    //
+    // //Lazy allocation of memory
+    // if(BOB_GET_ATLAS_BATCH(r, layer, 0).vertex_data == NULL || BOB_GET_ATLAS_BATCH(r, layer, 0).index_data == NULL) {
+    //     BOB_GET_ATLAS_BATCH(r, layer, 0).index_data = BOB_MALLOC(sizeof(uint32_t) * BOB_INIT_INDEX_CAPACITY);
+    //     BOB_GET_ATLAS_BATCH(r, layer, 0).vertex_data = BOB_MALLOC(sizeof(BOB_Render_Vertex) * BOB_INIT_VERTEX_CAPACITY);
+    // }
+    //
+    // for(int i = 0; i < BOB_VERTICIES_PER_QUAD; i++) {
+    //     BOB_GET_ATLAS_BATCH(r, layer, 0).vertex_data[BOB_GET_ATLAS_BATCH(r, layer, 0).vertex_count++] = (BOB_Render_Vertex){strip[i], colour};
+    // }
+    //
+    // //Need to also add ebo data so we can remove overlapping vertices
+    // //First triangle
+    // BOB_GET_ATLAS_BATCH(r, layer, 0).index_data[BOB_GET_ATLAS_BATCH(r, layer, 0).index_count++] = base_index;
+    // BOB_GET_ATLAS_BATCH(r, layer, 0).index_data[BOB_GET_ATLAS_BATCH(r, layer, 0).index_count++] = base_index + 1;
+    // BOB_GET_ATLAS_BATCH(r, layer, 0).index_data[BOB_GET_ATLAS_BATCH(r, layer, 0).index_count++] = base_index + 2;
+    //
+    // //Second triangle
+    // BOB_GET_ATLAS_BATCH(r, layer, 0).index_data[BOB_GET_ATLAS_BATCH(r, layer, 0).index_count++] = base_index + 1;
+    // BOB_GET_ATLAS_BATCH(r, layer, 0).index_data[BOB_GET_ATLAS_BATCH(r, layer, 0).index_count++] = base_index + 2;
+    // BOB_GET_ATLAS_BATCH(r, layer, 0).index_data[BOB_GET_ATLAS_BATCH(r, layer, 0).index_count++] = base_index + 3;
 }
 
 void BOB_draw_line(BOB_Renderer *r, BOB_Vector2 start_pos, BOB_Vector2 end_pos, float thickness, BOB_Vector4 colour, uint8_t layer) {
@@ -662,13 +695,6 @@ void BOB_draw_quad(BOB_Renderer *r, BOB_Quad quad, BOB_Vector4 colour, uint8_t l
     BOBi_draw_triangle_strip(r, strip, colour, layer);
 }
 
-void BOB_draw_quad_bordered(BOB_Renderer *r, BOB_Quad quad, BOB_Vector4 q_col, BOB_Vector4 b_col, float thick, uint8_t layer) {
-    BOB_ASSERT(layer < BOB_MAX_LAYERS && "Invalid layer index\n");
-
-    BOB_draw_quad(r, quad, q_col, layer);
-    BOB_draw_unfilled_quad(r, quad, thick, b_col, layer);
-}
-
 void BOB_draw_unfilled_quad(BOB_Renderer *r, BOB_Quad quad, float thickness, BOB_Vector4 colour, uint8_t layer) {
     BOB_ASSERT(layer < BOB_MAX_LAYERS && "Invalid layer index\n");
 
@@ -685,29 +711,34 @@ void BOB_draw_unfilled_quad(BOB_Renderer *r, BOB_Quad quad, float thickness, BOB
 
 //TODO: Figure out how to do clipping with circles
 void BOB_draw_circle(BOB_Renderer *r, BOB_Vector2 centre, float radius, BOB_Vector4 colour, uint8_t layer) {
-    BOB_ASSERT(layer < BOB_MAX_LAYERS && "Invalid layer index\n");
-
-    //TODO:Change this so we at least draw some of the triangles this batch and the rest in the next one
-    if(BOB_GET_ATLAS_BATCH(r, layer, 0).vertex_count + BOB_CIRCLE_LINE_SEGMENTS + 1 >= BOB_INIT_VERTEX_CAPACITY || BOB_GET_ATLAS_BATCH(r, layer, 0).index_count + (BOB_CIRCLE_LINE_SEGMENTS * 3) >= BOB_INIT_INDEX_CAPACITY) {
-        BOBi_next_atlas_batch(r, layer, 0);
-    }
-
-    uint32_t center_index = BOB_GET_ATLAS_BATCH(r, layer, 0).vertex_count;
-
-    //Update the earliest atlas used
-    if(r->layers[layer].earliest_atlas_used != 0)
-        r->layers[layer].earliest_atlas_used = 0;
-
-    //Lazy allocation of memory
-    if(BOB_GET_ATLAS_BATCH(r, layer, 0).vertex_data == NULL || BOB_GET_ATLAS_BATCH(r, layer, 0).index_data == NULL) {
-        BOB_GET_ATLAS_BATCH(r, layer, 0).index_data = BOB_MALLOC(sizeof(uint32_t) * BOB_INIT_INDEX_CAPACITY);
-        BOB_GET_ATLAS_BATCH(r, layer, 0).vertex_data = BOB_MALLOC(sizeof(BOB_Render_Vertex) * BOB_INIT_VERTEX_CAPACITY);
-    }
-
-    BOB_GET_ATLAS_BATCH(r, layer, 0).vertex_data[BOB_GET_ATLAS_BATCH(r, layer, 0).vertex_count++] = (BOB_Render_Vertex){centre, colour};
+    // BOB_ASSERT(layer < BOB_MAX_LAYERS && "Invalid layer index\n");
+    //
+    // //TODO:Change this so we at least draw some of the triangles this batch and the rest in the next one
+    // if(BOB_GET_ATLAS_BATCH(r, layer, 0).vertex_count + BOB_CIRCLE_LINE_SEGMENTS + 1 >= BOB_INIT_VERTEX_CAPACITY || BOB_GET_ATLAS_BATCH(r, layer, 0).index_count + (BOB_CIRCLE_LINE_SEGMENTS * 3) >= BOB_INIT_INDEX_CAPACITY) {
+    //     BOBi_next_atlas_batch(r, layer, 0);
+    // }
+    //
+    // uint32_t center_index = BOB_GET_ATLAS_BATCH(r, layer, 0).vertex_count;
+    //
+    // //Update the earliest atlas used
+    // if(r->layers[layer].earliest_atlas_used != 0)
+    //     r->layers[layer].earliest_atlas_used = 0;
+    //
+    // //Lazy allocation of memory
+    // if(BOB_GET_ATLAS_BATCH(r, layer, 0).vertex_data == NULL || BOB_GET_ATLAS_BATCH(r, layer, 0).index_data == NULL) {
+    //     BOB_GET_ATLAS_BATCH(r, layer, 0).index_data = BOB_MALLOC(sizeof(uint32_t) * BOB_INIT_INDEX_CAPACITY);
+    //     BOB_GET_ATLAS_BATCH(r, layer, 0).vertex_data = BOB_MALLOC(sizeof(BOB_Render_Vertex) * BOB_INIT_VERTEX_CAPACITY);
+    // }
+    //
+    // BOB_GET_ATLAS_BATCH(r, layer, 0).vertex_data[BOB_GET_ATLAS_BATCH(r, layer, 0).vertex_count++] = (BOB_Render_Vertex){centre, colour};
 
     float angle_step = 2.0f * M_PI / BOB_CIRCLE_LINE_SEGMENTS;
     uint32_t ring_start = BOB_GET_ATLAS_BATCH(r, layer, 0).vertex_count;
+    BOB_Vector2 vertices[BOB_CIRCLE_LINE_SEGMENTS+1];
+    uint32_t indices[BOB_CIRCLE_LINE_SEGMENTS * 3];
+    size_t vertex_count = 1, index_count = 0;
+
+    vertices[0] = centre;
 
     //Generating the vertices for the triangles that make up a circle
     for(int i = 0; i < BOB_CIRCLE_LINE_SEGMENTS; i++) {
@@ -715,7 +746,8 @@ void BOB_draw_circle(BOB_Renderer *r, BOB_Vector2 centre, float radius, BOB_Vect
         float x = centre.x + cosf(angle) * radius;
         float y = centre.y - sinf(angle) * radius;
 
-        BOB_GET_ATLAS_BATCH(r, layer, 0).vertex_data[BOB_GET_ATLAS_BATCH(r, layer, 0).vertex_count++] = (BOB_Render_Vertex){(BOB_Vector2){x, y}, colour};
+        // BOB_GET_ATLAS_BATCH(r, layer, 0).vertex_data[BOB_GET_ATLAS_BATCH(r, layer, 0).vertex_count++] = (BOB_Render_Vertex){(BOB_Vector2){x, y}, colour};
+        vertices[vertex_count++] = (BOB_Vector2){x, y};
     }
 
     //Generating the indecies for the triangle ebo
@@ -723,16 +755,380 @@ void BOB_draw_circle(BOB_Renderer *r, BOB_Vector2 centre, float radius, BOB_Vect
         uint32_t current = ring_start + i;
         uint32_t next = ring_start + ((i+1) % BOB_CIRCLE_LINE_SEGMENTS);
 
-        BOB_GET_ATLAS_BATCH(r, layer, 0).index_data[BOB_GET_ATLAS_BATCH(r, layer, 0).index_count++] = center_index;
-        BOB_GET_ATLAS_BATCH(r, layer, 0).index_data[BOB_GET_ATLAS_BATCH(r, layer, 0).index_count++] = current;
-        BOB_GET_ATLAS_BATCH(r, layer, 0).index_data[BOB_GET_ATLAS_BATCH(r, layer, 0).index_count++] = next;
+        indices[index_count++] = 0;
+        indices[index_count++] = current;
+        indices[index_count++] = next;
+        // BOB_GET_ATLAS_BATCH(r, layer, 0).index_data[BOB_GET_ATLAS_BATCH(r, layer, 0).index_count++] = center_index;
+        // BOB_GET_ATLAS_BATCH(r, layer, 0).index_data[BOB_GET_ATLAS_BATCH(r, layer, 0).index_count++] = current;
+        // BOB_GET_ATLAS_BATCH(r, layer, 0).index_data[BOB_GET_ATLAS_BATCH(r, layer, 0).index_count++] = next;
     }
+
+    BOBi_draw_mesh(r, vertices, vertex_count, indices, index_count, colour, layer);
+}
+
+//Draws an unfilled triange
+void BOB_draw_unfilled_triangle(BOB_Renderer *r, BOB_Vector2 a, BOB_Vector2 b, BOB_Vector2 c, BOB_Vector4 colour, float thickness, uint8_t layer) {
+    BOB_ASSERT(layer < BOB_MAX_LAYERS && "Invalid layer index\n");
+
+    BOB_draw_line(r, a, b, thickness, colour, layer);
+    BOB_draw_line(r, a, c, thickness, colour, layer);
+    BOB_draw_line(r, b, c, thickness, colour, layer);
+}
+
+#define BOBi_MAX_POLY_SIZE 256
+
+//Returns the point of intersection between two lines
+//Uses the formula found here: https://en.wikipedia.org/wiki/Line%E2%80%93line_intersection#Given_two_points_on_each_line
+BOB_Vector2 BOBi_get_intersection_old(BOB_Vector2 a_start, BOB_Vector2 a_end, BOB_Vector2 b_start, BOB_Vector2 b_end) {
+    float x_num = (a_start.x * a_end.y - a_start.y * a_end.x) * (b_start.x - b_end.x) - (a_start.x - a_end.x) * (b_start.x * b_end.y - b_start.y * b_end.x);
+    float y_num = (a_start.x * a_end.y - a_start.y * a_end.x) * (b_start.y - b_end.y) - (a_start.y - a_end.y) * (b_start.x * b_end.y - b_start.y * b_end.x);
+    float den = (a_start.x - a_end.x) * (b_start.y - b_end.y) - (a_start.y - a_end.y) * (b_start.x - b_end.x);
+
+    if (fabsf(den) < 1e-6f) return a_start;
+
+    return (BOB_Vector2){x_num/den, y_num/den};
+}
+
+//Clips all of the edges of the polygon w.r.t. one clip edge of the clipping area
+size_t BOBi_clip_edge_old(BOB_Vector2 *poly_points, size_t num_points, BOB_Vector2 edge_start, BOB_Vector2 edge_end) {
+    size_t new_poly_size = 0;
+    size_t new_poly_capacity = 512;
+    BOB_Vector2 new_points[new_poly_capacity]; //Allow up to 256 vertex polygons
+
+    //Iterate over all points
+    for(size_t i = 0; i < num_points; i++) {
+        //Getting the point that forms the end of the current line
+        size_t j = (i + 1) % num_points;
+        BOB_Vector2 start = poly_points[i];
+        BOB_Vector2 end = poly_points[j];
+
+        //Calculation position of first point w.r.t. clipper line
+        float start_pos = (edge_end.x - edge_start.x) * (start.y - edge_start.y) - (edge_end.y - edge_start.y) * (start.x - edge_start.x);
+        //Calculation position of second point w.r.t. clipper line
+        float end_pos = (edge_end.x - edge_start.x) * (end.y - edge_start.y) - (edge_end.y - edge_start.y) * (end.x - edge_start.x);
+
+        //When both points are inside the clipping area:
+        if(start_pos < 0.0f && end_pos < 0.0f) {
+            if(new_poly_size >= new_poly_capacity) {
+                BOB_PRINT("Exceeded new polygon point capacity\n");
+                break;
+            }
+            //Only second point is added
+            new_points[new_poly_size++] = end;
+        }
+        //When only first point is outside
+        else if(start_pos >= 0.0f && end_pos < 0.0f) {
+            if(new_poly_size+1 >= new_poly_capacity) {
+                BOB_PRINT("Exceeded new polygon point capacity\n");
+                break;
+            }
+            //Point of intersection with edge and second point is added
+            new_points[new_poly_size++] = BOBi_get_intersection_old(edge_start, edge_end, start, end);
+            new_points[new_poly_size++] = end;
+        }
+        //When only second point is outside
+        else if(start_pos < 0.0f && end_pos >= 0.0f) {
+            if(new_poly_size >= new_poly_capacity) {
+                BOB_PRINT("Exceeded new polygon point capacity\n");
+                break;
+            }
+            //Only point of intersection with edge is added
+            new_points[new_poly_size++] = BOBi_get_intersection_old(edge_start, edge_end, start, end);
+        }
+        //When both points are outside, no points are added
+    }
+
+    BOB_MEMCPY(poly_points, new_points, new_poly_size * sizeof(BOB_Vector2));
+    return new_poly_size;
+}
+
+typedef enum {
+    BOBi_CLIP_LEFT,
+    BOBi_CLIP_RIGHT,
+    BOBi_CLIP_BOTTOM,
+    BOBi_CLIP_TOP,
+} BOBi_Clip_Edge;
+
+BOB_Vector2 BOBi_get_intersection(BOB_Vector2 a, BOB_Vector2 b, BOBi_Clip_Edge edge, float value) {
+    switch(edge) {
+        case BOBi_CLIP_LEFT:
+        case BOBi_CLIP_RIGHT: {
+            float t = (value - a.x) / (b.x - a.x);
+            return (BOB_Vector2){value, a.y + t * (b.y - a.y)};
+        }
+        case BOBi_CLIP_TOP:
+        case BOBi_CLIP_BOTTOM: {
+            float t = (value - a.y) / (b.y - a.y);
+            return (BOB_Vector2){a.x + t * (b.x - a.x), value};
+        }
+    }
+}
+
+static inline uint8_t BOBi_inside(BOB_Vector2 p, BOBi_Clip_Edge edge, float value) {
+    switch(edge) {
+        case BOBi_CLIP_LEFT: return p.x >= value;
+        case BOBi_CLIP_RIGHT: return p.x <= value;
+        case BOBi_CLIP_TOP: return p.y >= value;
+        case BOBi_CLIP_BOTTOM: return p.y <= value;
+    }
+}
+
+size_t BOBi_clip_edge(BOB_Vector2 *poly_points, size_t poly_size, BOBi_Clip_Edge edge, float value) {
+    size_t new_poly_size = 0;
+    BOB_Vector2 new_points[BOBi_MAX_POLY_SIZE]; //Allow up to 256 vertex polygons
+
+    //Iterate over all points
+    for(size_t i = 0; i < poly_size; i++) {
+        //Getting the point that forms the end of the current line
+        size_t j = (i + 1) % poly_size;
+        BOB_Vector2 start = poly_points[i];
+        BOB_Vector2 end = poly_points[j];
+
+        uint8_t start_inside = BOBi_inside(start, edge, value);
+        uint8_t end_inside = BOBi_inside(end, edge, value);
+
+        if(start_inside && end_inside) {
+            if(new_poly_size >= BOBi_MAX_POLY_SIZE) {
+                BOB_PRINT("Exceeded new polygon point capacity\n");
+                break;
+            }
+            //Only second point is added
+            new_points[new_poly_size++] = end;
+        }
+        else if(!start_inside && end_inside) {
+            if(new_poly_size+1 >= BOBi_MAX_POLY_SIZE) {
+                BOB_PRINT("Exceeded new polygon point capacity\n");
+                break;
+            }
+            //Point of intersection with edge and second point is added
+            new_points[new_poly_size++] = BOBi_get_intersection(start, end, edge, value);
+            new_points[new_poly_size++] = end;
+        }
+        //When only second point is outside
+        else if(start_inside && !end_inside) {
+            if(new_poly_size >= BOBi_MAX_POLY_SIZE) {
+                BOB_PRINT("Exceeded new polygon point capacity\n");
+                break;
+            }
+            //Only point of intersection with edge is added
+            new_points[new_poly_size++] = BOBi_get_intersection(start, end, edge, value);
+        }
+        //When both points are outside, no points are added
+    }
+    BOB_MEMCPY(poly_points, new_points, new_poly_size * sizeof(BOB_Vector2));
+    return new_poly_size;
+}
+
+size_t BOBi_clip_polygon(BOB_Renderer *r, BOB_Vector2 *poly_points, size_t poly_size) {
+    if(r->stack->size == 0) return 1; //No need to clip if no clip rects
+    BOB_Clip_Rect clip = BOB_peek_clip_rect(r->stack);
+    if(clip.empty) return 0;
+
+    BOB_Vector2 clip_vertices[4] = {(BOB_Vector2){clip.left, clip.top}, (BOB_Vector2){clip.left, clip.bottom}, (BOB_Vector2){clip.right, clip.bottom}, (BOB_Vector2){clip.right, clip.top}};
+
+    // for(size_t i = 0; i < 4; i++) {
+    //     size_t k = (i+1) % 4;
+    //     poly_size = BOBi_clip_edge(poly_points, poly_size, clip_vertices[i], clip_vertices[k]);
+    // }
+    poly_size = BOBi_clip_edge(poly_points, poly_size, BOBi_CLIP_LEFT, clip.left);
+    poly_size = BOBi_clip_edge(poly_points, poly_size, BOBi_CLIP_RIGHT, clip.right);
+    poly_size = BOBi_clip_edge(poly_points, poly_size, BOBi_CLIP_TOP, clip.top);
+    poly_size = BOBi_clip_edge(poly_points, poly_size, BOBi_CLIP_BOTTOM, clip.bottom);
+
+    return poly_size;
+}
+
+typedef struct BOBi_Partition_Vertex {
+    uint32_t index;
+    BOB_Vector2 pos;
+    struct BOBi_Partition_Vertex *prev, *next;
+} BOBi_PartitionVertex;
+
+float BOBi_cross_prod(BOB_Vector2 a, BOB_Vector2 b, BOB_Vector2 c) {
+    float abx = b.x - a.x;
+    float aby = b.y - a.y;
+    float bcx = c.x - b.x;
+    float bcy = c.y - b.y;
+
+    return abx * bcy - aby * bcx;
+}
+
+uint8_t BOBi_point_inside_triangle(BOB_Vector2 point, BOB_Vector2 a, BOB_Vector2 b, BOB_Vector2 c) {
+    float d1 = (point.x - b.x) * (a.y - b.y) - (a.x - b.x) * (point.y - b.y);
+    float d2 = (point.x - c.x) * (b.y - c.y) - (b.x - c.x) * (point.y - c.y);
+    float d3 = (point.x - a.x) * (c.y - a.y) - (c.x - a.x) * (point.y - a.y);
+
+    uint8_t has_neg = (d1 < 0) || (d2 < 0) || (d3 < 0);
+    uint8_t has_pos = (d1 > 0) || (d2 > 0) || (d3 > 0);
+
+    return !(has_neg && has_pos);
+}
+
+uint8_t BOBi_is_ear(BOBi_PartitionVertex *v, BOBi_PartitionVertex *start, BOB_Vector2 *points) {
+    BOBi_PartitionVertex *a = v->prev;
+    BOBi_PartitionVertex *b = v;
+    BOBi_PartitionVertex *c = v->next;
+
+    if(BOBi_cross_prod(points[a->index], points[b->index], points[c->index]) <= 0.0f) return 0;
+
+    BOBi_PartitionVertex *p = start;
+
+    do {
+        if(p != a && p != b && p != c) {
+            if(BOBi_point_inside_triangle(points[p->index], points[a->index], points[b->index], points[c->index])) return 0;
+        }
+        p = p->next;
+    } while(p != start);
+
+    return 1;
+}
+
+size_t BOBi_triangulate_ec(BOB_Vector2 *poly_points, size_t poly_size, uint32_t *indices) {
+    if(poly_size < 3) return 0;
+    if(poly_size == 3) {
+        indices[0] = 0;
+        indices[1] = 1;
+        indices[2] = 2;
+        return 1;
+    }
+
+    BOBi_PartitionVertex vertices[BOBi_MAX_POLY_SIZE];
+    uint32_t processed[BOBi_MAX_POLY_SIZE];
+    size_t processed_size = 0;
+    #define EPSILON 1e-6f
+
+    //Preprocessing to remove duplicate vertices:
+    for(int i = 0; i < poly_size; i++) {
+        int prev = (i-1+poly_size) % poly_size;
+        int next = (i+1) % poly_size;
+
+        float dx = poly_points[i].x - poly_points[prev].x;
+        float dy = poly_points[i].y - poly_points[prev].y;
+
+        //Adding non-duplicate points
+        if (dx*dx + dy*dy >= EPSILON*EPSILON) {
+            processed[processed_size] = i;
+            processed_size++;
+            continue;
+        }
+    }
+
+    size_t write = 0;
+
+    //Preprocessing to remove collinear vertices:
+    for(int read = 0; read < processed_size; read++) {
+        int prev = (read-1+processed_size) % processed_size;
+        int next = (read+1) % processed_size;
+
+        uint32_t ia = processed[prev];
+        uint32_t ib = processed[read];
+        uint32_t ic = processed[next];
+
+        //Removing colinear vertices:
+        BOB_Vector2 ab = {poly_points[ib].x - poly_points[ia].x, poly_points[ib].y - poly_points[ia].y};
+        BOB_Vector2 bc = {poly_points[ic].x - poly_points[ib].x, poly_points[ic].y - poly_points[ib].y};
+
+        if((ab.x * bc.x + ab.y * bc.y) < 0.0f || fabsf(BOBi_cross_prod(poly_points[ia], poly_points[ib], poly_points[ic])) > EPSILON) {
+            processed[write++] = processed[read];
+        }
+    }
+    processed_size = write;
+
+    //Converting normal vertices into doubly-linked list
+    for(int i = 0; i < processed_size; i++) {
+        int prev = (i-1+processed_size) % processed_size;
+        int next = (i+1) % processed_size;
+
+        vertices[i].index = processed[i];
+        vertices[i].pos = poly_points[processed[i]];
+        vertices[i].prev = &vertices[prev];
+        vertices[i].next = &vertices[next];
+    }
+
+    size_t vertex_count = processed_size;
+    size_t triangle_count = 0;
+
+    BOBi_PartitionVertex *start = &vertices[0];
+    while(vertex_count > 3) {
+        BOBi_PartitionVertex *v = start;
+
+        uint8_t found = 0;
+
+        do {
+            if(BOBi_is_ear(v, start, poly_points)) {
+                BOBi_PartitionVertex *prev = v->prev;
+                BOBi_PartitionVertex *next = v->next;
+
+                indices[(triangle_count * 3)] = prev->index;
+                indices[(triangle_count * 3)+1] = v->index;
+                indices[(triangle_count * 3)+2] = next->index;
+                triangle_count++;
+
+                prev->next = next;
+                next->prev = prev;
+
+                if(v == start) start = next;
+
+                vertex_count--;
+                found = 1;
+                break;
+            }
+
+            v = v->next;
+        } while(v != start);
+
+        if(!found) return 0;
+    }
+
+    indices[(triangle_count * 3)] = start->index;
+    indices[(triangle_count * 3)+1] = start->next->index;
+    indices[(triangle_count * 3)+2] = start->next->next->index;
+    triangle_count++;
+
+    return triangle_count;
+}
+
+void BOB_draw_polygon(BOB_Renderer *r, BOB_Vector2* poly_points, size_t poly_size, BOB_Vector4 colour, uint8_t layer) {
+    BOB_ASSERT(layer < BOB_MAX_LAYERS && "Invalid layer index\n");
+
+    BOB_Vector2 points[BOBi_MAX_POLY_SIZE];
+    BOB_MEMCPY(points, poly_points, poly_size * sizeof(BOB_Vector2));
+
+    size_t clipped_size = BOBi_clip_polygon(r, points, poly_size);
+    if(clipped_size < 3) return;
+
+    uint32_t triangle_indices[(BOBi_MAX_POLY_SIZE - 2) * 3]; //Ear clipping always produces n-2 triangles for a polygon with n vertices
+    size_t triangle_count = BOBi_triangulate_ec(points, clipped_size, triangle_indices);
+
+    if(!triangle_count) return;
+
+    //Processing the returned vertex data into a more compact form so we can pass it to the renderer
+    uint32_t vertex_map[BOBi_MAX_POLY_SIZE];
+
+    //Filling the map with dummy values
+    for(size_t i = 0; i < clipped_size; i++)
+        vertex_map[i] = UINT32_MAX;
+
+    BOB_Vector2 vertices[BOBi_MAX_POLY_SIZE]; //Holds the compressed vertex values
+    size_t vertex_count = 0;
+
+    //Copying the old verticies into compressed format
+    for(size_t i = 0; i < triangle_count*3; i++) {
+        uint32_t old = triangle_indices[i];
+        if(vertex_map[old] == UINT32_MAX) {
+            vertex_map[old] = vertex_count;
+            vertices[vertex_count++] = points[old];
+        }
+        triangle_indices[i] = vertex_map[old];
+    }
+
+    BOBi_draw_mesh(r, vertices, vertex_count, triangle_indices, triangle_count * 3, colour, layer);
 }
 
 //Updates the current clipping rect by pushing the intersection of the new clipping region
 //with the old clipping regions to the front of the stack but maintains the clipping directions
 //specified in the original rect
-void BOB_push_clip_rect(BOB_Clip_Stack *stack, BOB_Clip_Rect rect) {
+void BOB_start_clip(BOB_Clip_Stack *stack, BOB_Clip_Rect rect) {
     if(stack->size >= stack->capacity) {
         size_t newCap = (stack->capacity == 0) ? 4 : stack->capacity * 2;
         BOB_Clip_Rect* temp = BOB_MALLOC(sizeof(BOB_Clip_Rect) * newCap);
@@ -783,7 +1179,7 @@ void BOB_push_clip_rect(BOB_Clip_Stack *stack, BOB_Clip_Rect rect) {
 }
 
 //Removes the first clipping intersection from the stack and returns its value
-BOB_Clip_Rect BOB_pop_clip_rect(BOB_Clip_Stack* stack) {
+BOB_Clip_Rect BOB_end_clip(BOB_Clip_Stack* stack) {
     BOB_ASSERT(stack->size > 0 && "Popping an empty stack");
 
     BOB_Clip_Rect rect = stack->elems[stack->size-1];
