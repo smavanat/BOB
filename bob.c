@@ -109,9 +109,12 @@ BOB_Renderer BOB_renderer_init(size_t width, size_t height) {
 
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_GREATER);
+    glClearDepth(0.0);
 
     //Setting the projection matrix
-    BOB_ortho(0.0f, r.screen_width, r.screen_height, 0.0f, -1.0f, 1.0f, r.projection);
+    BOB_ortho(0.0f, r.screen_width, r.screen_height, 0.0f, 1.0f, -1.0f, r.projection);
 
     r.num_atlas_batches = 0;
     r.atlas_batch_capacity = 2;
@@ -367,7 +370,6 @@ uint8_t BOBi_clip_line(BOB_Renderer *r, BOB_Vector2 *start, BOB_Vector2* end) {
 
 //Draws a texture quad
 void BOB_draw_atlas_quad(BOB_Renderer *r, BOB_Quad screen_quad, BOB_Quad tex_sub_rect, BOB_Vector4 colour, uint32_t atlas, float depth) {
-    // BOB_ASSERT(layer < BOB_MAX_LAYERS && "Invalid layer index\n");
     if(!BOBi_clip_quad(r, &screen_quad)) return;
 
     //If we have overreached our current rendering limit or we cannot store any more textures, end the current draw call and start a new one
