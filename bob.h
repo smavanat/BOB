@@ -31,16 +31,16 @@
 #define BOB_PRINT printf
 #endif //BOB_PRINT
 
-//TODO: Drawing triangles and circles
+//TODO: Support Custom Shaders 
+//      Allow the user to define render passes
+//      Make it so that unfilled shapes don't have the full outline drawn when clipped
+//      Could make atlas/shader batches independent so when flushing only flush the one at capacity instead of all of them
 //      Proper bitmap font support
-//      Fix the comparison against BOB_INIT_VERTEX_CAPACITY/BOB_INIT_INDEX_CAPACITY
-//      Support Custom Shaders
 //      Debug mode/Release mode building (turning asserts on and off)
 //      Figure out whether some functions will return error codes or not e.g. BOB_draw_char
 //      Add an arena to manage the total memory easily and get rid of BOB_MEMSET and BOB_MEMCPY
 //      since these should all take place within the arena
 //      Vulkan support
-//      Drawing arbitrary polygons?
 typedef float BOB_Mat4[4][4];
 
 typedef struct {
@@ -71,6 +71,9 @@ void BOB_pixelbuffer_free(BOB_PixelBuffer *pb);
 #define BOB_INIT_INDEX_CAPACITY BOB_INIT_QUADS * BOB_INDECIES_PER_QUAD + BOB_INIT_TRIANGLES * BOB_INDECIES_PER_TRIANGLE
 #define BOB_INVALID_TEX_INDEX 1248
 #define BOB_CIRCLE_LINE_SEGMENTS 64 //Number of line segments that make up the circumference of a circle
+#define BOB_MAX_VERTEX_CAPACITY 1048576
+#define BOB_MAX_INDEX_CAPACITY 2097152
+#define BOB_MAX_TEX_CAPACITY 8
 
 typedef struct {
     float x;
@@ -84,13 +87,17 @@ typedef struct {
 } BOB_Vector2;
 
 typedef struct {
+   float x, y, z;
+} BOB_Vector3;
+
+typedef struct {
     float x, y, z, w;
 } BOB_Vector4;
 
 //Data structure to hold data about a single render vertex
 typedef struct {
-    BOB_Vector2 pos; //The on-screen position of the render vertex
     BOB_Vector4 colour; //The colour of the vertex
+    BOB_Vector3 pos; //The on-screen position of the render vertex
     BOB_Vector2 uv; //The (u,v) coordinates of the vertex
 } BOB_Render_Vertex;
 
@@ -126,16 +133,16 @@ typedef struct {
 //Struct for renderering one off textures
 typedef struct {
     uint32_t texture;
+    float depth;
     BOB_Quad dimensions;
     BOB_Quad uv;
     BOB_Vector4 colour;
 } BOB_DynamicTexture;
 
 typedef struct {
+    BOB_DynamicTexture dynamic_textures[BOB_MAX_TEX_CAPACITY];
     BOB_AtlasRenderBatch *atlas_batches;
-    BOB_DynamicTexture *dynamic_textures;
     size_t dynamic_texture_count;
-    size_t dynamic_texture_capacity;
     int earliest_atlas_used; //If negative, this layer is not used, otherwise is the index of the earliest atlas used
 } BOB_Render_Layer;
 
@@ -155,18 +162,9 @@ typedef struct {
 
 #define INIT_STACK_CAPACITY 64
 
-//Updates the current clipping rect by pushing the intersection of the new clipping region
-//with the old clipping regions to the front of the stack but maintains the clipping directions
-//specified in the original rect
-void BOB_start_clip(BOB_Clip_Stack *stack, BOB_Clip_Rect rect);
-//Removes the first clipping intersection from the stack and returns its value
-BOB_Clip_Rect BOB_end_clip(BOB_Clip_Stack* stack);
-//Return the value of the element at the top of the stack without popping it
-#define BOB_peek_clip_rect(stack) (((stack)->size > 0) ? (stack)->elems[(stack)->size-1] : (BOB_Clip_Rect){0})
-
 //Pixel renderer that renders a single frame
 typedef struct {
-    BOB_Render_Layer layers[BOB_MAX_LAYERS]; //Layers of rendering
+    BOB_Render_Layer layer; //Layers of rendering
     BOB_Clip_Stack *stack; //Stores the current clipping rect and the history
     BOB_Mat4 projection; //projection matrix for this renderer
     uint32_t vao; //vao this renderer uses
@@ -180,7 +178,16 @@ typedef struct {
     uint32_t screen_width;
 } BOB_Renderer;
 
-#define BOB_GET_ATLAS_BATCH(r, layer, i) (r)->layers[layer].atlas_batches[i]
+#define BOB_GET_ATLAS_BATCH(r, i) (r)->layer.atlas_batches[i]
+
+//Updates the current clipping rect by pushing the intersection of the new clipping region
+//with the old clipping regions to the front of the stack but maintains the clipping directions
+//specified in the original rect
+void BOB_start_clip(BOB_Renderer *r, BOB_Clip_Rect rect);
+//Removes the first clipping intersection from the stack and returns its value
+BOB_Clip_Rect BOB_end_clip(BOB_Renderer *r);
+//Return the value of the element at the top of the stack without popping it
+#define BOB_peek_clip_rect(stack) (((stack)->size > 0) ? (stack)->elems[(stack)->size-1] : (BOB_Clip_Rect){0})
 
 //Initialises the pixel renderer
 BOB_Renderer BOB_renderer_init(size_t width, size_t height);
@@ -196,27 +203,27 @@ void BOB_renderer_end(BOB_Renderer *r);
 //      Add a way to remove an atlas efficiently
 uint32_t BOB_add_texture_atlas(BOB_Renderer *r, BOB_TextureAtlas *ta);
 //Draws a quad
-void BOB_draw_atlas_quad(BOB_Renderer *r, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, uint32_t atlas, uint8_t layer);
+void BOB_draw_atlas_quad(BOB_Renderer *r, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, uint32_t atlas, float depth);
 //Draws a dynamically allocated texture
-void BOB_draw_texture(BOB_Renderer *r, uint32_t texture, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, uint8_t layer);
+void BOB_draw_texture(BOB_Renderer *r, uint32_t texture, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, float depth);
 //Draws a frame straight to a texture by uploading it to a pixel buffer
 void BOB_pixelbuffer_updload_data(BOB_PixelBuffer *pb, uint8_t *data);
 //Draws a pixel buffer
-void BOB_draw_pixel_buffer(BOB_Renderer *r, BOB_PixelBuffer *pb, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, uint8_t layer);
+void BOB_draw_pixel_buffer(BOB_Renderer *r, BOB_PixelBuffer *pb, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, float depth);
 //Draws a filled circle
-void BOB_draw_circle(BOB_Renderer *r, BOB_Vector2 centre, float radius, BOB_Vector4 colour, uint8_t layer);
+void BOB_draw_circle(BOB_Renderer *r, BOB_Vector2 centre, float radius, BOB_Vector4 colour, float depth);
 //Draws a filled quad
-void BOB_draw_quad(BOB_Renderer *r, BOB_Quad quad, BOB_Vector4 colour, uint8_t layer);
+void BOB_draw_quad(BOB_Renderer *r, BOB_Quad quad, BOB_Vector4 colour, float depth);
 //Draws a filled triangle
-void BOB_draw_triangle(BOB_Renderer *r, BOB_Vector2 a, BOB_Vector2 b, BOB_Vector2 c, BOB_Vector4 colour, uint8_t layer);
-//TODO:Draws an unfilled circle
-void BOB_draw_unfilled_circle(BOB_Renderer *r, BOB_Vector2 centre, float radius, BOB_Vector4 colour, uint8_t layer);
+void BOB_draw_polygon(BOB_Renderer *r, BOB_Vector2* poly_points, size_t poly_size, BOB_Vector4 colour, float depth);
+//Draws an unfilled circle
+void BOB_draw_unfilled_circle(BOB_Renderer *r, BOB_Vector2 centre, float radius, float thickness, BOB_Vector4 colour, float depth);
 //Draws an unfilled quad
-void BOB_draw_unfilled_quad(BOB_Renderer *r, BOB_Quad quad, float thickness, BOB_Vector4 colour, uint8_t layer);
+void BOB_draw_unfilled_quad(BOB_Renderer *r, BOB_Quad quad, float thickness, BOB_Vector4 colour, float depth);
 //Draws an unfilled triange
-void BOB_draw_unfilled_triangle(BOB_Renderer *r, BOB_Vector2 a, BOB_Vector2 b, BOB_Vector2 c, BOB_Vector4 colour, float thickness, uint8_t layer);
+void BOB_draw_unfilled_polygon(BOB_Renderer *r, BOB_Vector2 *poly_points, size_t polysize, BOB_Vector4 colour, float thickness, float depth);
 //Draws a line between two points
-void BOB_draw_line(BOB_Renderer *r, BOB_Vector2 start_pos, BOB_Vector2 end_pos, float thickness, BOB_Vector4 colour, uint8_t layer);
+void BOB_draw_line(BOB_Renderer *r, BOB_Vector2 start_pos, BOB_Vector2 end_pos, float thickness, BOB_Vector4 colour, float depth);
 
 //Determines the projection matrix
 void BOB_ortho(float left, float right, float bottom, float top, float nearZ, float farZ, BOB_Mat4 dest);
@@ -266,8 +273,8 @@ typedef struct {
 uint8_t BOB_bitmap_font_init(BOB_Bitmap_Font*opts, uint32_t atls, uint32_t tpw, uint32_t tph, uint32_t cpw, uint32_t cph, uint32_t cpx, uint32_t cpy, uint32_t tbpx, uint32_t tbpy, BOB_Bitmap_Layout lyt, BOB_Bitmap_Layout_Desc desc);
 void BOB_bitmap_font_free(BOB_Bitmap_Font*bf);
 
-uint8_t BOB_draw_char(BOB_Renderer *r, BOB_Bitmap_Font*bf, char c, BOB_Quad dimensions, BOB_Vector4 colour, uint8_t layer);
-uint8_t BOB_draw_string(BOB_Renderer *r, BOB_Bitmap_Font*bf, const char *str, size_t str_len, BOB_Vector2 gap, BOB_Vector2 start, BOB_Vector2 scale, BOB_Vector4 colour, uint8_t layer);
+uint8_t BOB_draw_char(BOB_Renderer *r, BOB_Bitmap_Font*bf, char c, BOB_Quad dimensions, BOB_Vector4 colour, float depth);
+uint8_t BOB_draw_string(BOB_Renderer *r, BOB_Bitmap_Font*bf, const char *str, size_t str_len, BOB_Vector2 gap, BOB_Vector2 start, BOB_Vector2 scale, BOB_Vector4 colour, float depth);
 BOB_Vector2 BOB_measure_text(const char *str, size_t str_len, BOB_Vector2 gap, BOB_Vector2 scale);
 
 

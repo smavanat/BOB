@@ -1,3 +1,7 @@
 renderer.*
 bitmap_font.*
 glad.*
+main.c
+CMakeLists.txt
+build/
+GLFW/
