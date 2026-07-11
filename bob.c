@@ -3,6 +3,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
+//Return the value of the element at the top of the stack without popping it
+#define BOB_peek_clip_rect(stack) (((stack)->size > 0) ? (stack)->elems[(stack)->size-1] : (BOBi_Clip_Rect){0})
+
 //Calculates the projection matrix
 void BOB_ortho(float left, float right, float bottom, float top, float nearZ, float farZ, BOB_Mat4 dest) {
     for(int i = 0; i < 4; i++) {
@@ -118,7 +121,7 @@ BOB_Renderer BOB_renderer_init(size_t width, size_t height) {
 
     r.num_atlas_batches = 0;
     r.atlas_batch_capacity = 2;
-    r.layer.atlas_batches = calloc(r.atlas_batch_capacity, sizeof(BOB_AtlasRenderBatch));
+    // r.layer.atlas_batches = calloc(r.atlas_batch_capacity, sizeof(BOB_AtlasRenderBatch));
     r.layer.earliest_atlas_used = -1;
     r.layer.dynamic_texture_count = 0;
 
@@ -131,8 +134,8 @@ BOB_Renderer BOB_renderer_init(size_t width, size_t height) {
     BOB_add_texture_atlas(&r, ta);
 
     //Initialise the stack of clip rects
-    r.stack = BOB_MALLOC(sizeof(BOB_Clip_Stack));
-    r.stack->elems = BOB_MALLOC(sizeof(BOB_Clip_Rect) * INIT_STACK_CAPACITY);
+    r.stack = BOB_MALLOC(sizeof(BOBi_Clip_Stack));
+    r.stack->elems = BOB_MALLOC(sizeof(BOBi_Clip_Rect) * INIT_STACK_CAPACITY);
     r.stack->capacity = INIT_STACK_CAPACITY;
     r.stack->size = 0;
 
@@ -150,7 +153,7 @@ void BOB_renderer_free(BOB_Renderer *r) {
         BOB_atlas_free(BOB_GET_ATLAS_BATCH(r, j).a);
     }
     BOB_FREE(BOB_GET_ATLAS_BATCH(r, 0).a);
-    if(r->layer.atlas_batches) BOB_FREE(r->layer.atlas_batches);
+    // if(r->layer.atlas_batches) BOB_FREE(r->layer.atlas_batches);
 
     BOB_FREE(r->stack->elems);
     r->stack->elems = NULL;
@@ -247,24 +250,24 @@ void BOBi_flush(BOB_Renderer *r, uint32_t atlas, uint32_t num_vertices, uint32_t
 }
 
 uint32_t BOB_add_texture_atlas(BOB_Renderer *r, BOB_TextureAtlas *ta) {
-    if(r->num_atlas_batches >= r->atlas_batch_capacity) {
-        size_t newCap = r->atlas_batch_capacity * 2;
-        BOB_AtlasRenderBatch *temp = BOB_MALLOC(newCap * sizeof(BOB_AtlasRenderBatch));
-        BOB_MEMCPY(temp, r->layer.atlas_batches, r->num_atlas_batches * sizeof(BOB_AtlasRenderBatch));
-        BOB_FREE(r->layer.atlas_batches);
-        r->layer.atlas_batches = temp;
-        r->atlas_batch_capacity = newCap;
+    if(r->num_atlas_batches >= BOB_MAX_ATLAS_CAPACITY) {
+        // size_t newCap = r->atlas_batch_capacity * 2;
+        // BOB_AtlasRenderBatch *temp = BOB_MALLOC(newCap * sizeof(BOB_AtlasRenderBatch));
+        // BOB_MEMCPY(temp, r->layer.atlas_batches, r->num_atlas_batches * sizeof(BOB_AtlasRenderBatch));
+        // BOB_FREE(r->layer.atlas_batches);
+        // r->layer.atlas_batches = temp;
+        // r->atlas_batch_capacity = newCap;
+        BOB_PRINT("ERROR: Exceeded Atlas capacity\n");
+        return UINT32_MAX;
     }
 
-    for(int i = 0; i < BOB_MAX_LAYERS; i++) {
-        BOB_GET_ATLAS_BATCH(r, r->num_atlas_batches).index_count = 0;
-        BOB_GET_ATLAS_BATCH(r, r->num_atlas_batches).vertex_count = 0;
-        BOB_GET_ATLAS_BATCH(r, r->num_atlas_batches).index_size = BOB_INIT_INDEX_CAPACITY;
-        BOB_GET_ATLAS_BATCH(r, r->num_atlas_batches).vertex_size = BOB_INIT_VERTEX_CAPACITY;
-        BOB_GET_ATLAS_BATCH(r, r->num_atlas_batches).index_data = NULL;
-        BOB_GET_ATLAS_BATCH(r, r->num_atlas_batches).vertex_data = NULL;
-        BOB_GET_ATLAS_BATCH(r, r->num_atlas_batches).a = ta;
-    }
+    BOB_GET_ATLAS_BATCH(r, r->num_atlas_batches).index_count = 0;
+    BOB_GET_ATLAS_BATCH(r, r->num_atlas_batches).vertex_count = 0;
+    BOB_GET_ATLAS_BATCH(r, r->num_atlas_batches).index_size = BOB_INIT_INDEX_CAPACITY;
+    BOB_GET_ATLAS_BATCH(r, r->num_atlas_batches).vertex_size = BOB_INIT_VERTEX_CAPACITY;
+    BOB_GET_ATLAS_BATCH(r, r->num_atlas_batches).index_data = NULL;
+    BOB_GET_ATLAS_BATCH(r, r->num_atlas_batches).vertex_data = NULL;
+    BOB_GET_ATLAS_BATCH(r, r->num_atlas_batches).a = ta;
 
     r->num_atlas_batches++;
 
@@ -274,7 +277,7 @@ uint32_t BOB_add_texture_atlas(BOB_Renderer *r, BOB_TextureAtlas *ta) {
 //Helper function to clip a quad
 uint8_t BOBi_clip_quad(BOB_Renderer *r, BOB_Quad *quad) {
     if(r->stack->size == 0) return 1; //No need to clip if no clip rects
-    BOB_Clip_Rect clip = BOB_peek_clip_rect(r->stack);
+    BOBi_Clip_Rect clip = BOB_peek_clip_rect(r->stack);
     if(clip.empty) return 0;
 
     if(clip.clip_horz) {
@@ -299,7 +302,7 @@ uint8_t BOBi_clip_quad(BOB_Renderer *r, BOB_Quad *quad) {
 
 //Helper functions to clip a line by implementing the Cohen-Sutherland algorithm
 //https://en.wikipedia.org/wiki/Cohen%E2%80%93Sutherland_algorithm
-uint8_t BOBi_line_outcode(BOB_Vector2* point, BOB_Clip_Rect clip) {
+uint8_t BOBi_line_outcode(BOB_Vector2* point, BOBi_Clip_Rect clip) {
     uint8_t code = 0;
 
     if(point->x < clip.left) code |= 1; //Left
@@ -313,7 +316,7 @@ uint8_t BOBi_line_outcode(BOB_Vector2* point, BOB_Clip_Rect clip) {
 
 uint8_t BOBi_clip_line(BOB_Renderer *r, BOB_Vector2 *start, BOB_Vector2* end) {
     if(r->stack->size == 0) return 1; //No need to clip if no clip rects
-    BOB_Clip_Rect clip = BOB_peek_clip_rect(r->stack);
+    BOBi_Clip_Rect clip = BOB_peek_clip_rect(r->stack);
     if(clip.empty) return 0;
 
     uint8_t code_s = BOBi_line_outcode(start, clip);
@@ -720,7 +723,7 @@ size_t BOBi_clip_edge(BOB_Vector2 *poly_points, size_t poly_size, BOBi_Clip_Edge
 
 size_t BOBi_clip_polygon(BOB_Renderer *r, BOB_Vector2 *poly_points, size_t poly_size) {
     if(r->stack->size == 0) return poly_size; //No need to clip if no clip rects
-    BOB_Clip_Rect clip = BOB_peek_clip_rect(r->stack);
+    BOBi_Clip_Rect clip = BOB_peek_clip_rect(r->stack);
     if(clip.empty) return 0;
 
     BOB_Vector2 clip_vertices[4] = {(BOB_Vector2){clip.left, clip.top}, (BOB_Vector2){clip.left, clip.bottom}, (BOB_Vector2){clip.right, clip.bottom}, (BOB_Vector2){clip.right, clip.top}};
@@ -990,64 +993,70 @@ void BOB_draw_unfilled_circle(BOB_Renderer *r, BOB_Vector2 centre, float radius,
 //Updates the current clipping rect by pushing the intersection of the new clipping region
 //with the old clipping regions to the front of the stack but maintains the clipping directions
 //specified in the original rect
-void BOB_start_clip(BOB_Renderer *r, BOB_Clip_Rect rect) {
-    BOB_Clip_Stack *stack = r->stack;
+void BOB_start_clip(BOB_Renderer *r, BOB_Quad rect, BOB_Clip_Dir dir) {
+    BOBi_Clip_Stack *stack = r->stack;
     if(stack->size >= stack->capacity) {
         size_t newCap = (stack->capacity == 0) ? 4 : stack->capacity * 2;
-        BOB_Clip_Rect* temp = BOB_MALLOC(sizeof(BOB_Clip_Rect) * newCap);
-        BOB_MEMCPY(temp, stack->elems, sizeof(BOB_Clip_Rect) * stack->capacity);
+        BOBi_Clip_Rect* temp = BOB_MALLOC(sizeof(BOBi_Clip_Rect) * newCap);
+        BOB_MEMCPY(temp, stack->elems, sizeof(BOBi_Clip_Rect) * stack->capacity);
         BOB_FREE(stack->elems);
 
         stack->elems = temp;
         stack->capacity = newCap;
     }
 
+    BOBi_Clip_Rect clip_rect = (BOBi_Clip_Rect) {
+        rect.x, rect.x+rect.w, rect.y, rect.y+rect.w,
+        (dir == BOB_CLIP_VERT || dir == BOB_CLIP_BOTH) ? 1 : 0,
+        (dir == BOB_CLIP_HORZ || dir == BOB_CLIP_BOTH) ? 1 : 0,
+        0
+    };
+
     //Getting the intersection of the old and current rect
     if(stack->size > 0) {
-        BOB_Clip_Rect old_inter = stack->elems[stack->size-1];
+        BOBi_Clip_Rect old_inter = stack->elems[stack->size-1];
         //Early return if the previous rect was empty
         if(old_inter.empty) {
-            rect.empty = 1;
-            stack->elems[stack->size++] = rect;
+            clip_rect.empty = 1;
+            stack->elems[stack->size++] = clip_rect;
             return;
         }
 
-        if(rect.clip_horz && old_inter.clip_horz) {
-            rect.left = (rect.left > old_inter.left) ? rect.left : old_inter.left;
-            rect.right = (rect.right < old_inter.right) ? rect.right : old_inter.right;
+        if(clip_rect.clip_horz && old_inter.clip_horz) {
+            clip_rect.left = (clip_rect.left > old_inter.left) ? clip_rect.left : old_inter.left;
+            clip_rect.right = (clip_rect.right < old_inter.right) ? clip_rect.right : old_inter.right;
         }
         else if(old_inter.clip_horz) {
-            rect.left = old_inter.left;
-            rect.right = old_inter.right;
+            clip_rect.left = old_inter.left;
+            clip_rect.right = old_inter.right;
         }
 
-        if(rect.clip_vert && old_inter.clip_vert) {
-            rect.top = (rect.top > old_inter.top) ? rect.top : old_inter.top;
-            rect.bottom = (rect.bottom < old_inter.bottom) ? rect.bottom : old_inter.bottom;
+        if(clip_rect.clip_vert && old_inter.clip_vert) {
+            clip_rect.top = (clip_rect.top > old_inter.top) ? clip_rect.top : old_inter.top;
+            clip_rect.bottom = (clip_rect.bottom < old_inter.bottom) ? clip_rect.bottom : old_inter.bottom;
         }
         else if(old_inter.clip_vert) {
-            rect.top = old_inter.top;
-            rect.bottom = old_inter.bottom;
+            clip_rect.top = old_inter.top;
+            clip_rect.bottom = old_inter.bottom;
         }
 
-        //Update the clipping directions
-        rect.clip_horz |= old_inter.clip_horz;
-        rect.clip_vert |= old_inter.clip_vert;
+        //Update the clipping diclip_rections
+        clip_rect.clip_horz |= old_inter.clip_horz;
+        clip_rect.clip_vert |= old_inter.clip_vert;
     }
 
-    //Check if the rect is empty
-    rect.empty = (rect.left >= rect.right || rect.top >= rect.bottom || (!rect.clip_horz && !rect.clip_vert)) ? 1 : 0;
+    //Check if the clip_rect is empty
+    clip_rect.empty = (clip_rect.left >= clip_rect.right || clip_rect.top >= clip_rect.bottom || (!clip_rect.clip_horz && !clip_rect.clip_vert)) ? 1 : 0;
 
-    stack->elems[stack->size++] = rect;
+    stack->elems[stack->size++] = clip_rect;
 }
 
 //Removes the first clipping intersection from the stack and returns its value
-BOB_Clip_Rect BOB_end_clip(BOB_Renderer *r) {
+void BOB_end_clip(BOB_Renderer *r) {
     BOB_ASSERT(r->stack->size > 0 && "Popping an empty stack");
 
-    BOB_Clip_Rect rect = r->stack->elems[r->stack->size-1];
+    BOBi_Clip_Rect rect = r->stack->elems[r->stack->size-1];
     r->stack->size--;
-    return rect;
 }
 
 uint8_t BOB_bitmap_font_init(BOB_Bitmap_Font *opts, uint32_t atls, uint32_t tpw, uint32_t tph, uint32_t cpw, uint32_t cph, uint32_t cpx, uint32_t cpy, uint32_t tbpx, uint32_t tbpy, BOB_Bitmap_Layout lyt, BOB_Bitmap_Layout_Desc desc) {

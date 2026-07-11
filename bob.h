@@ -31,9 +31,10 @@
 #define BOB_PRINT printf
 #endif //BOB_PRINT
 
-//TODO: Support Custom Shaders 
+//TODO: Support Custom Shaders
 //      Allow the user to define render passes
 //      Make it so that unfilled shapes don't have the full outline drawn when clipped
+//      Figure out what going to do when num user-specified textures exceeds GPU pipeline capacity
 //      Could make atlas/shader batches independent so when flushing only flush the one at capacity instead of all of them
 //      Proper bitmap font support
 //      Debug mode/Release mode building (turning asserts on and off)
@@ -41,6 +42,7 @@
 //      Add an arena to manage the total memory easily and get rid of BOB_MEMSET and BOB_MEMCPY
 //      since these should all take place within the arena
 //      Vulkan support
+//      Maybe draw call sorting internally rather than relying on the depth buffer?
 typedef float BOB_Mat4[4][4];
 
 typedef struct {
@@ -74,6 +76,7 @@ void BOB_pixelbuffer_free(BOB_PixelBuffer *pb);
 #define BOB_MAX_VERTEX_CAPACITY 1048576
 #define BOB_MAX_INDEX_CAPACITY 2097152
 #define BOB_MAX_TEX_CAPACITY 8
+#define BOB_MAX_ATLAS_CAPACITY 16
 
 typedef struct {
     float x;
@@ -130,6 +133,18 @@ typedef struct {
     size_t index_count;
 } BOB_AtlasRenderBatch;
 
+//Represents a single batch sent off in a draw call from a texture atlas
+typedef struct {
+    BOB_Render_Vertex *vertex_data;
+    uint32_t *index_data; //The index count (for ebo) for this renderer
+    size_t vertex_size;
+    size_t index_size;
+    size_t vertex_count;
+    size_t index_count;
+    uint32_t texture;
+    uint32_t shader;
+} BOB_RenderBatch;
+
 //Struct for renderering one off textures
 typedef struct {
     uint32_t texture;
@@ -141,10 +156,16 @@ typedef struct {
 
 typedef struct {
     BOB_DynamicTexture dynamic_textures[BOB_MAX_TEX_CAPACITY];
-    BOB_AtlasRenderBatch *atlas_batches;
+    BOB_AtlasRenderBatch atlas_batches[BOB_MAX_ATLAS_CAPACITY];
     size_t dynamic_texture_count;
     int earliest_atlas_used; //If negative, this layer is not used, otherwise is the index of the earliest atlas used
 } BOB_Render_Layer;
+
+typedef enum {
+    BOB_CLIP_HORZ,
+    BOB_CLIP_VERT,
+    BOB_CLIP_BOTH,
+} BOB_Clip_Dir;
 
 typedef struct {
     float left, right, top, bottom;
@@ -152,20 +173,20 @@ typedef struct {
     //that would not provide any tangible benefit as the space would still be used by this struct
     //due to the alignment of this struct being 4 bytes
     uint8_t clip_vert, clip_horz, empty;
-} BOB_Clip_Rect;
+} BOBi_Clip_Rect;
 
 typedef struct {
-    BOB_Clip_Rect *elems;
+    BOBi_Clip_Rect *elems;
     size_t size;
     size_t capacity;
-} BOB_Clip_Stack;
+} BOBi_Clip_Stack;
 
 #define INIT_STACK_CAPACITY 64
 
 //Pixel renderer that renders a single frame
 typedef struct {
     BOB_Render_Layer layer; //Layers of rendering
-    BOB_Clip_Stack *stack; //Stores the current clipping rect and the history
+    BOBi_Clip_Stack *stack; //Stores the current clipping rect and the history
     BOB_Mat4 projection; //projection matrix for this renderer
     uint32_t vao; //vao this renderer uses
     uint32_t vbo; //vbo this renderer uses
@@ -183,11 +204,9 @@ typedef struct {
 //Updates the current clipping rect by pushing the intersection of the new clipping region
 //with the old clipping regions to the front of the stack but maintains the clipping directions
 //specified in the original rect
-void BOB_start_clip(BOB_Renderer *r, BOB_Clip_Rect rect);
+void BOB_start_clip(BOB_Renderer *r, BOB_Quad rect, BOB_Clip_Dir dir);
 //Removes the first clipping intersection from the stack and returns its value
-BOB_Clip_Rect BOB_end_clip(BOB_Renderer *r);
-//Return the value of the element at the top of the stack without popping it
-#define BOB_peek_clip_rect(stack) (((stack)->size > 0) ? (stack)->elems[(stack)->size-1] : (BOB_Clip_Rect){0})
+void BOB_end_clip(BOB_Renderer *r);
 
 //Initialises the pixel renderer
 BOB_Renderer BOB_renderer_init(size_t width, size_t height);
