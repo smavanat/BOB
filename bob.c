@@ -2,9 +2,16 @@
 #include <math.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 
 //Return the value of the element at the top of the stack without popping it
 #define BOB_peek_clip_rect(stack) (((stack)->size > 0) ? (stack)->elems[(stack)->size-1] : (BOBi_Clip_Rect){0})
+#define BOBi_GET_ATLAS_BATCH(r, i) (r)->layer.atlas_batches[i]
+static BOB_RenderBatch *batch_table[BOB_MAX_TEX_CAPACITY][16];
+static BOB_TextureAtlas atlas_table[BOB_MAX_ATLAS_CAPACITY];
+static uint32_t texture_table[BOB_MAX_TEX_CAPACITY];
+static size_t num_atlases = 0;
+static size_t num_textures = 0;
 
 //Calculates the projection matrix
 void BOB_ortho(float left, float right, float bottom, float top, float nearZ, float farZ, BOB_Mat4 dest) {
@@ -14,15 +21,15 @@ void BOB_ortho(float left, float right, float bottom, float top, float nearZ, fl
         }
     }
 
-    float rl = 1.0 / (right  - left);
-    float tb = 1.0 / (top    - bottom);
+    float rl = 1.0 / (right - left);
+    float tb = 1.0 / (top - bottom);
     float mfn =-1.0 / (farZ - nearZ);
 
     dest[0][0] = 2.0 * rl;
     dest[1][1] = 2.0 * tb;
     dest[2][2] = 2.0 * mfn;
-    dest[3][0] =-(right  + left) * rl;
-    dest[3][1] =-(top    + bottom) * tb;
+    dest[3][0] =-(right + left) * rl;
+    dest[3][1] =-(top + bottom) * tb;
     dest[3][2] = (farZ + nearZ) * mfn;
     dest[3][3] = 1.0;
 }
@@ -126,12 +133,10 @@ BOB_Renderer BOB_renderer_init(size_t width, size_t height) {
     r.layer.dynamic_texture_count = 0;
 
     //Make the special debug atlas as the first one
-    BOB_TextureAtlas *ta = BOB_MALLOC(sizeof(BOB_TextureAtlas));
-    *ta = BOB_atlas_init_blank(1, 1, 4);
+    // BOB_TextureAtlas *ta = BOB_MALLOC(sizeof(BOB_TextureAtlas));
+    BOB_Atlas_Handle ta = BOB_atlas_init(1, 1, 4);
     uint8_t white[4] = {255, 255, 255, 255};
-    BOB_atlas_pack(ta, white, 1, 1, 4);
-
-    BOB_add_texture_atlas(&r, ta);
+    BOB_atlas_pack(ta, white, 1, 1);
 
     //Initialise the stack of clip rects
     r.stack = BOB_MALLOC(sizeof(BOBi_Clip_Stack));
@@ -148,11 +153,11 @@ void BOB_renderer_free(BOB_Renderer *r) {
     glDeleteVertexArrays(1, &r->vao);
     glDeleteProgram(r->shader);
     for(int j = 0; j < r->num_atlas_batches; j++) {
-        BOB_FREE(BOB_GET_ATLAS_BATCH(r, j).vertex_data);
-        BOB_FREE(BOB_GET_ATLAS_BATCH(r, j).index_data);
-        BOB_atlas_free(BOB_GET_ATLAS_BATCH(r, j).a);
+        BOB_FREE(BOBi_GET_ATLAS_BATCH(r, j).vertex_data);
+        BOB_FREE(BOBi_GET_ATLAS_BATCH(r, j).index_data);
+        // BOB_atlas_free(BOBi_GET_ATLAS_BATCH(r, j).a);
     }
-    BOB_FREE(BOB_GET_ATLAS_BATCH(r, 0).a);
+    // BOB_FREE(BOBi_GET_ATLAS_BATCH(r, 0).a);
     // if(r->layer.atlas_batches) BOB_FREE(r->layer.atlas_batches);
 
     BOB_FREE(r->stack->elems);
@@ -164,8 +169,8 @@ void BOB_renderer_free(BOB_Renderer *r) {
 //Sets up the variables for renderering to the pbo from the BOB_Renderer
 void BOB_renderer_begin(BOB_Renderer *r) {
     for(int j = 0; j < r->num_atlas_batches; j++) {
-        BOB_GET_ATLAS_BATCH(r, j).index_count = 0;
-        BOB_GET_ATLAS_BATCH(r, j).vertex_count = 0;
+        BOBi_GET_ATLAS_BATCH(r, j).index_count = 0;
+        BOBi_GET_ATLAS_BATCH(r, j).vertex_count = 0;
     }
     r->layer.dynamic_texture_count = 0;
     r->layer.earliest_atlas_used = -1;
@@ -207,71 +212,46 @@ void BOB_renderer_end(BOB_Renderer *r) {
 
     if(r->layer.earliest_atlas_used < 0) return;
     for(int j = r->layer.earliest_atlas_used; j < r->num_atlas_batches; j++) {
-        if(BOB_GET_ATLAS_BATCH(r, j).index_count > 0) {
-            glBufferSubData(GL_ARRAY_BUFFER, 0, BOB_GET_ATLAS_BATCH(r, j).vertex_count * sizeof(BOB_Render_Vertex), BOB_GET_ATLAS_BATCH(r, j).vertex_data); //Copies the data from renderer's triangle data into the vbo
-            glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, BOB_GET_ATLAS_BATCH(r, j).index_count * sizeof(uint32_t), BOB_GET_ATLAS_BATCH(r, j).index_data); //Copies the quad data into the vbo
+        if(BOBi_GET_ATLAS_BATCH(r, j).index_count > 0) {
+            glBufferSubData(GL_ARRAY_BUFFER, 0, BOBi_GET_ATLAS_BATCH(r, j).vertex_count * sizeof(BOB_Render_Vertex), BOBi_GET_ATLAS_BATCH(r, j).vertex_data); //Copies the data from renderer's triangle data into the vbo
+            glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, BOBi_GET_ATLAS_BATCH(r, j).index_count * sizeof(uint32_t), BOBi_GET_ATLAS_BATCH(r, j).index_data); //Copies the quad data into the vbo
 
             //Bind the atlas texture
             glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, BOB_GET_ATLAS_BATCH(r, j).a->texture);
+            glBindTexture(GL_TEXTURE_2D, BOBi_GET_ATLAS_BATCH(r, j).a->texture);
             glUniform1i(glGetUniformLocation(r->shader, "screenTexture"), 0);
 
-            glDrawElements(GL_TRIANGLES, BOB_GET_ATLAS_BATCH(r, j).index_count, GL_UNSIGNED_INT, 0); //Make the draw call
+            glDrawElements(GL_TRIANGLES, BOBi_GET_ATLAS_BATCH(r, j).index_count, GL_UNSIGNED_INT, 0); //Make the draw call
         }
     }
 }
 
 void BOBi_flush(BOB_Renderer *r, uint32_t atlas, uint32_t num_vertices, uint32_t num_indices) {
-    if(BOB_GET_ATLAS_BATCH(r, atlas).index_count + num_indices >= BOB_MAX_INDEX_CAPACITY || 
-      BOB_GET_ATLAS_BATCH(r, atlas).vertex_count + num_vertices >= BOB_MAX_VERTEX_CAPACITY) {
+    if(BOBi_GET_ATLAS_BATCH(r, atlas).index_count + num_indices >= BOB_MAX_INDEX_CAPACITY || 
+      BOBi_GET_ATLAS_BATCH(r, atlas).vertex_count + num_vertices >= BOB_MAX_VERTEX_CAPACITY) {
         BOB_renderer_end(r);
         BOB_renderer_begin(r);
         return;
     }
 
-    if(BOB_GET_ATLAS_BATCH(r, atlas).index_count + num_indices >= BOB_GET_ATLAS_BATCH(r, atlas).index_size) {
-        size_t new_cap = BOB_GET_ATLAS_BATCH(r, atlas).index_size * 2;
-        if(new_cap < BOB_GET_ATLAS_BATCH(r, atlas).index_count + num_indices) new_cap = BOB_GET_ATLAS_BATCH(r, atlas).index_count + num_indices;
+    if(BOBi_GET_ATLAS_BATCH(r, atlas).index_count + num_indices >= BOBi_GET_ATLAS_BATCH(r, atlas).index_size) {
+        size_t new_cap = BOBi_GET_ATLAS_BATCH(r, atlas).index_size * 2;
+        if(new_cap < BOBi_GET_ATLAS_BATCH(r, atlas).index_count + num_indices) new_cap = BOBi_GET_ATLAS_BATCH(r, atlas).index_count + num_indices;
         uint32_t *temp = calloc(new_cap, sizeof(uint32_t));
-        BOB_MEMCPY(temp, BOB_GET_ATLAS_BATCH(r, atlas).index_data, sizeof(uint32_t) * BOB_GET_ATLAS_BATCH(r, atlas).index_size);
-        BOB_FREE(BOB_GET_ATLAS_BATCH(r, atlas).index_data);
-        BOB_GET_ATLAS_BATCH(r, atlas).index_data = temp;
-        BOB_GET_ATLAS_BATCH(r, atlas).index_size = new_cap;
+        BOB_MEMCPY(temp, BOBi_GET_ATLAS_BATCH(r, atlas).index_data, sizeof(uint32_t) * BOBi_GET_ATLAS_BATCH(r, atlas).index_size);
+        BOB_FREE(BOBi_GET_ATLAS_BATCH(r, atlas).index_data);
+        BOBi_GET_ATLAS_BATCH(r, atlas).index_data = temp;
+        BOBi_GET_ATLAS_BATCH(r, atlas).index_size = new_cap;
     }
-    if(BOB_GET_ATLAS_BATCH(r, atlas).vertex_count + num_vertices >= BOB_GET_ATLAS_BATCH(r, atlas).vertex_size) {
-        size_t new_cap = BOB_GET_ATLAS_BATCH(r, atlas).vertex_size * 2;
-        if(new_cap < BOB_GET_ATLAS_BATCH(r, atlas).vertex_count + num_vertices) new_cap = BOB_GET_ATLAS_BATCH(r, atlas).vertex_count + num_vertices;
+    if(BOBi_GET_ATLAS_BATCH(r, atlas).vertex_count + num_vertices >= BOBi_GET_ATLAS_BATCH(r, atlas).vertex_size) {
+        size_t new_cap = BOBi_GET_ATLAS_BATCH(r, atlas).vertex_size * 2;
+        if(new_cap < BOBi_GET_ATLAS_BATCH(r, atlas).vertex_count + num_vertices) new_cap = BOBi_GET_ATLAS_BATCH(r, atlas).vertex_count + num_vertices;
         BOB_Render_Vertex *temp = calloc(new_cap, sizeof(BOB_Render_Vertex));
-        BOB_MEMCPY(temp, BOB_GET_ATLAS_BATCH(r, atlas).vertex_data, sizeof(BOB_Render_Vertex) * BOB_GET_ATLAS_BATCH(r, atlas).vertex_size);
-        BOB_FREE(BOB_GET_ATLAS_BATCH(r, atlas).vertex_data);
-        BOB_GET_ATLAS_BATCH(r, atlas).vertex_data = temp;
-        BOB_GET_ATLAS_BATCH(r, atlas).vertex_size = new_cap;
+        BOB_MEMCPY(temp, BOBi_GET_ATLAS_BATCH(r, atlas).vertex_data, sizeof(BOB_Render_Vertex) * BOBi_GET_ATLAS_BATCH(r, atlas).vertex_size);
+        BOB_FREE(BOBi_GET_ATLAS_BATCH(r, atlas).vertex_data);
+        BOBi_GET_ATLAS_BATCH(r, atlas).vertex_data = temp;
+        BOBi_GET_ATLAS_BATCH(r, atlas).vertex_size = new_cap;
     }
-}
-
-uint32_t BOB_add_texture_atlas(BOB_Renderer *r, BOB_TextureAtlas *ta) {
-    if(r->num_atlas_batches >= BOB_MAX_ATLAS_CAPACITY) {
-        // size_t newCap = r->atlas_batch_capacity * 2;
-        // BOB_AtlasRenderBatch *temp = BOB_MALLOC(newCap * sizeof(BOB_AtlasRenderBatch));
-        // BOB_MEMCPY(temp, r->layer.atlas_batches, r->num_atlas_batches * sizeof(BOB_AtlasRenderBatch));
-        // BOB_FREE(r->layer.atlas_batches);
-        // r->layer.atlas_batches = temp;
-        // r->atlas_batch_capacity = newCap;
-        BOB_PRINT("ERROR: Exceeded Atlas capacity\n");
-        return UINT32_MAX;
-    }
-
-    BOB_GET_ATLAS_BATCH(r, r->num_atlas_batches).index_count = 0;
-    BOB_GET_ATLAS_BATCH(r, r->num_atlas_batches).vertex_count = 0;
-    BOB_GET_ATLAS_BATCH(r, r->num_atlas_batches).index_size = BOB_INIT_INDEX_CAPACITY;
-    BOB_GET_ATLAS_BATCH(r, r->num_atlas_batches).vertex_size = BOB_INIT_VERTEX_CAPACITY;
-    BOB_GET_ATLAS_BATCH(r, r->num_atlas_batches).index_data = NULL;
-    BOB_GET_ATLAS_BATCH(r, r->num_atlas_batches).vertex_data = NULL;
-    BOB_GET_ATLAS_BATCH(r, r->num_atlas_batches).a = ta;
-
-    r->num_atlas_batches++;
-
-    return r->num_atlas_batches - 1;
 }
 
 //Helper function to clip a quad
@@ -371,15 +351,116 @@ uint8_t BOBi_clip_line(BOB_Renderer *r, BOB_Vector2 *start, BOB_Vector2* end) {
     }
 }
 
+uint32_t BOBi_convert_format(BOB_Format format) {
+    switch (format) {
+        case BOB_RED: return GL_RED;
+        case BOB_RG: return GL_RG;
+        case BOB_RGB: return GL_RGB;
+        case BOB_RGBA: return GL_RGBA;
+    }
+}
+
+//Creates a new texture on the gpu
+BOB_Texture_Handle BOB_create_texture(uint32_t width, uint32_t height, uint8_t *data, BOB_Format format) {
+    if(num_textures >= BOB_MAX_TEX_CAPACITY) {
+        BOB_PRINT("ERROR: Exceeded Texture Capacity");
+        return UINT32_MAX;
+    }
+
+    glGenTextures(1, &texture_table[num_textures]);
+    glBindTexture(GL_TEXTURE_2D, texture_table[num_textures]);
+    // set the texture wrapping/filtering options (on the currently bound texture object)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, BOBi_convert_format(format), GL_UNSIGNED_BYTE, data);
+
+    return num_textures++;
+}
+
+void BOB_remove_texture(BOB_Texture_Handle tex) {
+    glDeleteTextures(1, &texture_table[tex]);
+}
+
+void BOB_draw_texture(BOB_Renderer *r, BOB_Texture_Handle texture, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, float depth) {
+    if(!BOBi_clip_quad(r, &dimensions)) return;
+
+    //TODO: FIX
+
+    // if(r->layer.dynamic_texture_count >= BOB_MAX_TEX_CAPACITY) {
+    //     BOB_renderer_end(r);
+    //     BOB_renderer_begin(r);
+    // }
+    //
+    // r->layer.dynamic_textures[r->layer.dynamic_texture_count++] = (BOB_DynamicTexture){texture, depth, dimensions, uv_dimensions, colour};
+}
+
+//Initialises a texture atlas
+//Optionally packs a single white pixel at the start of the texture atlas to render a solid quad
+BOB_Atlas_Handle BOB_atlas_init(uint32_t width, uint32_t height, BOB_Format format) {
+    if(num_atlases >= BOB_MAX_ATLAS_CAPACITY) {
+        BOB_PRINT("ERROR: Exceeded Atlas Capacity");
+        return UINT32_MAX;
+    }
+
+    atlas_table[num_atlases].width = width;
+    atlas_table[num_atlases].height = height;
+    atlas_table[num_atlases].format = format;
+    atlas_table[num_atlases].texture = BOB_create_texture(width, height, NULL, format);
+
+    return num_atlases++;
+}
+
+void BOB_atlas_free(BOB_Atlas_Handle a) {
+    BOB_remove_texture(atlas_table[a].texture);
+}
+
+//Returns the UV rect where the texture was placed
+//pixel_size must be either 3 or 4. If it does not match the pixel size of the atlas,
+//an empty quad will returned as the pixel formats are different
+BOB_Quad BOB_atlas_pack(BOB_Atlas_Handle a, uint8_t* pixels, size_t w, size_t h) {
+    if(atlas_table[a].cursor_y + h > atlas_table[a].height) return (BOB_Quad){0}; //Early exit if we can't fit the texture in
+
+    //Move to next row if this texture doesn't fit
+    if(atlas_table[a].cursor_x + w > atlas_table[a].width) {
+       atlas_table[a].cursor_y += atlas_table[a].row_height;
+       atlas_table[a].cursor_x = 0;
+       atlas_table[a].row_height = 0;
+    }
+
+    uint32_t tex = texture_table[atlas_table[a].texture];
+    GLenum gl_format = BOBi_convert_format(atlas_table[a].format);
+
+    //Upload the subregion
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, atlas_table[a].cursor_x, atlas_table[a].cursor_y, w, h, gl_format, GL_UNSIGNED_BYTE, pixels);
+
+    //Compute normalised UVs
+    BOB_Quad uv = {
+        (float)atlas_table[a].cursor_x / atlas_table[a].width,
+        (float)atlas_table[a].cursor_y / atlas_table[a].height,
+        (float) w / atlas_table[a].width,
+        (float) h / atlas_table[a].height
+    };
+
+    atlas_table[a].cursor_x += w;
+    if(h > atlas_table[a].row_height) atlas_table[a].row_height = h;
+
+    return uv;
+}
+
 //Draws a texture quad
-void BOB_draw_atlas_quad(BOB_Renderer *r, BOB_Quad screen_quad, BOB_Quad tex_sub_rect, BOB_Vector4 colour, uint32_t atlas, float depth) {
+void BOB_draw_atlas_quad(BOB_Renderer *r, BOB_Quad screen_quad, BOB_Quad tex_sub_rect, BOB_Vector4 colour, BOB_Atlas_Handle atlas, float depth) {
     if(!BOBi_clip_quad(r, &screen_quad)) return;
 
     //If we have overreached our current rendering limit or we cannot store any more textures, end the current draw call and start a new one
     BOBi_flush(r, atlas, BOB_VERTICIES_PER_QUAD, BOB_INDECIES_PER_QUAD);
 
     //Update the vertex count and vertex data stored in the renderer
-    uint32_t base_index = BOB_GET_ATLAS_BATCH(r, atlas).vertex_count;
+    uint32_t base_index = BOBi_GET_ATLAS_BATCH(r, atlas).vertex_count;
 
     BOB_Vector3 coords[4] = {
         {screen_quad.x, screen_quad.y, depth},
@@ -388,8 +469,8 @@ void BOB_draw_atlas_quad(BOB_Renderer *r, BOB_Quad screen_quad, BOB_Quad tex_sub
         {screen_quad.x + screen_quad.w , screen_quad.y, depth}
     };
 
-    float width = BOB_GET_ATLAS_BATCH(r, atlas).a->width;
-    float height = BOB_GET_ATLAS_BATCH(r, atlas).a->height;
+    float width = BOBi_GET_ATLAS_BATCH(r, atlas).a->width;
+    float height = BOBi_GET_ATLAS_BATCH(r, atlas).a->height;
 
     BOB_Vector2 uv[4] = {
         {tex_sub_rect.x / width, tex_sub_rect.y / height},
@@ -403,70 +484,46 @@ void BOB_draw_atlas_quad(BOB_Renderer *r, BOB_Quad screen_quad, BOB_Quad tex_sub
         r->layer.earliest_atlas_used = atlas;
 
     //Lazy allocation of memory
-    if(BOB_GET_ATLAS_BATCH(r, atlas).vertex_data == NULL || BOB_GET_ATLAS_BATCH(r, atlas).index_data == NULL) {
-        BOB_GET_ATLAS_BATCH(r, atlas).index_data = BOB_MALLOC(sizeof(uint32_t) * BOB_INIT_INDEX_CAPACITY);
-        BOB_GET_ATLAS_BATCH(r, atlas).vertex_data = BOB_MALLOC(sizeof(BOB_Render_Vertex) * BOB_INIT_VERTEX_CAPACITY);
+    if(BOBi_GET_ATLAS_BATCH(r, atlas).vertex_data == NULL || BOBi_GET_ATLAS_BATCH(r, atlas).index_data == NULL) {
+        BOBi_GET_ATLAS_BATCH(r, atlas).index_data = BOB_MALLOC(sizeof(uint32_t) * BOB_INIT_INDEX_CAPACITY);
+        BOBi_GET_ATLAS_BATCH(r, atlas).vertex_data = BOB_MALLOC(sizeof(BOB_Render_Vertex) * BOB_INIT_VERTEX_CAPACITY);
     }
 
     for(int i = 0; i < BOB_VERTICIES_PER_QUAD; i++) {
-        BOB_GET_ATLAS_BATCH(r, atlas).vertex_data[BOB_GET_ATLAS_BATCH(r, atlas).vertex_count++] = (BOB_Render_Vertex){colour, coords[i], uv[i]};
+        BOBi_GET_ATLAS_BATCH(r, atlas).vertex_data[BOBi_GET_ATLAS_BATCH(r, atlas).vertex_count++] = (BOB_Render_Vertex){colour, coords[i], uv[i]};
     }
 
     //Need to also add ebo data so we can remove overlapping vertices
     //First triangle
-    BOB_GET_ATLAS_BATCH(r, atlas).index_data[BOB_GET_ATLAS_BATCH(r, atlas).index_count++] = base_index;
-    BOB_GET_ATLAS_BATCH(r, atlas).index_data[BOB_GET_ATLAS_BATCH(r, atlas).index_count++] = base_index + 1;
-    BOB_GET_ATLAS_BATCH(r, atlas).index_data[BOB_GET_ATLAS_BATCH(r, atlas).index_count++] = base_index + 3;
+    BOBi_GET_ATLAS_BATCH(r, atlas).index_data[BOBi_GET_ATLAS_BATCH(r, atlas).index_count++] = base_index;
+    BOBi_GET_ATLAS_BATCH(r, atlas).index_data[BOBi_GET_ATLAS_BATCH(r, atlas).index_count++] = base_index + 1;
+    BOBi_GET_ATLAS_BATCH(r, atlas).index_data[BOBi_GET_ATLAS_BATCH(r, atlas).index_count++] = base_index + 3;
 
     //Second triangle
-    BOB_GET_ATLAS_BATCH(r, atlas).index_data[BOB_GET_ATLAS_BATCH(r, atlas).index_count++] = base_index + 1;
-    BOB_GET_ATLAS_BATCH(r, atlas).index_data[BOB_GET_ATLAS_BATCH(r, atlas).index_count++] = base_index + 2;
-    BOB_GET_ATLAS_BATCH(r, atlas).index_data[BOB_GET_ATLAS_BATCH(r, atlas).index_count++] = base_index + 3;
-}
-
-void BOB_draw_texture(BOB_Renderer *r, uint32_t texture, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, float depth) {
-    if(!BOBi_clip_quad(r, &dimensions)) return;
-
-    if(r->layer.dynamic_texture_count >= BOB_MAX_TEX_CAPACITY) {
-        BOB_renderer_end(r);
-        BOB_renderer_begin(r);
-    }
-
-    r->layer.dynamic_textures[r->layer.dynamic_texture_count++] = (BOB_DynamicTexture){texture, depth, dimensions, uv_dimensions, colour};
-}
-
-void BOB_draw_pixel_buffer(BOB_Renderer *r, BOB_PixelBuffer *pb, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, float depth) {
-    if(!BOBi_clip_quad(r, &dimensions)) return;
-
-    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pb->pbo);
-    glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
-    glBindTexture(GL_TEXTURE_2D, pb->pixel_tex);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, pb->width, pb->height, GL_RGB, GL_UNSIGNED_BYTE, 0);
-    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
-
-    BOB_draw_texture(r, pb->pixel_tex, dimensions, uv_dimensions, colour, depth);
+    BOBi_GET_ATLAS_BATCH(r, atlas).index_data[BOBi_GET_ATLAS_BATCH(r, atlas).index_count++] = base_index + 1;
+    BOBi_GET_ATLAS_BATCH(r, atlas).index_data[BOBi_GET_ATLAS_BATCH(r, atlas).index_count++] = base_index + 2;
+    BOBi_GET_ATLAS_BATCH(r, atlas).index_data[BOBi_GET_ATLAS_BATCH(r, atlas).index_count++] = base_index + 3;
 }
 
 //Creates a pixel buffer to hold the pixels representing
 //a texture of size width * height
 //Pixel size should be either 3 or 4 (rgb/rgba)
-BOB_PixelBuffer BOB_pixelbuffer_init(size_t width, size_t height, uint8_t pixel_size) {
-    //TODO: Find some way to check the pixel formats properly
-    if(pixel_size != 3 && pixel_size != 4) {
-        BOB_PRINT("Invalid pixel size\n");
-        return (BOB_PixelBuffer){0};
-    }
-
+BOB_PixelBuffer BOB_pixelbuffer_init(size_t width, size_t height, BOB_Format format) {
     BOB_PixelBuffer pb = {0};
     pb.width = width;
     pb.height = height;
 
     //Setting up the texture for the pixel simulations:
-    glGenTextures(1, &pb.pixel_tex); //Only use one texture for the pixels that we just write to. Could switch to two and swap them out (like framebuffers)
-    glBindTexture(GL_TEXTURE_2D, pb.pixel_tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, pb.width, pb.height, 0, (pixel_size == 3) ? GL_RGB : GL_RGBA, GL_UNSIGNED_BYTE, NULL); //Setting it to use rgba colours
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    pb.pixel_tex = BOB_create_texture(width, height, NULL, format);
+
+    //Getting the number of bytes used to store pixel data
+    uint8_t pixel_size;
+    switch (format) {
+        case BOB_RED: pixel_size = 1;
+        case BOB_RG: pixel_size = 2;
+        case BOB_RGB: pixel_size = 3;
+        case BOB_RGBA: pixel_size = 4;
+    }
 
     pb.buf_sz = width * height * pixel_size;
 
@@ -486,7 +543,7 @@ BOB_PixelBuffer BOB_pixelbuffer_init(size_t width, size_t height, uint8_t pixel_
 //Frees the data used by a pixel buffer
 void BOB_pixelbuffer_free(BOB_PixelBuffer *pb) {
     glDeleteBuffers(1, &pb->pbo);
-    glDeleteTextures(1, &pb->pixel_tex);
+    BOB_remove_texture(pb->pixel_tex);
 }
 
 //Draws the entire frame directly on the screen by copying its entire contents into the renderer's pixel buffer
@@ -504,70 +561,16 @@ void BOB_pixelbuffer_updload_data(BOB_PixelBuffer *pb, uint8_t *data) {
     glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
 }
 
-//Initialises a texture atlas
-//Optionally packs a single white pixel at the start of the texture atlas to render a solid quad
-BOB_TextureAtlas BOB_atlas_init(uint32_t width, uint32_t height, uint32_t texture, uint8_t pixel_size) {
-    BOB_TextureAtlas a = {0};
-    if(pixel_size != 3 && pixel_size != 4) return a;
-    a.width = width;
-    a.height = height;
-    a.pixel_size = pixel_size;
-    a.texture = texture;
+void BOB_draw_pixel_buffer(BOB_Renderer *r, BOB_PixelBuffer *pb, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, float depth) {
+    if(!BOBi_clip_quad(r, &dimensions)) return;
 
-    return a;
-}
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pb->pbo);
+    glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
+    glBindTexture(GL_TEXTURE_2D, pb->pixel_tex);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, pb->width, pb->height, GL_RGB, GL_UNSIGNED_BYTE, 0);
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
 
-BOB_TextureAtlas BOB_atlas_init_blank(uint32_t width, uint32_t height, uint8_t pixel_size) {
-    BOB_TextureAtlas a = {0};
-    if(pixel_size != 3 && pixel_size != 4) return a;
-    a.width = width;
-    a.height = height;
-    a.pixel_size = pixel_size;
-
-    glGenTextures(1, &a.texture);
-    glBindTexture(GL_TEXTURE_2D, a.texture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, (a.pixel_size == 4) ? GL_RGBA : GL_RGB, GL_UNSIGNED_BYTE, 0);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-
-    return a;
-}
-
-void BOB_atlas_free(BOB_TextureAtlas *a) {
-    glDeleteTextures(1, &a->texture);
-}
-
-//Returns the UV rect where the texture was placed
-//pixel_size must be either 3 or 4. If it does not match the pixel size of the atlas,
-//an empty quad will returned as the pixel formats are different
-BOB_Quad BOB_atlas_pack(BOB_TextureAtlas *a, uint8_t* pixels, size_t w, size_t h, uint8_t pixel_size) {
-    //If the atlas' pixel format has not been set, set it to the one passed in
-    if(a->pixel_size == 0) a->pixel_size = pixel_size;
-    else if(a->pixel_size != pixel_size) return (BOB_Quad){0}; //Otherwise there is a mismatch and return an empty quad
-
-    //Move to next row if this texture doesn't fit
-    if(a->cursor_x + w > a->width) {
-        a->cursor_y += a->row_height;
-        a->cursor_x = 0;
-        a->row_height = 0;
-    }
-
-    //Upload the subregion
-    glBindTexture(GL_TEXTURE_2D, a->texture);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, a->cursor_x, a->cursor_y, w, h, (a->pixel_size == 4) ? GL_RGBA : GL_RGB, GL_UNSIGNED_BYTE, pixels);
-
-    //Compute normalised UVs
-    BOB_Quad uv = {
-        (float)a->cursor_x / a->width,
-        (float)a->cursor_y / a->height,
-        (float) w / a->width,
-        (float) h / a->height
-    };
-
-    a->cursor_x += w;
-    if(h > a->row_height) a->row_height = h;
-
-    return uv;
+    BOB_draw_texture(r, pb->pixel_tex, dimensions, uv_dimensions, colour, depth);
 }
 
 //Draws a mesh of triangles
@@ -575,24 +578,24 @@ void BOBi_draw_mesh(BOB_Renderer *r, BOB_Vector3 *vertices, size_t vertex_count,
     BOBi_flush(r, 0, vertex_count, index_count);
 
     //Update the vertex count and vertex data stored in the renderer
-    uint32_t base_index = BOB_GET_ATLAS_BATCH(r, 0).vertex_count;
+    uint32_t base_index = BOBi_GET_ATLAS_BATCH(r, 0).vertex_count;
 
     //Update the earliest atlas used
     if(r->layer.earliest_atlas_used != 0)
         r->layer.earliest_atlas_used = 0;
 
     //Lazy allocation of memory
-    if(BOB_GET_ATLAS_BATCH(r, 0).vertex_data == NULL || BOB_GET_ATLAS_BATCH(r, 0).index_data == NULL) {
-        BOB_GET_ATLAS_BATCH(r, 0).index_data = BOB_MALLOC(sizeof(uint32_t) * BOB_INIT_INDEX_CAPACITY);
-        BOB_GET_ATLAS_BATCH(r, 0).vertex_data = BOB_MALLOC(sizeof(BOB_Render_Vertex) * BOB_INIT_VERTEX_CAPACITY);
+    if(BOBi_GET_ATLAS_BATCH(r, 0).vertex_data == NULL || BOBi_GET_ATLAS_BATCH(r, 0).index_data == NULL) {
+        BOBi_GET_ATLAS_BATCH(r, 0).index_data = BOB_MALLOC(sizeof(uint32_t) * BOB_INIT_INDEX_CAPACITY);
+        BOBi_GET_ATLAS_BATCH(r, 0).vertex_data = BOB_MALLOC(sizeof(BOB_Render_Vertex) * BOB_INIT_VERTEX_CAPACITY);
     }
 
     for(size_t i = 0; i < vertex_count; i++) {
-        BOB_GET_ATLAS_BATCH(r, 0).vertex_data[BOB_GET_ATLAS_BATCH(r, 0).vertex_count++] = (BOB_Render_Vertex){colour, vertices[i]};
+        BOBi_GET_ATLAS_BATCH(r, 0).vertex_data[BOBi_GET_ATLAS_BATCH(r, 0).vertex_count++] = (BOB_Render_Vertex){colour, vertices[i]};
     }
 
     for(size_t i = 0; i < index_count; i++) {
-        BOB_GET_ATLAS_BATCH(r, 0).index_data[BOB_GET_ATLAS_BATCH(r, 0).index_count++] = base_index + indices[i];
+        BOBi_GET_ATLAS_BATCH(r, 0).index_data[BOBi_GET_ATLAS_BATCH(r, 0).index_count++] = base_index + indices[i];
     }
 }
 
