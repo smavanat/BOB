@@ -20,10 +20,10 @@ static BOB_Texture_Handle default_tex;
 static BOB_Material_Handle default_mat;
 
 //Calculates the projection matrix
-void BOB_ortho(float left, float right, float bottom, float top, float nearZ, float farZ, BOB_Mat4 dest) {
+void BOB_ortho(float left, float right, float bottom, float top, float nearZ, float farZ, BOB_Mat4 *dest) {
     for(int i = 0; i < 4; i++) {
         for(int j = 0; j < 4; j++) {
-            dest[i][j] = 0;
+            dest->m[i][j] = 0;
         }
     }
 
@@ -31,20 +31,20 @@ void BOB_ortho(float left, float right, float bottom, float top, float nearZ, fl
     float tb = 1.0 / (top - bottom);
     float mfn =-1.0 / (farZ - nearZ);
 
-    dest[0][0] = 2.0 * rl;
-    dest[1][1] = 2.0 * tb;
-    dest[2][2] = 2.0 * mfn;
-    dest[3][0] =-(right + left) * rl;
-    dest[3][1] =-(top + bottom) * tb;
-    dest[3][2] = (farZ + nearZ) * mfn;
-    dest[3][3] = 1.0;
+    dest->m[0][0] = 2.0 * rl;
+    dest->m[1][1] = 2.0 * tb;
+    dest->m[2][2] = 2.0 * mfn;
+    dest->m[3][0] =-(right + left) * rl;
+    dest->m[3][1] =-(top + bottom) * tb;
+    dest->m[3][2] = (farZ + nearZ) * mfn;
+    dest->m[3][3] = 1.0;
 }
 
 //Shaders for this program are simple enough that we can just encode them as strings
 //to avoid annoying file loading/reading every startup
 const char *vertex_shader = "#version 330 core\n"
-                            "layout (location = 0) in vec3 aPos;\n"
-                            "layout (location = 1) in vec4 aColor;\n"
+                            "layout (location = 0) in vec4 aColor;\n"
+                            "layout (location = 1) in vec3 aPos;\n"
                             "layout (location = 2) in vec2 aTexCoord;\n"
                             "uniform mat4 uProjection;\n"
                             "out vec4 ourColor;\n"
@@ -65,7 +65,9 @@ const char *fragment_shader = "#version 330 core\n"
 
 void BOB_init() {
     default_tex = BOB_create_texture(1, 1, (uint8_t[4]){255, 255, 255, 255}, BOB_RGBA);
-    default_mat = BOB_create_material((BOB_Shader_Data[2]){(BOB_Shader_Data){vertex_shader, BOB_VERTEX_SHADER}, (BOB_Shader_Data){fragment_shader, BOB_FRAGMENT_SHADER}}, 2);
+    default_mat = BOB_create_material((BOB_Shader_Data[2]){(BOB_Shader_Data){vertex_shader, BOB_VERTEX_SHADER},
+                                      (BOB_Shader_Data){fragment_shader, BOB_FRAGMENT_SHADER}}, 2,
+                                      (BOB_Uniform[2]){BOB_uniform_mat4("uProjection", (BOB_Mat4){0}), BOB_uniform_signed_int("screenTexture", 0)}, 2);
 }
 
 void BOB_terminate() {
@@ -105,9 +107,9 @@ BOB_Renderer BOB_renderer_init(size_t width, size_t height) {
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, r.ebo);
     glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(uint32_t) * BOB_MAX_INDEX_CAPACITY, NULL, GL_DYNAMIC_DRAW);
 
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(BOB_Render_Vertex), (void *)offsetof(BOB_Render_Vertex, pos)); //Vertex Position
+    glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, sizeof(BOB_Render_Vertex), (void *)offsetof(BOB_Render_Vertex, colour)); //Vertex Colour
     glEnableVertexAttribArray(0);
-    glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, sizeof(BOB_Render_Vertex), (void *)offsetof(BOB_Render_Vertex, colour)); //Vertex Colour
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(BOB_Render_Vertex), (void *)offsetof(BOB_Render_Vertex, pos)); //Vertex Position
     glEnableVertexAttribArray(1);
     glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(BOB_Render_Vertex), (void *)offsetof(BOB_Render_Vertex, uv)); //UV
     glEnableVertexAttribArray(2);
@@ -119,7 +121,7 @@ BOB_Renderer BOB_renderer_init(size_t width, size_t height) {
     glClearDepth(0.0);
 
     //Setting the projection matrix
-    BOB_ortho(0.0f, r.screen_width, r.screen_height, 0.0f, 1.0f, -1.0f, r.projection);
+    BOB_ortho(0.0f, r.screen_width, r.screen_height, 0.0f, 1.0f, -1.0f, &r.projection);
 
     //Initialise the stack of clip rects
     r.stack = BOB_MALLOC(sizeof(BOBi_Clip_Stack));
@@ -153,6 +155,35 @@ void BOB_renderer_begin(BOB_Renderer *r) {
     }
 }
 
+void BOBi_update_uniform(BOB_Uniform uniform) {
+    switch(uniform.type) {
+        case BOB_UNIFORM_FLOAT:
+            glUniform1f(uniform.location, (uniform.is_reference) ? *(float *)uniform.ptr : uniform.f);
+            break;
+        case BOB_UNIFORM_UNSIGNED_INT:
+            glUniform1ui(uniform.location, (uniform.is_reference) ? *(uint32_t *)uniform.ptr : uniform.u32);
+            break;
+        case BOB_UNIFORM_SIGNED_INT:
+            glUniform1i(uniform.location, (uniform.is_reference) ? *(int32_t *)uniform.ptr : uniform.i32);
+            break;
+        case BOB_UNIFORM_VEC2:
+            glUniform2fv(uniform.location, 1, (uniform.is_reference) ? &(*(BOB_Vector2 *)uniform.ptr).x : &uniform.vec2.x);
+            break;
+        case BOB_UNIFORM_VEC3:
+            glUniform3fv(uniform.location, 1, (uniform.is_reference) ? &(*(BOB_Vector3 *)uniform.ptr).x : &uniform.vec3.x);
+            break;
+        case BOB_UNIFORM_VEC4:
+            glUniform4fv(uniform.location, 1, (uniform.is_reference) ? &(*(BOB_Vector4 *)uniform.ptr).x : &uniform.vec4.x);
+            break;
+        case BOB_UNIFORM_TEXTURE:
+            glUniform1i(uniform.location, (uniform.is_reference) ? *(BOB_Texture_Handle *)uniform.ptr : texture_table[uniform.tex_index].texture);
+            break;
+        case BOB_UNIFORM_MAT4:
+            glUniformMatrix4fv(uniform.location, 1, GL_FALSE, (uniform.is_reference) ? (float *)(*(BOB_Mat4 *)uniform.ptr).m : (float *)uniform.mat4.m);
+            break;
+    }
+}
+
 //Ends rendering to the current pixel frame
 void BOB_renderer_end(BOB_Renderer *r) {
     //Bind all of the arrays and buffers we will reuse over time
@@ -164,8 +195,11 @@ void BOB_renderer_end(BOB_Renderer *r) {
             if(batch_table[tex][mat].init && batch_table[tex][mat].index_count > 0 && batch_table[tex][mat].vertex_count > 0) {
                 //Shifting the positions according to the projection matrix
                 glUseProgram(material_table[mat].shader);
-                int proj_loc = glGetUniformLocation(material_table[mat].shader, "uProjection");
-                glUniformMatrix4fv(proj_loc, 1, GL_FALSE, (float *)r->projection);
+                for(size_t i = 0; i < material_table[mat].uniform_count; i++) {
+                    BOBi_update_uniform(material_table[mat].uniforms[i]);
+                }
+                // int proj_loc = glGetUniformLocation(material_table[mat].shader, "uProjection");
+                // glUniformMatrix4fv(proj_loc, 1, GL_FALSE, (float *)r->projection);
 
                 glBufferSubData(GL_ARRAY_BUFFER, 0, BOBi_GET_RENDER_BATCH(tex, mat).vertex_count * sizeof(BOB_Render_Vertex), BOBi_GET_RENDER_BATCH(tex, mat).vertex_data); //Copies the data from renderer's triangle data into the vbo
                 glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, BOBi_GET_RENDER_BATCH(tex, mat).index_count * sizeof(uint32_t), BOBi_GET_RENDER_BATCH(tex, mat).index_data); //Copies the quad data into the vbo
@@ -187,8 +221,11 @@ void BOB_renderer_end(BOB_Renderer *r) {
 void BOBi_flush_batch(BOB_Renderer *r, BOB_Texture_Handle tex, BOB_Material_Handle mat) {
     //Shifting the positions according to the projection matrix
     glUseProgram(material_table[mat].shader);
-    int proj_loc = glGetUniformLocation(material_table[mat].shader, "uProjection");
-    glUniformMatrix4fv(proj_loc, 1, GL_FALSE, (float *)r->projection);
+    for(size_t i = 0; i < material_table[mat].uniform_count; i++) {
+        BOBi_update_uniform(material_table[mat].uniforms[i]);
+    }
+    // int proj_loc = glGetUniformLocation(material_table[mat].shader, "uProjection");
+    // glUniformMatrix4fv(proj_loc, 1, GL_FALSE, (float *)r->projection);
 
     //Bind all of the arrays and buffers we will reuse over time
     glBindVertexArray(r->vao);
@@ -201,7 +238,7 @@ void BOBi_flush_batch(BOB_Renderer *r, BOB_Texture_Handle tex, BOB_Material_Hand
     //Bind the atlas texture
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, texture_table[tex].texture);
-    glUniform1i(glGetUniformLocation(material_table[mat].shader, "screenTexture"), 0);
+    // glUniform1i(glGetUniformLocation(material_table[mat].shader, "screenTexture"), 0);
 
     glDrawElements(GL_TRIANGLES, BOBi_GET_RENDER_BATCH(tex, mat).index_count, GL_UNSIGNED_INT, 0); //Make the draw call
 
@@ -378,11 +415,13 @@ void BOB_draw_texture(BOB_Renderer *r, BOB_Texture_Handle texture, BOB_Quad scre
     if(!BOBi_GET_RENDER_BATCH(texture, default_mat).init) {
         BOBi_GET_RENDER_BATCH(texture, default_mat).index_data = BOB_MALLOC(sizeof(uint32_t) * BOB_INIT_INDEX_CAPACITY);
         BOBi_GET_RENDER_BATCH(texture, default_mat).vertex_data = BOB_MALLOC(sizeof(BOB_Render_Vertex) * BOB_INIT_VERTEX_CAPACITY);
+        BOBi_GET_RENDER_BATCH(texture, default_mat).index_size = BOB_INIT_INDEX_CAPACITY;
+        BOBi_GET_RENDER_BATCH(texture, default_mat).vertex_size = BOB_INIT_VERTEX_CAPACITY;
         BOBi_GET_RENDER_BATCH(texture, default_mat).init = 1;
     }
 
     //If we have overreached our current rendering limit or we cannot store any more textures, end the current draw call and start a new one
-    BOBi_check_capacity(r, texture, 0, BOB_VERTICIES_PER_QUAD, BOB_INDECIES_PER_QUAD);
+    BOBi_check_capacity(r, texture, default_mat, BOB_VERTICIES_PER_QUAD, BOB_INDECIES_PER_QUAD);
 
     //Update the vertex count and vertex data stored in the renderer
     uint32_t base_index = BOBi_GET_RENDER_BATCH(texture, default_mat).vertex_count;
@@ -460,7 +499,7 @@ unsigned int BOBi_create_shader(BOB_Shader_Data s) {
     return shader;
 }
 
-BOB_Material_Handle BOB_create_material(BOB_Shader_Data *data, size_t num_shaders) {
+BOB_Material_Handle BOB_create_material(BOB_Shader_Data *data, size_t num_shaders, BOB_Uniform *uniforms, size_t num_uniforms) {
     if(num_materials >= BOB_MAX_MATERIAL_CAPACITY) {
         BOB_PRINT("ERROR: Exceeded Material Capacity\n");
         return UINT32_MAX;
@@ -489,7 +528,7 @@ BOB_Material_Handle BOB_create_material(BOB_Shader_Data *data, size_t num_shader
             printf("%c", infolog[i]);
         }
         printf("\n");
-        return UINT16_MAX;
+        return UINT32_MAX;
     }
 
     //Cleanup
@@ -497,13 +536,22 @@ BOB_Material_Handle BOB_create_material(BOB_Shader_Data *data, size_t num_shader
         glDeleteShader(shader_buf[i]);
     }
 
-    material_table[num_materials] = (BOB_Material){s};
+    material_table[num_materials] = (BOB_Material){.uniform_count = num_uniforms, .shader = s};
+
+    //Setting the uniforms
+    BOB_Uniform *temp = BOB_MALLOC(sizeof(BOB_Uniform) * num_uniforms);
+    BOB_MEMCPY(temp, uniforms, num_uniforms * sizeof(BOB_Uniform));
+    for(size_t i = 0; i < num_uniforms; i++) {
+        temp[i].location = glGetUniformLocation(s, temp[i].name);
+    }
+    material_table[num_materials].uniforms = temp;
 
     return num_materials++;
 }
 
 void BOB_destroy_material(BOB_Material_Handle mat) {
     glDeleteProgram(material_table[mat].shader);
+    BOB_FREE(material_table[mat].uniforms);
 }
 
 //Initialises a texture atlas
@@ -642,6 +690,8 @@ void BOBi_draw_mesh(BOB_Renderer *r, BOB_Vector3 *vertices, size_t vertex_count,
     if(!BOBi_GET_RENDER_BATCH(default_tex, default_mat).init) {
         BOBi_GET_RENDER_BATCH(default_tex, default_mat).index_data = BOB_MALLOC(sizeof(uint32_t) * BOB_INIT_INDEX_CAPACITY);
         BOBi_GET_RENDER_BATCH(default_tex, default_mat).vertex_data = BOB_MALLOC(sizeof(BOB_Render_Vertex) * BOB_INIT_VERTEX_CAPACITY);
+        BOBi_GET_RENDER_BATCH(default_tex, default_mat).index_size = BOB_INIT_INDEX_CAPACITY;
+        BOBi_GET_RENDER_BATCH(default_tex, default_mat).vertex_size = BOB_INIT_VERTEX_CAPACITY;
         BOBi_GET_RENDER_BATCH(default_tex, default_mat).init = 1;
     }
 
