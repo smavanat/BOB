@@ -32,11 +32,10 @@
 #endif //BOB_PRINT
 
 //TODO: Support Custom Shaders
-//      Allow the user to define render passes
 //      Create an internal struct to manage state
+//      Allow the user to define render passes
 //      Make it so that unfilled shapes don't have the full outline drawn when clipped
 //      Figure out what going to do when num user-specified textures exceeds GPU pipeline capacity
-//      Could make atlas/shader batches independent so when flushing only flush the one at capacity instead of all of them
 //      Proper bitmap font support
 //      Debug mode/Release mode building (turning asserts on and off)
 //      Figure out whether some functions will return error codes or not e.g. BOB_draw_char
@@ -63,7 +62,12 @@ typedef float BOB_Mat4[4][4];
 #define BOB_MAX_INDEX_CAPACITY 2097152
 #define BOB_MAX_TEX_CAPACITY 32
 #define BOB_MAX_ATLAS_CAPACITY 16
+#define BOB_MAX_PIXELBUFFER_CAPACITY 8
+#define BOB_MAX_MATERIAL_CAPACITY 16
 #define INIT_STACK_CAPACITY 64
+
+void BOB_init(void);
+void BOB_terminate(void);
 
 typedef struct {
     float x;
@@ -93,8 +97,8 @@ typedef struct {
 
 typedef uint32_t BOB_Texture_Handle;
 typedef uint32_t BOB_Material_Handle;
-typedef uint32_t BOB_Shader_Handle;
 typedef uint32_t BOB_Atlas_Handle;
+typedef uint32_t BOB_PixelBuffer_Handle;
 
 typedef enum {
     BOB_RED,
@@ -102,6 +106,10 @@ typedef enum {
     BOB_RGB,
     BOB_RGBA
 } BOB_Format;
+
+typedef struct {
+    uint32_t texture, width, height;
+} BOB_Texture;
 
 //Creates a new texture on the gpu
 BOB_Texture_Handle BOB_create_texture(uint32_t width, uint32_t height, uint8_t *data, BOB_Format format);
@@ -111,28 +119,23 @@ void BOB_remove_texture(BOB_Texture_Handle tex);
 typedef struct {
     uint8_t *pixel_buf; //Array of pixel data
     size_t buf_sz;
-    size_t width, height;
     uint32_t pbo; //pbo this renderer uses
     uint32_t pixel_tex; //The texture the pbo is rendered to
 } BOB_PixelBuffer;
 
-//Creates a pixel buffer to hold the pixels representing
-//a texture of size width * height
-//Pixel size should be either 3 or 4 (rgb/rgba)
-BOB_PixelBuffer BOB_pixelbuffer_init(size_t width, size_t height, BOB_Format format);
+//Creates a pixel buffer to hold the pixels representing a texture of size width * height
+BOB_PixelBuffer_Handle BOB_pixelbuffer_init(size_t width, size_t height, BOB_Format format);
 //Frees the data used by a pixel buffer
-void BOB_pixelbuffer_free(BOB_PixelBuffer *pb);
+void BOB_pixelbuffer_free(BOB_PixelBuffer_Handle pb);
 
 typedef struct {
     BOB_Texture_Handle texture; //GL index of the atlas texture
-    uint32_t width, height; //Dimensions of the atlas
     uint32_t cursor_x, cursor_y; //Current packing position
     uint32_t row_height; //Height of the tallest texture on the current row
     BOB_Format format; //Pixel format of the texture
 } BOB_TextureAtlas;
 
 //Initialises a blank texture atlas
-//TODO: Fix pixel formatting
 BOB_Atlas_Handle BOB_atlas_init(uint32_t width, uint32_t height, BOB_Format format);
 //Returns the UV rect where the texture was placed
 //TODO: Add a way of returning an error if there was no space to add new stuff
@@ -140,25 +143,27 @@ BOB_Quad BOB_atlas_pack(BOB_Atlas_Handle a, uint8_t* pixels, size_t w, size_t h)
 //Frees a texture atlas
 void BOB_atlas_free(BOB_Atlas_Handle a);
 
-//Represents a single batch sent off in a draw call from a texture atlas
+typedef enum {
+    BOB_VERTEX_SHADER,
+    BOB_FRAGMENT_SHADER,
+    BOB_TESS_CTRL_SHADER,
+    BOB_TESS_EVAL_SHADER,
+    BOB_COMPUTE_SHADER,
+    BOB_GEOMETRY_SHADER
+} BOB_Shader_Type;
+
+//NOTE: string passed as shader_code must be null-terminated
 typedef struct {
-    BOB_Render_Vertex *vertex_data;
-    uint32_t *index_data; //The index count (for ebo) for this renderer
-    BOB_TextureAtlas *a;
-    size_t vertex_size;
-    size_t index_size;
-    size_t vertex_count;
-    size_t index_count;
-} BOB_AtlasRenderBatch;
+    const char *shader_code;
+    BOB_Shader_Type type;
+} BOB_Shader_Data;
 
 typedef struct {
-    BOB_Shader_Handle shader;
+    uint32_t shader;
 } BOB_Material;
 
-typedef struct {
-    BOB_Texture_Handle tex_id;
-    BOB_Material_Handle mat_id;
-} BOB_Batch_Handle;
+BOB_Material_Handle BOB_create_material(BOB_Shader_Data *data, size_t num_shaders);
+void BOB_destroy_material(BOB_Material_Handle mat);
 
 //Represents a single batch sent off in a draw call from a texture atlas
 typedef struct {
@@ -168,25 +173,8 @@ typedef struct {
     size_t index_size;
     size_t vertex_count;
     size_t index_count;
-    uint32_t texture;
-    uint32_t shader;
+    uint8_t init;
 } BOB_RenderBatch;
-
-//Struct for renderering one off textures
-typedef struct {
-    uint32_t texture;
-    float depth;
-    BOB_Quad dimensions;
-    BOB_Quad uv;
-    BOB_Vector4 colour;
-} BOB_DynamicTexture;
-
-typedef struct {
-    BOB_DynamicTexture dynamic_textures[BOB_MAX_TEX_CAPACITY];
-    BOB_AtlasRenderBatch atlas_batches[BOB_MAX_ATLAS_CAPACITY];
-    size_t dynamic_texture_count;
-    int earliest_atlas_used; //If negative, this layer is not used, otherwise is the index of the earliest atlas used
-} BOB_Render_Layer;
 
 typedef enum {
     BOB_CLIP_HORZ,
@@ -209,15 +197,13 @@ typedef struct {
 } BOBi_Clip_Stack;
 
 typedef struct {
-    BOB_Render_Layer layer; //Layers of rendering
+    // BOB_Render_Layer layer; //Layers of rendering
     BOBi_Clip_Stack *stack; //Stores the current clipping rect and the history
     BOB_Mat4 projection; //projection matrix for this renderer
     uint32_t vao; //vao this renderer uses
     uint32_t vbo; //vbo this renderer uses
     uint32_t ebo; //ebo this renderer uses
-    uint32_t shader; //shader this renderer uses
-    size_t atlas_batch_capacity;
-    size_t num_atlas_batches;
+    // uint32_t shader; //shader this renderer uses
 
     uint32_t screen_height;
     uint32_t screen_width;
@@ -246,9 +232,9 @@ void BOB_draw_atlas_quad(BOB_Renderer *r, BOB_Quad dimensions, BOB_Quad uv_dimen
 //Draws a dynamically allocated texture
 void BOB_draw_texture(BOB_Renderer *r, uint32_t texture, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, float depth);
 //Draws a frame straight to a texture by uploading it to a pixel buffer
-void BOB_pixelbuffer_updload_data(BOB_PixelBuffer *pb, uint8_t *data);
+void BOB_pixelbuffer_updload_data(BOB_PixelBuffer_Handle pb, uint8_t *data);
 //Draws a pixel buffer
-void BOB_draw_pixel_buffer(BOB_Renderer *r, BOB_PixelBuffer *pb, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, float depth);
+void BOB_draw_pixel_buffer(BOB_Renderer *r, BOB_PixelBuffer_Handle pb, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, float depth);
 //Draws a filled circle
 void BOB_draw_circle(BOB_Renderer *r, BOB_Vector2 centre, float radius, BOB_Vector4 colour, float depth);
 //Draws a filled quad
