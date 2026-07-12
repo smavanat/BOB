@@ -511,6 +511,55 @@ size_t BOBi_triangulate_ec(BOB_Vector2 *poly_points, size_t poly_size, uint32_t 
     return triangle_count;
 }
 
+BOB_Vector2 BOBi_rotate_about_point(BOB_Vector2 point, BOB_Vector2 rot_center, float rotation) {
+    float c = cos(rotation);
+    float s = sin(rotation);
+
+    return (BOB_Vector2){
+        rot_center.x + (point.x - rot_center.x) * c - (point.y - rot_center.y) * s,
+        rot_center.y + (point.x - rot_center.x) * s + (point.y - rot_center.y) * c};
+}
+
+void BOBi_rotate_quad(BOB_Quad quad, BOB_Vector2 out[4], float rotation) {
+    BOB_Vector2 center = (BOB_Vector2){quad.x + (quad.w/2.0f), quad.y + (quad.h/2.0f)};
+
+    out[0] = BOBi_rotate_about_point((BOB_Vector2){quad.x, quad.y}, center, rotation);
+    out[1] = BOBi_rotate_about_point((BOB_Vector2){quad.x, quad.y + quad.h}, center, rotation);
+    out[2] = BOBi_rotate_about_point((BOB_Vector2){quad.x + quad.w, quad.y + quad.h}, center, rotation);
+    out[3] = BOBi_rotate_about_point((BOB_Vector2){quad.x + quad.w, quad.y}, center, rotation);
+}
+
+void BOBi_rotate_polygon(BOB_Vector2 *poly_points, size_t poly_size, float rotation) {
+    //Computing weighted centroid:
+    float area = 0.0f;
+    float cx = 0.0f;
+    float cy = 0.0f;
+
+    for (size_t i = 0; i < poly_size; i++)
+    {
+        size_t j = (i + 1) % poly_size;
+
+        float cross = poly_points[i].x * poly_points[j].y -
+                      poly_points[j].x * poly_points[i].y;
+
+        area += cross;
+
+        cx += (poly_points[i].x + poly_points[j].x) * cross;
+        cy += (poly_points[i].y + poly_points[j].y) * cross;
+    }
+
+    area *= 0.5f;
+
+    BOB_Vector2 center;
+    center.x = cx / (6.0f * area);
+    center.y = cy / (6.0f * area);
+
+    //Rotating points in place
+    for(size_t i = 0; i < poly_size; i++) {
+        poly_points[i] = BOBi_rotate_about_point(poly_points[i], center, rotation);
+    }
+}
+
 // ==================================== MISCELLANEOUS FUNCTIONS ========================================
 
 //Calculates the projection matrix
@@ -537,6 +586,11 @@ void BOB_ortho(float left, float right, float bottom, float top, float nearZ, fl
 void BOB_clear_colour(BOB_Vector4 colour) {
     glClearColor(colour.x, colour.y, colour.z, colour.w);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT); //Need to clear the depth buffer as well
+}
+
+//Converts an angle in degrees to radians
+float BOB_degrees_to_radians(float angle) {
+    return angle * (M_PI / 180);
 }
 
 //Shaders for this program are simple enough that we can just encode them as strings
@@ -1025,38 +1079,38 @@ void BOB_pixelbuffer_updload_data(BOB_PixelBuffer_Handle pb, uint8_t *data) {
 
 //============================================================= DRAWING FUNCTIONS ===========================================
 
-void BOB_draw_texture(BOB_Renderer *r, BOB_Texture_Handle texture, BOB_Quad screen_quad, BOB_Quad tex_sub_rect, BOB_Vector4 colour, float depth) {
-    BOB_draw_texture_mat(r, texture, screen_quad, tex_sub_rect, colour, depth, r->default_mat);
+void BOB_draw_texture(BOB_Renderer *r, BOB_Texture_Handle texture, BOB_Quad screen_quad, BOB_Quad tex_sub_rect, BOB_Vector4 colour, float depth, float rotation) {
+    BOB_draw_texture_mat(r, texture, screen_quad, tex_sub_rect, colour, depth, rotation, r->default_mat);
 }
 
 //Draws an atlas quad
-void BOB_draw_atlas_quad(BOB_Renderer *r, BOB_Quad screen_quad, BOB_Quad tex_sub_rect, BOB_Vector4 colour, BOB_Atlas_Handle atlas, float depth) {
-    BOB_draw_atlas_quad_mat(r, screen_quad, tex_sub_rect, colour, atlas_table[atlas].texture, depth, r->default_mat);
+void BOB_draw_atlas_quad(BOB_Renderer *r, BOB_Quad screen_quad, BOB_Quad tex_sub_rect, BOB_Vector4 colour, BOB_Atlas_Handle atlas, float depth, float rotation) {
+    BOB_draw_atlas_quad_mat(r, screen_quad, tex_sub_rect, colour, atlas_table[atlas].texture, depth, rotation, r->default_mat);
 }
 
-void BOB_draw_pixel_buffer(BOB_Renderer *r, BOB_PixelBuffer_Handle pb, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, float depth) {
-    BOB_draw_pixel_buffer_mat(r, pb, dimensions, uv_dimensions, colour, depth, r->default_mat);
+void BOB_draw_pixel_buffer(BOB_Renderer *r, BOB_PixelBuffer_Handle pb, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, float depth, float rotation) {
+    BOB_draw_pixel_buffer_mat(r, pb, dimensions, uv_dimensions, colour, depth, rotation, r->default_mat);
 }
 
 void BOB_draw_line(BOB_Renderer *r, BOB_Vector2 start_pos, BOB_Vector2 end_pos, float thickness, BOB_Vector4 colour, float depth) {
     BOB_draw_line_mat(r, start_pos, end_pos, thickness, colour, depth, r->default_mat);
 }
 
-void BOB_draw_quad(BOB_Renderer *r, BOB_Quad quad, BOB_Vector4 colour, float depth) {
-    BOB_draw_quad_mat(r, quad, colour, depth, r->default_mat);
+void BOB_draw_quad(BOB_Renderer *r, BOB_Quad quad, BOB_Vector4 colour, float depth, float rotation) {
+    BOB_draw_quad_mat(r, quad, colour, depth, rotation, r->default_mat);
 }
 
-void BOB_draw_unfilled_quad(BOB_Renderer *r, BOB_Quad quad, float thickness, BOB_Vector4 colour, float depth) {
-    BOB_draw_unfilled_quad_mat(r, quad, thickness, colour, depth, r->default_mat);
+void BOB_draw_unfilled_quad(BOB_Renderer *r, BOB_Quad quad, float thickness, BOB_Vector4 colour, float depth, float rotation) {
+    BOB_draw_unfilled_quad_mat(r, quad, thickness, colour, depth, rotation, r->default_mat);
 }
 
-void BOB_draw_polygon(BOB_Renderer *r, BOB_Vector2* poly_points, size_t poly_size, BOB_Vector4 colour, float depth) {
-    BOB_draw_polygon_mat(r, poly_points, poly_size, colour, depth, r->default_mat);
+void BOB_draw_polygon(BOB_Renderer *r, BOB_Vector2* poly_points, size_t poly_size, BOB_Vector4 colour, float depth, float rotation) {
+    BOB_draw_polygon_mat(r, poly_points, poly_size, colour, depth, rotation, r->default_mat);
 }
 
 //Draws an unfilled polygon
-void BOB_draw_unfilled_polygon(BOB_Renderer *r, BOB_Vector2* poly_points, size_t poly_size, BOB_Vector4 colour, float thickness, float depth) {
-    BOB_draw_unfilled_polygon_mat(r, poly_points, poly_size, colour, thickness, depth, r->default_mat);
+void BOB_draw_unfilled_polygon(BOB_Renderer *r, BOB_Vector2* poly_points, size_t poly_size, BOB_Vector4 colour, float thickness, float depth, float rotation) {
+    BOB_draw_unfilled_polygon_mat(r, poly_points, poly_size, colour, thickness, depth, rotation, r->default_mat);
 }
 
 void BOB_draw_circle(BOB_Renderer *r, BOB_Vector2 centre, float radius, BOB_Vector4 colour, float depth) {
@@ -1069,7 +1123,7 @@ void BOB_draw_unfilled_circle(BOB_Renderer *r, BOB_Vector2 centre, float radius,
 
 //Draws a dynamically allocated texture with a specified material
 //TODO: Create a new function that this and BOBi_draw_mesh call that handles all of the batching by itself
-void BOB_draw_texture_mat(BOB_Renderer *r, uint32_t texture, BOB_Quad screen_quad, BOB_Quad tex_sub_rect, BOB_Vector4 colour, float depth, BOB_Material_Handle mat) {
+void BOB_draw_texture_mat(BOB_Renderer *r, uint32_t texture, BOB_Quad screen_quad, BOB_Quad tex_sub_rect, BOB_Vector4 colour, float depth, float rotation, BOB_Material_Handle mat) {
     if(!BOBi_clip_quad(r, &screen_quad)) return;
 
     //Lazy allocation of memory
@@ -1087,11 +1141,14 @@ void BOB_draw_texture_mat(BOB_Renderer *r, uint32_t texture, BOB_Quad screen_qua
     //Update the vertex count and vertex data stored in the renderer
     uint32_t base_index = BOBi_GET_RENDER_BATCH(texture, mat).vertex_count;
 
+    BOB_Vector2 rotated_coords[4];
+    BOBi_rotate_quad(screen_quad, rotated_coords, rotation);
+
     BOB_Vector3 coords[4] = {
-        {screen_quad.x, screen_quad.y, depth},
-        {screen_quad.x, screen_quad.y + screen_quad.h, depth},
-        {screen_quad.x + screen_quad.w, screen_quad.y + screen_quad.h, depth},
-        {screen_quad.x + screen_quad.w , screen_quad.y, depth}
+        {rotated_coords[0].x, rotated_coords[0].y, depth},
+        {rotated_coords[1].x, rotated_coords[1].y, depth},
+        {rotated_coords[2].x, rotated_coords[2].y, depth},
+        {rotated_coords[3].x, rotated_coords[3].y, depth}
     };
 
     float width = texture_table[texture].width;
@@ -1127,12 +1184,12 @@ void BOB_draw_texture_mat(BOB_Renderer *r, uint32_t texture, BOB_Quad screen_qua
 }
 
 //Draws a quad with a specified material
-void BOB_draw_atlas_quad_mat(BOB_Renderer *r, BOB_Quad screen_quad, BOB_Quad tex_sub_rect, BOB_Vector4 colour, BOB_Atlas_Handle atlas, float depth, BOB_Material_Handle mat) {
-    BOB_draw_texture_mat(r, atlas_table[atlas].texture, screen_quad, tex_sub_rect, colour, depth, mat);
+void BOB_draw_atlas_quad_mat(BOB_Renderer *r, BOB_Quad screen_quad, BOB_Quad tex_sub_rect, BOB_Vector4 colour, BOB_Atlas_Handle atlas, float depth, float rotation, BOB_Material_Handle mat) {
+    BOB_draw_texture_mat(r, atlas_table[atlas].texture, screen_quad, tex_sub_rect, colour, depth, rotation, mat);
 }
 
 //Draws a pixel buffer with a specified material
-void BOB_draw_pixel_buffer_mat(BOB_Renderer *r, BOB_PixelBuffer_Handle pb, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, float depth, BOB_Material_Handle mat) {
+void BOB_draw_pixel_buffer_mat(BOB_Renderer *r, BOB_PixelBuffer_Handle pb, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, float depth, float rotation, BOB_Material_Handle mat) {
     if(!BOBi_clip_quad(r, &dimensions)) return;
     BOB_Texture tex = texture_table[pixelbuffer_table[pb].pixel_tex];
 
@@ -1142,7 +1199,7 @@ void BOB_draw_pixel_buffer_mat(BOB_Renderer *r, BOB_PixelBuffer_Handle pb, BOB_Q
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, tex.width, tex.height, GL_RGB, GL_UNSIGNED_BYTE, 0);
     glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
 
-    BOB_draw_texture_mat(r, pixelbuffer_table[pb].pixel_tex, dimensions, uv_dimensions, colour, depth, mat);
+    BOB_draw_texture_mat(r, pixelbuffer_table[pb].pixel_tex, dimensions, uv_dimensions, colour, depth, rotation, mat);
 }
 
 //Draws a filled circle with a specified material
@@ -1180,21 +1237,24 @@ void BOB_draw_circle_mat(BOB_Renderer *r, BOB_Vector2 centre, float radius, BOB_
 }
 
 //Draws a filled quad with a specified material
-void BOB_draw_quad_mat(BOB_Renderer *r, BOB_Quad quad, BOB_Vector4 colour, float depth, BOB_Material_Handle mat) {
+void BOB_draw_quad_mat(BOB_Renderer *r, BOB_Quad quad, BOB_Vector4 colour, float depth, float rotation, BOB_Material_Handle mat) {
     if(!BOBi_clip_quad(r, &quad)) return;
 
+    BOB_Vector2 rotated_coords[4];
+    BOBi_rotate_quad(quad, rotated_coords, rotation);
+
     BOB_Vector3 strip[4] = {
-        {quad.x, quad.y, depth},
-        {quad.x, quad.y+quad.h, depth},
-        {quad.x+quad.w, quad.y, depth},
-        {quad.x+quad.w, quad.y+quad.h, depth},
+        {rotated_coords[0].x, rotated_coords[0].y, depth},
+        {rotated_coords[1].x, rotated_coords[1].y, depth},
+        {rotated_coords[2].x, rotated_coords[2].y, depth},
+        {rotated_coords[3].x, rotated_coords[3].y, depth}
     };
 
-    BOBi_draw_mesh(r, strip, 4, (uint32_t[6]){0,1,2,1,2,3}, 6, colour, mat);
+    BOBi_draw_mesh(r, strip, 4, (uint32_t[6]){0,1,3,1,2,3}, 6, colour, mat);
 }
 
 //Draws a filled triangle with a specified material
-void BOB_draw_polygon_mat(BOB_Renderer *r, BOB_Vector2* poly_points, size_t poly_size, BOB_Vector4 colour, float depth, BOB_Material_Handle mat) {
+void BOB_draw_polygon_mat(BOB_Renderer *r, BOB_Vector2* poly_points, size_t poly_size, BOB_Vector4 colour, float depth, float rotation, BOB_Material_Handle mat) {
     BOB_Vector2 points[BOBi_MAX_POLY_SIZE];
     BOB_MEMCPY(points, poly_points, poly_size * sizeof(BOB_Vector2));
 
@@ -1251,7 +1311,7 @@ void BOB_draw_unfilled_circle_mat(BOB_Renderer *r, BOB_Vector2 centre, float rad
 }
 
 //Draws an unfilled quad with a specified material
-void BOB_draw_unfilled_quad_mat(BOB_Renderer *r, BOB_Quad quad, float thickness, BOB_Vector4 colour, float depth, BOB_Material_Handle mat) {
+void BOB_draw_unfilled_quad_mat(BOB_Renderer *r, BOB_Quad quad, float thickness, BOB_Vector4 colour, float depth, float rotation, BOB_Material_Handle mat) {
     BOB_Vector2 tl = {quad.x,          quad.y};
     BOB_Vector2 tr = {quad.x + quad.w, quad.y};
     BOB_Vector2 bl = {quad.x,          quad.y + quad.h};
@@ -1264,7 +1324,7 @@ void BOB_draw_unfilled_quad_mat(BOB_Renderer *r, BOB_Quad quad, float thickness,
 }
 
 //Draws an unfilled triange with a specified material
-void BOB_draw_unfilled_polygon_mat(BOB_Renderer *r, BOB_Vector2 *poly_points, size_t poly_size, BOB_Vector4 colour, float thickness, float depth, BOB_Material_Handle mat) {
+void BOB_draw_unfilled_polygon_mat(BOB_Renderer *r, BOB_Vector2 *poly_points, size_t poly_size, BOB_Vector4 colour, float thickness, float depth, float rotation, BOB_Material_Handle mat) {
     BOB_Vector2 points[BOBi_MAX_POLY_SIZE];
     BOB_MEMCPY(points, poly_points, poly_size * sizeof(BOB_Vector2));
 
@@ -1450,7 +1510,7 @@ uint8_t BOB_draw_char(BOB_Renderer *r, BOB_Bitmap_Font *bf, char c, BOB_Quad dim
     uint32_t x_pixels = x_tiles * (bf->char_pixel_width + bf->char_padding_x) + bf->tex_border_padding_x;
     uint32_t y_pixels = y_tiles * (bf->char_pixel_height + bf->char_padding_y) + bf->tex_border_padding_y;
 
-    BOB_draw_atlas_quad(r, dimensions, (BOB_Quad){x_pixels, y_pixels, bf->char_pixel_width, bf->char_pixel_height}, colour, bf->atlas, depth);
+    BOB_draw_atlas_quad(r, dimensions, (BOB_Quad){x_pixels, y_pixels, bf->char_pixel_width, bf->char_pixel_height}, colour, bf->atlas, depth, 0.0);
 
     return 1;
 }

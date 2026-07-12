@@ -32,8 +32,8 @@
 #endif //BOB_PRINT
 
 //TODO: Create an internal struct to manage state - And actually make removing an object associated with a handle invalidate that object in the internal storage
-//      Make it so that unfilled shapes don't have the full outline drawn when clipped
 //      Proper bitmap font support
+//      Make it so that unfilled shapes don't have the full outline drawn when clipped
 //      Debug mode/Release mode building (turning asserts on and off)
 //      Figure out whether some functions will return error codes or not e.g. BOB_draw_char
 //      Add an arena to manage the total memory easily and get rid of BOB_MEMSET and BOB_MEMCPY since these should all take place within the arena
@@ -299,44 +299,44 @@ void BOB_renderer_end(BOB_Renderer *r);
 void BOB_renderer_update_dimensions(BOB_Renderer *r, uint32_t width, uint32_t height);
 
 //Draws a quad
-void BOB_draw_atlas_quad(BOB_Renderer *r, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, BOB_Atlas_Handle atlas, float depth);
+void BOB_draw_atlas_quad(BOB_Renderer *r, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, BOB_Atlas_Handle atlas, float depth, float rotation);
 //Draws a dynamically allocated texture
-void BOB_draw_texture(BOB_Renderer *r, uint32_t texture, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, float depth);
+void BOB_draw_texture(BOB_Renderer *r, uint32_t texture, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, float depth, float rotation);
 //Draws a pixel buffer
-void BOB_draw_pixel_buffer(BOB_Renderer *r, BOB_PixelBuffer_Handle pb, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, float depth);
+void BOB_draw_pixel_buffer(BOB_Renderer *r, BOB_PixelBuffer_Handle pb, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, float depth, float rotation);
 //Draws a filled circle
 void BOB_draw_circle(BOB_Renderer *r, BOB_Vector2 centre, float radius, BOB_Vector4 colour, float depth);
 //Draws a filled quad
-void BOB_draw_quad(BOB_Renderer *r, BOB_Quad quad, BOB_Vector4 colour, float depth);
+void BOB_draw_quad(BOB_Renderer *r, BOB_Quad quad, BOB_Vector4 colour, float depth, float rotation);
 //Draws a filled triangle
-void BOB_draw_polygon(BOB_Renderer *r, BOB_Vector2* poly_points, size_t poly_size, BOB_Vector4 colour, float depth);
+void BOB_draw_polygon(BOB_Renderer *r, BOB_Vector2* poly_points, size_t poly_size, BOB_Vector4 colour, float depth, float rotation);
 //Draws an unfilled circle
 void BOB_draw_unfilled_circle(BOB_Renderer *r, BOB_Vector2 centre, float radius, float thickness, BOB_Vector4 colour, float depth);
 //Draws an unfilled quad
-void BOB_draw_unfilled_quad(BOB_Renderer *r, BOB_Quad quad, float thickness, BOB_Vector4 colour, float depth);
+void BOB_draw_unfilled_quad(BOB_Renderer *r, BOB_Quad quad, float thickness, BOB_Vector4 colour, float depth, float rotation);
 //Draws an unfilled triange
-void BOB_draw_unfilled_polygon(BOB_Renderer *r, BOB_Vector2 *poly_points, size_t poly_size, BOB_Vector4 colour, float thickness, float depth);
+void BOB_draw_unfilled_polygon(BOB_Renderer *r, BOB_Vector2 *poly_points, size_t poly_size, BOB_Vector4 colour, float thickness, float depth, float rotation);
 //Draws a line between two points
 void BOB_draw_line(BOB_Renderer *r, BOB_Vector2 start_pos, BOB_Vector2 end_pos, float thickness, BOB_Vector4 colour, float depth);
 
 //Draws a quad with a specified material
-void BOB_draw_atlas_quad_mat(BOB_Renderer *r, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, BOB_Atlas_Handle atlas, float depth, BOB_Material_Handle mat);
+void BOB_draw_atlas_quad_mat(BOB_Renderer *r, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, BOB_Atlas_Handle atlas, float depth, float rotation, BOB_Material_Handle mat);
 //Draws a dynamically allocated texture with a specified material
-void BOB_draw_texture_mat(BOB_Renderer *r, uint32_t texture, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, float depth, BOB_Material_Handle mat);
+void BOB_draw_texture_mat(BOB_Renderer *r, uint32_t texture, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, float depth, float rotation, BOB_Material_Handle mat);
 //Draws a pixel buffer with a specified material
-void BOB_draw_pixel_buffer_mat(BOB_Renderer *r, BOB_PixelBuffer_Handle pb, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, float depth, BOB_Material_Handle mat);
+void BOB_draw_pixel_buffer_mat(BOB_Renderer *r, BOB_PixelBuffer_Handle pb, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, float depth, float rotation, BOB_Material_Handle mat);
 //Draws a filled circle with a specified material
 void BOB_draw_circle_mat(BOB_Renderer *r, BOB_Vector2 centre, float radius, BOB_Vector4 colour, float depth, BOB_Material_Handle mat);
 //Draws a filled quad with a specified material
-void BOB_draw_quad_mat(BOB_Renderer *r, BOB_Quad quad, BOB_Vector4 colour, float depth, BOB_Material_Handle mat);
+void BOB_draw_quad_mat(BOB_Renderer *r, BOB_Quad quad, BOB_Vector4 colour, float depth, float rotation, BOB_Material_Handle mat);
 //Draws a filled triangle with a specified material
-void BOB_draw_polygon_mat(BOB_Renderer *r, BOB_Vector2* poly_points, size_t poly_size, BOB_Vector4 colour, float depth, BOB_Material_Handle mat);
+void BOB_draw_polygon_mat(BOB_Renderer *r, BOB_Vector2* poly_points, size_t poly_size, BOB_Vector4 colour, float depth, float rotation, BOB_Material_Handle mat);
 //Draws an unfilled circle with a specified material
 void BOB_draw_unfilled_circle_mat(BOB_Renderer *r, BOB_Vector2 centre, float radius, float thickness, BOB_Vector4 colour, float depth, BOB_Material_Handle mat);
 //Draws an unfilled quad with a specified material
-void BOB_draw_unfilled_quad_mat(BOB_Renderer *r, BOB_Quad quad, float thickness, BOB_Vector4 colour, float depth, BOB_Material_Handle mat);
+void BOB_draw_unfilled_quad_mat(BOB_Renderer *r, BOB_Quad quad, float thickness, BOB_Vector4 colour, float depth, float rotation, BOB_Material_Handle mat);
 //Draws an unfilled triange with a specified material
-void BOB_draw_unfilled_polygon_mat(BOB_Renderer *r, BOB_Vector2 *poly_points, size_t poly_size, BOB_Vector4 colour, float thickness, float depth, BOB_Material_Handle mat);
+void BOB_draw_unfilled_polygon_mat(BOB_Renderer *r, BOB_Vector2 *poly_points, size_t poly_size, BOB_Vector4 colour, float thickness, float depth, float rotation, BOB_Material_Handle mat);
 //Draws a line between two points with a specified material
 void BOB_draw_line_mat(BOB_Renderer *r, BOB_Vector2 start_pos, BOB_Vector2 end_pos, float thickness, BOB_Vector4 colour, float depth, BOB_Material_Handle mat);
 
@@ -344,6 +344,8 @@ void BOB_draw_line_mat(BOB_Renderer *r, BOB_Vector2 start_pos, BOB_Vector2 end_p
 void BOB_ortho(float left, float right, float bottom, float top, float nearZ, float farZ, BOB_Mat4 *dest);
 //Clears the collur of the screen
 void BOB_clear_colour(BOB_Vector4 colour);
+//Converts an angle in degrees to radians
+float BOB_degrees_to_radians(float angle);
 
 //TODO: support the .fnt metadata from AngelCode
 //      And various other bitmap formats, not just loading from a monospaced png
