@@ -31,18 +31,16 @@
 #define BOB_PRINT printf
 #endif //BOB_PRINT
 
-//TODO: Support Custom Shaders
-//      Create an internal struct to manage state - And actually make removing an object associated with a handle invalidate that object in the internal storage
-//      Allow the user to define render passes
+//TODO: Create an internal struct to manage state - And actually make removing an object associated with a handle invalidate that object in the internal storage
 //      Make it so that unfilled shapes don't have the full outline drawn when clipped
-//      Figure out what going to do when num user-specified textures exceeds GPU pipeline capacity
 //      Proper bitmap font support
 //      Debug mode/Release mode building (turning asserts on and off)
 //      Figure out whether some functions will return error codes or not e.g. BOB_draw_char
-//      Add an arena to manage the total memory easily and get rid of BOB_MEMSET and BOB_MEMCPY
-//      since these should all take place within the arena
+//      Add an arena to manage the total memory easily and get rid of BOB_MEMSET and BOB_MEMCPY since these should all take place within the arena
 //      Vulkan support
+//      Allow the user to define render passes -> Custom framebuffers
 //      Maybe draw call sorting internally rather than relying on the depth buffer?
+//      Maybe allow custom vertex layout?
 typedef struct {
     float m[4][4];
 } BOB_Mat4;
@@ -101,6 +99,7 @@ typedef uint32_t BOB_Texture_Handle;
 typedef uint32_t BOB_Material_Handle;
 typedef uint32_t BOB_Atlas_Handle;
 typedef uint32_t BOB_PixelBuffer_Handle;
+typedef uint32_t BOB_Uniform_Handle;
 
 typedef enum {
     BOB_RED,
@@ -128,6 +127,8 @@ typedef struct {
 BOB_PixelBuffer_Handle BOB_pixelbuffer_init(size_t width, size_t height, BOB_Format format);
 //Frees the data used by a pixel buffer
 void BOB_pixelbuffer_free(BOB_PixelBuffer_Handle pb);
+//Draws a frame straight to a texture by uploading it to a pixel buffer
+void BOB_pixelbuffer_updload_data(BOB_PixelBuffer_Handle pb, uint8_t *data);
 
 typedef struct {
     BOB_Texture_Handle texture; //GL index of the atlas texture
@@ -159,7 +160,6 @@ typedef struct {
     BOB_Shader_Type type;
 } BOB_Shader_Data;
 
-//TODO: Add handles or something. This is a little confusing
 typedef enum {
     BOB_UNIFORM_FLOAT,
     BOB_UNIFORM_UNSIGNED_INT,
@@ -190,14 +190,14 @@ typedef struct {
     uint8_t is_reference;
 } BOB_Uniform;
 
-#define BOB_uniform_float(u_name, value) (BOB_Uniform){.name = (u_name), .f = (value), .type = BOB_UNIFORM_FLOAT}
-#define BOB_uniform_unsigned_int(u_name, value) (BOB_Uniform){.name = (u_name), .u32 = (value), .type = BOB_UNIFORM_UNSIGNED_INT}
-#define BOB_uniform_signed_int(u_name, value) (BOB_Uniform){.name = (u_name), .i32 = (value), .type = BOB_UNIFORM_SIGNED_INT}
-#define BOB_uniform_vector2(u_name, value) (BOB_Uniform){.name = (u_name), .vec2 = (value), .type = BOB_UNIFORM_VEC2}
-#define BOB_uniform_vector3(u_name, value) (BOB_Uniform){.name = (u_name), .vec3 = (value), .type = BOB_UNIFORM_VEC3}
-#define BOB_uniform_vector4(u_name, value) (BOB_Uniform){.name = (u_name), .vec4 = (value), .type = BOB_UNIFORM_VEC4}
-#define BOB_uniform_texture(u_name, value) (BOB_Uniform){.name = (u_name), .tex_index = (value), .type = BOB_UNIFORM_TEXTURE}
-#define BOB_uniform_mat4(u_name, value) (BOB_Uniform){.name = (u_name), .mat4 = (value), .type = BOB_UNIFORM_MAT4}
+#define BOB_uniform_float(u_name, value) (BOB_Uniform){.name = (u_name), .f = (value), .type = BOB_UNIFORM_FLOAT, .is_reference = 0}
+#define BOB_uniform_unsigned_int(u_name, value) (BOB_Uniform){.name = (u_name), .u32 = (value), .type = BOB_UNIFORM_UNSIGNED_INT, .is_reference = 0}
+#define BOB_uniform_signed_int(u_name, value) (BOB_Uniform){.name = (u_name), .i32 = (value), .type = BOB_UNIFORM_SIGNED_INT, .is_reference = 0}
+#define BOB_uniform_vector2(u_name, value) (BOB_Uniform){.name = (u_name), .vec2 = (value), .type = BOB_UNIFORM_VEC2, .is_reference = 0}
+#define BOB_uniform_vector3(u_name, value) (BOB_Uniform){.name = (u_name), .vec3 = (value), .type = BOB_UNIFORM_VEC3, .is_reference = 0}
+#define BOB_uniform_vector4(u_name, value) (BOB_Uniform){.name = (u_name), .vec4 = (value), .type = BOB_UNIFORM_VEC4, .is_reference = 0}
+#define BOB_uniform_texture(u_name, value) (BOB_Uniform){.name = (u_name), .tex_index = (value), .type = BOB_UNIFORM_TEXTURE, .is_reference = 0}
+#define BOB_uniform_mat4(u_name, value) (BOB_Uniform){.name = (u_name), .mat4 = (value), .type = BOB_UNIFORM_MAT4, .is_reference = 0}
 #define BOB_uniform_float_ref(u_name, value) (BOB_Uniform){.name = (u_name), .ptr = (value), .type = BOB_UNIFORM_FLOAT, .is_reference = 1}
 #define BOB_uniform_unsigned_int_ref(u_name, value) (BOB_Uniform){.name = (u_name), .ptr = (value), .type = BOB_UNIFORM_UNSIGNED_INT, .is_reference = 1}
 #define BOB_uniform_signed_int_ref(u_name, value) (BOB_Uniform){.name = (u_name), .ptr = (value), .type = BOB_UNIFORM_SIGNED_INT, .is_reference = 1}
@@ -207,6 +207,8 @@ typedef struct {
 #define BOB_uniform_texture_ref(u_name, value) (BOB_Uniform){.name = (u_name), .ptr = (value), .type = BOB_UNIFORM_TEXTURE, .is_reference = 1}
 #define BOB_uniform_mat4_ref(u_name, value) (BOB_Uniform){.name = (u_name), .ptr = (value), .type = BOB_UNIFORM_MAT4, .is_reference = 1}
 
+BOB_Uniform_Handle get_uniform(BOB_Material_Handle mat, char *name);
+
 typedef struct {
     BOB_Uniform *uniforms;
     size_t uniform_count;
@@ -215,6 +217,23 @@ typedef struct {
 
 BOB_Material_Handle BOB_create_material(BOB_Shader_Data *data, size_t num_shaders, BOB_Uniform *uniforms, size_t num_uniforms);
 void BOB_destroy_material(BOB_Material_Handle mat);
+
+void BOB_set_material_float(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, float value);
+void BOB_set_material_unsigned_int(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, uint32_t value);
+void BOB_set_material_signed_int(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, int32_t value);
+void BOB_set_material_vector2(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, BOB_Vector2 value);
+void BOB_set_material_vector3(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, BOB_Vector3 value);
+void BOB_set_material_vector4(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, BOB_Vector4 value);
+void BOB_set_material_texture(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, BOB_Texture_Handle value);
+void BOB_set_material_mat4(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, BOB_Mat4 value);
+void BOB_set_material_float_ref(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, float *value);
+void BOB_set_material_unsigned_int_ref(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, uint32_t *value);
+void BOB_set_material_signed_int_ref(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, int32_t *value);
+void BOB_set_material_vector2_ref(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, BOB_Vector2 *value);
+void BOB_set_material_vector3_ref(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, BOB_Vector3 *value);
+void BOB_set_material_vector4_ref(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, BOB_Vector4 *value);
+void BOB_set_material_texture_ref(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, BOB_Texture_Handle *value);
+void BOB_set_material_mat4_ref(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, BOB_Mat4 *value);
 
 //Represents a single batch sent off in a draw call from a texture atlas
 typedef struct {
@@ -254,7 +273,7 @@ typedef struct {
     uint32_t vao; //vao this renderer uses
     uint32_t vbo; //vbo this renderer uses
     uint32_t ebo; //ebo this renderer uses
-    // uint32_t shader; //shader this renderer uses
+    BOB_Material_Handle default_mat; //Default material this renderer uses
 
     uint32_t screen_height;
     uint32_t screen_width;
@@ -275,12 +294,14 @@ void BOB_renderer_free(BOB_Renderer *r);
 void BOB_renderer_begin(BOB_Renderer *r);
 //Ends rendering to the current pixel frame
 void BOB_renderer_end(BOB_Renderer *r);
+//Updates the dimensions of the screen that the renderer renders to.
+//Updates projection matrix
+void BOB_renderer_update_dimensions(BOB_Renderer *r, uint32_t width, uint32_t height);
+
 //Draws a quad
 void BOB_draw_atlas_quad(BOB_Renderer *r, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, BOB_Atlas_Handle atlas, float depth);
 //Draws a dynamically allocated texture
 void BOB_draw_texture(BOB_Renderer *r, uint32_t texture, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, float depth);
-//Draws a frame straight to a texture by uploading it to a pixel buffer
-void BOB_pixelbuffer_updload_data(BOB_PixelBuffer_Handle pb, uint8_t *data);
 //Draws a pixel buffer
 void BOB_draw_pixel_buffer(BOB_Renderer *r, BOB_PixelBuffer_Handle pb, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, float depth);
 //Draws a filled circle
@@ -294,12 +315,35 @@ void BOB_draw_unfilled_circle(BOB_Renderer *r, BOB_Vector2 centre, float radius,
 //Draws an unfilled quad
 void BOB_draw_unfilled_quad(BOB_Renderer *r, BOB_Quad quad, float thickness, BOB_Vector4 colour, float depth);
 //Draws an unfilled triange
-void BOB_draw_unfilled_polygon(BOB_Renderer *r, BOB_Vector2 *poly_points, size_t polysize, BOB_Vector4 colour, float thickness, float depth);
+void BOB_draw_unfilled_polygon(BOB_Renderer *r, BOB_Vector2 *poly_points, size_t poly_size, BOB_Vector4 colour, float thickness, float depth);
 //Draws a line between two points
 void BOB_draw_line(BOB_Renderer *r, BOB_Vector2 start_pos, BOB_Vector2 end_pos, float thickness, BOB_Vector4 colour, float depth);
 
+//Draws a quad with a specified material
+void BOB_draw_atlas_quad_mat(BOB_Renderer *r, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, BOB_Atlas_Handle atlas, float depth, BOB_Material_Handle mat);
+//Draws a dynamically allocated texture with a specified material
+void BOB_draw_texture_mat(BOB_Renderer *r, uint32_t texture, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, float depth, BOB_Material_Handle mat);
+//Draws a pixel buffer with a specified material
+void BOB_draw_pixel_buffer_mat(BOB_Renderer *r, BOB_PixelBuffer_Handle pb, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, float depth, BOB_Material_Handle mat);
+//Draws a filled circle with a specified material
+void BOB_draw_circle_mat(BOB_Renderer *r, BOB_Vector2 centre, float radius, BOB_Vector4 colour, float depth, BOB_Material_Handle mat);
+//Draws a filled quad with a specified material
+void BOB_draw_quad_mat(BOB_Renderer *r, BOB_Quad quad, BOB_Vector4 colour, float depth, BOB_Material_Handle mat);
+//Draws a filled triangle with a specified material
+void BOB_draw_polygon_mat(BOB_Renderer *r, BOB_Vector2* poly_points, size_t poly_size, BOB_Vector4 colour, float depth, BOB_Material_Handle mat);
+//Draws an unfilled circle with a specified material
+void BOB_draw_unfilled_circle_mat(BOB_Renderer *r, BOB_Vector2 centre, float radius, float thickness, BOB_Vector4 colour, float depth, BOB_Material_Handle mat);
+//Draws an unfilled quad with a specified material
+void BOB_draw_unfilled_quad_mat(BOB_Renderer *r, BOB_Quad quad, float thickness, BOB_Vector4 colour, float depth, BOB_Material_Handle mat);
+//Draws an unfilled triange with a specified material
+void BOB_draw_unfilled_polygon_mat(BOB_Renderer *r, BOB_Vector2 *poly_points, size_t poly_size, BOB_Vector4 colour, float thickness, float depth, BOB_Material_Handle mat);
+//Draws a line between two points with a specified material
+void BOB_draw_line_mat(BOB_Renderer *r, BOB_Vector2 start_pos, BOB_Vector2 end_pos, float thickness, BOB_Vector4 colour, float depth, BOB_Material_Handle mat);
+
 //Determines the projection matrix
 void BOB_ortho(float left, float right, float bottom, float top, float nearZ, float farZ, BOB_Mat4 *dest);
+//Clears the collur of the screen
+void BOB_clear_colour(BOB_Vector4 colour);
 
 //TODO: support the .fnt metadata from AngelCode
 //      And various other bitmap formats, not just loading from a monospaced png
