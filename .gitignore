@@ -5,3 +5,5 @@ main.c
 CMakeLists.txt
 build/
 GLFW/
+*.fnt
+*.png

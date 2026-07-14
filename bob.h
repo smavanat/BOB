@@ -63,6 +63,7 @@ typedef struct {
 #define BOB_MAX_ATLAS_CAPACITY 16
 #define BOB_MAX_PIXELBUFFER_CAPACITY 8
 #define BOB_MAX_MATERIAL_CAPACITY 16
+#define BOB_MAX_FONT_CAPACITY 32
 #define INIT_STACK_CAPACITY 64
 #define BOB_MAX_LAYER 1024
 
@@ -100,6 +101,7 @@ typedef uint32_t BOB_Material_Handle;
 typedef uint32_t BOB_Atlas_Handle;
 typedef uint32_t BOB_PixelBuffer_Handle;
 typedef uint32_t BOB_Uniform_Handle;
+typedef uint32_t BOB_Font_Handle;
 
 typedef enum {
     BOB_RED,
@@ -356,16 +358,47 @@ void BOB_clear_colour(BOB_Vector4 colour);
 //Converts an angle in degrees to radians
 float BOB_degrees_to_radians(float angle);
 
-//TODO: support the .fnt metadata from AngelCode
-//      And various other bitmap formats, not just loading from a monospaced png
+//TODO: support the .fnt metadata from AngelCode (text and binary)
+
+typedef enum {
+    BOB_BITMAP_FONT_IMAGE,
+    BOB_BITMAP_FONT_BMF_TEXT,
+    BOB_BITMAP_FONT_BMF_BINARY,
+} BOB_Bitmap_Font_Type;
 
 //Way of telling the bitmap renderer what layout your bitmap uses
 typedef enum {
-    BOB_BITMAP_STANDARD, //Standard ASCII bitmap with chars from 32 to 126
-    BOB_BITMAP_OFFSET, //Some subset of the standard ASCII ordering that still adheres to the original, e.g. having only chars 46 - 97
-    BOB_BITMAP_CUSTOM, //A completely custom ordering of chars
-    BOB_NUM_BITMAP_LAYOUTS,
-} BOB_Bitmap_Layout;
+    BOB_BITMAP_IMAGE_STANDARD, //Standard ASCII bitmap with chars from 32 to 126
+    BOB_BITMAP_IMAGE_OFFSET, //Some subset of the standard ASCII ordering that still adheres to the original, e.g. having only chars 46 - 97
+    BOB_BITMAP_IMAGE_CUSTOM, //A completely custom ordering of chars
+    BOB_NUM_BITMAP_IMAGE_LAYOUTS,
+} BOB_Bitmap_Image_Layout;
+
+//BMFont structs:
+typedef struct {
+    uint32_t codepoint; //Unicode codepoint
+    BOB_Quad sub_rect;
+    float x_offset, y_offset, x_advance;
+    uint8_t page;
+    uint8_t channel;
+} BOB_BMF_Glyph;
+
+typedef struct {
+    uint32_t first, second; //Ids of the chars involved in the kerning
+    float amount; //How much the xpos should be adjusted when drawing the second char immediately following the first
+} BOB_BMF_Kerning;
+
+typedef struct {
+    BOB_Texture_Handle pages[256]; //Each glyph's page attribute is 1 byte in the binary format, so only need to worry about 256 pages max
+    BOB_BMF_Glyph *glyphs;
+    BOB_BMF_Kerning *kernings;
+    size_t glyph_count;
+    size_t kerning_count;
+    uint32_t line_height;
+    uint32_t base;
+    uint8_t page_count;
+    uint8_t init;
+} BOB_BMF_Font;
 
 //TODO: Make this hidden and only accessible through a macro
 typedef union {
@@ -380,7 +413,7 @@ typedef union {
         char *data;
         size_t len;
     } custom_desc;
-} BOB_Bitmap_Layout_Desc;
+} BOB_Bitmap_Image_Layout_Desc;
 
 typedef struct {
     BOB_Texture_Handle tex; //Reference to the TextureAtlas used to store the bitmap
@@ -393,16 +426,18 @@ typedef struct {
     uint32_t tex_border_padding_x;
     uint32_t tex_border_padding_y;
 
-    BOB_Bitmap_Layout layout;
-    BOB_Bitmap_Layout_Desc desc;
+    BOB_Bitmap_Image_Layout layout;
+    BOB_Bitmap_Image_Layout_Desc desc;
 } BOB_Bitmap_Font;
 
-uint8_t BOB_bitmap_font_init(BOB_Bitmap_Font*opts, uint32_t atls, uint32_t cpw, uint32_t cph, uint32_t cpx, uint32_t cpy, uint32_t tbpx, uint32_t tbpy, BOB_Bitmap_Layout lyt, BOB_Bitmap_Layout_Desc desc);
+uint8_t BOB_bitmap_font_init(BOB_Bitmap_Font*opts, uint32_t atls, uint32_t cpw, uint32_t cph, uint32_t cpx, uint32_t cpy, uint32_t tbpx, uint32_t tbpy, BOB_Bitmap_Image_Layout lyt, BOB_Bitmap_Image_Layout_Desc desc);
 void BOB_bitmap_font_free(BOB_Bitmap_Font*bf);
 
 uint8_t BOB_draw_char(BOB_Renderer *r, BOB_Bitmap_Font*bf, char c, BOB_Quad dimensions, BOB_Vector4 colour, uint16_t layer);
 uint8_t BOB_draw_string(BOB_Renderer *r, BOB_Bitmap_Font*bf, const char *str, size_t str_len, BOB_Vector2 gap, BOB_Vector2 start, BOB_Vector2 scale, BOB_Vector4 colour, uint16_t layer);
 BOB_Vector2 BOB_measure_text(const char *str, size_t str_len, BOB_Vector2 gap, BOB_Vector2 scale);
 
+BOB_Font_Handle BOB_load_bmf_font(const char *font_path);
+void BOB_add_font_page(BOB_Font_Handle font, uint32_t page_width, uint32_t page_height, uint8_t *page_data, BOB_Format page_format);
 
 #endif //BOB_H
