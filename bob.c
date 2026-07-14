@@ -648,7 +648,13 @@ const char *fragment_shader = "#version 330 core\n"
 
 // ============================================= BOB STATE MANAGEMENT ============================================================
 
-void BOB_init() {
+int BOB_init(GLADloadproc proc) {
+    //Loading GLAD
+    if(!gladLoadGLLoader(proc)) {
+        printf("Failed to initialise GLAD");
+        return 0;
+    }
+
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glEnable(GL_DEPTH_TEST);
@@ -661,6 +667,8 @@ void BOB_init() {
     intrn_data.next_pixelbuf_slot = UINT32_MAX;
     intrn_data.next_mat_slot = UINT32_MAX;
     intrn_data.next_font_slot = UINT32_MAX;
+
+    return 1;
 }
 
 void BOB_terminate() {
@@ -1849,35 +1857,80 @@ typedef enum {
 } BOBi_token_type;
 
 typedef enum {
-    BOBi_BMF_COMMON_ATTRIB_LINE_HEIGHT,
-    BOBi_BMF_COMMON_ATTRIB_BASE,
-    BOBi_BMF_COMMON_ATTRIB_SCALE_W,
-    BOBi_BMF_COMMON_ATTRIB_SCALE_H,
-    BOBi_BMF_COMMON_ATTRIB_PAGES,
-    BOBi_BMF_COMMON_ATTRIB_PACKED,
-    BOBi_BMF_COMMON_ATTRIB_ALPHA_CHANNEL,
-    BOBi_BMF_COMMON_ATTRIB_RED_CHANNEL,
-    BOBi_BMF_COMMON_ATTRIB_GREEN_CHANNEL,
-    BOBi_BMF_COMMON_ATTRIB_BLUE_CHANNEL,
-    BOBi_BMF_COMMON_ATTRIB_INVALID,
-} BOBi_BMF_Common_Attrib;
+    //Common tag
+    BOBi_BMF_ATTRIB_LINE_HEIGHT,
+    BOBi_BMF_ATTRIB_BASE,
+    BOBi_BMF_ATTRIB_SCALE_W,
+    BOBi_BMF_ATTRIB_SCALE_H,
+    BOBi_BMF_ATTRIB_PAGES,
+    BOBi_BMF_ATTRIB_PACKED,
+    BOBi_BMF_ATTRIB_ALPHA_CHANNEL,
+    BOBi_BMF_ATTRIB_RED_CHANNEL,
+    BOBi_BMF_ATTRIB_GREEN_CHANNEL,
+    BOBi_BMF_ATTRIB_BLUE_CHANNEL,
+    //Char Tag
+    BOBi_BMF_ATTRIB_ID,
+    BOBi_BMF_ATTRIB_X,
+    BOBi_BMF_ATTRIB_Y,
+    BOBi_BMF_ATTRIB_WIDTH,
+    BOBi_BMF_ATTRIB_HEIGHT,
+    BOBi_BMF_ATTRIB_XOFFSET,
+    BOBi_BMF_ATTRIB_YOFFSET,
+    BOBi_BMF_ATTRIB_XADVANCE,
+    BOBi_BMF_ATTRIB_PAGE,
+    BOBi_BMF_ATTRIB_CHANNEL,
+    BOBi_BMF_ATTRIB_INVALID,
+    //Kerning Tag
+    BOBi_BMF_ATTRIB_FIRST,
+    BOBi_BMF_ATTRIB_SECOND,
+    BOBi_BMF_ATTRIB_AMOUNT,
+} BOBi_BMF_Attrib;
 
-BOBi_BMF_Common_Attrib BOBi_parse_common_attrib(uint8_t *str, size_t strlen) {
+BOBi_BMF_Attrib BOBi_parse_common_attrib(uint8_t *str, size_t strlen) {
     char buf[strlen+1];
     BOB_MEMCPY(buf, str, strlen);
     buf[strlen] = '\0';
 
-    if(!strcmp("lineHeight", buf)) return BOBi_BMF_COMMON_ATTRIB_LINE_HEIGHT;
-    else if(!strcmp("base", buf)) return BOBi_BMF_COMMON_ATTRIB_BASE;
-    else if(!strcmp("scaleW", buf)) return BOBi_BMF_COMMON_ATTRIB_SCALE_W;
-    else if(!strcmp("scaleH", buf)) return BOBi_BMF_COMMON_ATTRIB_SCALE_H;
-    else if(!strcmp("pages", buf)) return BOBi_BMF_COMMON_ATTRIB_PAGES;
-    else if(!strcmp("packed", buf)) return BOBi_BMF_COMMON_ATTRIB_PACKED;
-    else if(!strcmp("alphaChnl", buf)) return BOBi_BMF_COMMON_ATTRIB_ALPHA_CHANNEL;
-    else if(!strcmp("redChnl", buf)) return BOBi_BMF_COMMON_ATTRIB_RED_CHANNEL;
-    else if(!strcmp("greenChnl", buf)) return BOBi_BMF_COMMON_ATTRIB_GREEN_CHANNEL;
-    else if(!strcmp("blueChnl", buf)) return BOBi_BMF_COMMON_ATTRIB_BLUE_CHANNEL;
-    else return BOBi_BMF_COMMON_ATTRIB_INVALID;
+    if(!strcmp("lineHeight", buf)) return BOBi_BMF_ATTRIB_LINE_HEIGHT;
+    else if(!strcmp("base", buf)) return BOBi_BMF_ATTRIB_BASE;
+    else if(!strcmp("scaleW", buf)) return BOBi_BMF_ATTRIB_SCALE_W;
+    else if(!strcmp("scaleH", buf)) return BOBi_BMF_ATTRIB_SCALE_H;
+    else if(!strcmp("pages", buf)) return BOBi_BMF_ATTRIB_PAGES;
+    else if(!strcmp("packed", buf)) return BOBi_BMF_ATTRIB_PACKED;
+    else if(!strcmp("alphaChnl", buf)) return BOBi_BMF_ATTRIB_ALPHA_CHANNEL;
+    else if(!strcmp("redChnl", buf)) return BOBi_BMF_ATTRIB_RED_CHANNEL;
+    else if(!strcmp("greenChnl", buf)) return BOBi_BMF_ATTRIB_GREEN_CHANNEL;
+    else if(!strcmp("blueChnl", buf)) return BOBi_BMF_ATTRIB_BLUE_CHANNEL;
+    else return BOBi_BMF_ATTRIB_INVALID;
+}
+
+BOBi_BMF_Attrib BOBi_parse_char_attrib(uint8_t *str, size_t strlen) {
+    char buf[strlen+1];
+    BOB_MEMCPY(buf, str, strlen);
+    buf[strlen] = '\0';
+
+    if(!strcmp("id", buf)) return BOBi_BMF_ATTRIB_ID;
+    else if(!strcmp("x", buf)) return BOBi_BMF_ATTRIB_X;
+    else if(!strcmp("y", buf)) return BOBi_BMF_ATTRIB_Y;
+    else if(!strcmp("width", buf)) return BOBi_BMF_ATTRIB_WIDTH;
+    else if(!strcmp("height", buf)) return BOBi_BMF_ATTRIB_HEIGHT;
+    else if(!strcmp("xoffset", buf)) return BOBi_BMF_ATTRIB_XOFFSET;
+    else if(!strcmp("yoffset", buf)) return BOBi_BMF_ATTRIB_YOFFSET;
+    else if(!strcmp("xadvance", buf)) return BOBi_BMF_ATTRIB_XADVANCE;
+    else if(!strcmp("page", buf)) return BOBi_BMF_ATTRIB_PAGE;
+    else if(!strcmp("chnl", buf)) return BOBi_BMF_ATTRIB_CHANNEL;
+    else return BOBi_BMF_ATTRIB_INVALID;
+}
+
+BOBi_BMF_Attrib BOBi_parse_kerning_attrib(uint8_t *str, size_t strlen) {
+    char buf[strlen+1];
+    BOB_MEMCPY(buf, str, strlen);
+    buf[strlen] = '\0';
+
+    if(!strcmp("first", buf)) return BOBi_BMF_ATTRIB_FIRST;
+    else if(!strcmp("second", buf)) return BOBi_BMF_ATTRIB_SECOND;
+    else if(!strcmp("amount", buf)) return BOBi_BMF_ATTRIB_AMOUNT;
+    else return BOBi_BMF_ATTRIB_INVALID;
 }
 
 uint8_t is_digit(char c) {
@@ -1903,9 +1956,15 @@ uint8_t BOBi_parse_val(uint8_t *str, size_t strlen, int32_t *out) {
     return 1;
 }
 
-uint8_t BOBi_parse_common(uint8_t *data, BOB_BMF_Font *font) {
+typedef enum {
+    BOBi_BNF_COMMON,
+    BOBi_BNF_CHAR,
+    BOBi_BNF_KERNING,
+} BOBi_BMF_Line_Type;
+
+uint8_t BOBi_parse_line(BOBi_BMF_Line_Type line_type, uint8_t *data, void *out) {
     BOBi_token_type cur_type = BOBi_TOKEN_ATTRIB;
-    BOBi_BMF_Common_Attrib cur_attrib;
+    BOBi_BMF_Attrib cur_attrib;
     size_t index = 0;
     size_t token_sz = 0;
     size_t token_start = 0;
@@ -1942,140 +2001,71 @@ uint8_t BOBi_parse_common(uint8_t *data, BOB_BMF_Font *font) {
                 case '=':
                     if(token_sz > 0) {
                         if(cur_type == BOBi_TOKEN_ATTRIB) {
-                            cur_attrib = BOBi_parse_common_attrib(&data[token_start], token_sz);
-                            if(cur_attrib == BOBi_BMF_COMMON_ATTRIB_INVALID) return -2;
-                            cur_type = BOBi_TOKEN_VAL;
-                            token_sz = 0;
-                        }
-                        else {
-                            int32_t val;
-                            if(!BOBi_parse_val(&data[token_start], token_sz, &val)) return -2;
-                            switch (cur_attrib) {
-                                case BOBi_BMF_COMMON_ATTRIB_LINE_HEIGHT: font->line_height = val; break;
-                                case BOBi_BMF_COMMON_ATTRIB_BASE: font->base = val; break;
-                                case BOBi_BMF_COMMON_ATTRIB_SCALE_W:
-                                case BOBi_BMF_COMMON_ATTRIB_SCALE_H:
-                                case BOBi_BMF_COMMON_ATTRIB_PAGES:
-                                case BOBi_BMF_COMMON_ATTRIB_PACKED:
-                                case BOBi_BMF_COMMON_ATTRIB_ALPHA_CHANNEL:
-                                case BOBi_BMF_COMMON_ATTRIB_RED_CHANNEL:
-                                case BOBi_BMF_COMMON_ATTRIB_GREEN_CHANNEL:
-                                case BOBi_BMF_COMMON_ATTRIB_BLUE_CHANNEL: break;
-                                case BOBi_BMF_COMMON_ATTRIB_INVALID: return -2;
+                            switch(line_type) {
+                                case BOBi_BNF_COMMON:
+                                    cur_attrib = BOBi_parse_common_attrib(&data[token_start], token_sz);
+                                    if(cur_attrib == BOBi_BMF_ATTRIB_INVALID) return -2;
+                                    break;
+                                case BOBi_BNF_CHAR:
+                                    cur_attrib = BOBi_parse_char_attrib(&data[token_start], token_sz);
+                                    if(cur_attrib == BOBi_BMF_ATTRIB_INVALID) return -2;
+                                    break;
+                                case BOBi_BNF_KERNING:
+                                    cur_attrib = BOBi_parse_kerning_attrib(&data[token_start], token_sz);
+                                    if(cur_attrib == BOBi_BMF_ATTRIB_INVALID) return -2;
+                                    break;
                             }
                             cur_type = BOBi_TOKEN_VAL;
                             token_sz = 0;
                         }
-                    }
-                    break;
-                case '-':
-                    if(cur_type != BOBi_TOKEN_VAL || token_sz != 0) {
-                        error_data.error_col = index;
-                        error_data.error_char = data[index];
-                        return -1;
-                    }
-                    token_start = index;
-                    token_sz++;
-                    break;
-                default:
-                    break;
-            }
-        }
-        index++;
-    }
-}
-
-typedef enum {
-    BOBi_BMF_CHAR_ATTRIB_ID,
-    BOBi_BMF_CHAR_ATTRIB_X,
-    BOBi_BMF_CHAR_ATTRIB_Y,
-    BOBi_BMF_CHAR_ATTRIB_WIDTH,
-    BOBi_BMF_CHAR_ATTRIB_HEIGHT,
-    BOBi_BMF_CHAR_ATTRIB_XOFFSET,
-    BOBi_BMF_CHAR_ATTRIB_YOFFSET,
-    BOBi_BMF_CHAR_ATTRIB_XADVANCE,
-    BOBi_BMF_CHAR_ATTRIB_PAGE,
-    BOBi_BMF_CHAR_ATTRIB_CHANNEL,
-    BOBi_BMF_CHAR_ATTRIB_INVALID,
-} BOBi_BMF_Char_Attrib;
-
-BOBi_BMF_Char_Attrib BOBi_parse_char_attrib(uint8_t *str, size_t strlen) {
-    char buf[strlen+1];
-    BOB_MEMCPY(buf, str, strlen);
-    buf[strlen] = '\0';
-
-    if(!strcmp("id", buf)) return BOBi_BMF_CHAR_ATTRIB_ID;
-    else if(!strcmp("x", buf)) return BOBi_BMF_CHAR_ATTRIB_X;
-    else if(!strcmp("y", buf)) return BOBi_BMF_CHAR_ATTRIB_Y;
-    else if(!strcmp("width", buf)) return BOBi_BMF_CHAR_ATTRIB_WIDTH;
-    else if(!strcmp("height", buf)) return BOBi_BMF_CHAR_ATTRIB_HEIGHT;
-    else if(!strcmp("xoffset", buf)) return BOBi_BMF_CHAR_ATTRIB_XOFFSET;
-    else if(!strcmp("yoffset", buf)) return BOBi_BMF_CHAR_ATTRIB_YOFFSET;
-    else if(!strcmp("xadvance", buf)) return BOBi_BMF_CHAR_ATTRIB_XADVANCE;
-    else if(!strcmp("page", buf)) return BOBi_BMF_CHAR_ATTRIB_PAGE;
-    else if(!strcmp("chnl", buf)) return BOBi_BMF_CHAR_ATTRIB_CHANNEL;
-    else return BOBi_BMF_CHAR_ATTRIB_INVALID;
-}
-
-uint8_t BOBi_parse_char(uint8_t* data, BOB_BMF_Glyph *glyph) {
-    BOBi_token_type cur_type = BOBi_TOKEN_ATTRIB;
-    BOBi_BMF_Char_Attrib cur_attrib;
-    size_t index = 0;
-    size_t token_sz = 0;
-    size_t token_start = 0;
-
-    while(data[index] != '\n' || data[index] != '\0') {
-        if(is_letter(data[index])) {
-            if(token_sz == 0) {
-                token_start = index;
-                cur_type = BOBi_TOKEN_ATTRIB;
-            }
-            if(cur_type != BOBi_TOKEN_ATTRIB) {
-                error_data.error_col = index;
-                error_data.error_char = data[index];
-                return -1;
-            }
-            token_sz++;
-        }
-        else if(is_digit(data[index])) {
-            if(token_sz == 0) {
-                token_start = index;
-                cur_type = BOBi_TOKEN_VAL;
-            }
-            if(cur_type != BOBi_TOKEN_VAL) {
-                error_data.error_col = index;
-                error_data.error_char = data[index];
-                return -1;
-            }
-            token_sz++;
-        }
-        else {
-            switch (data[index]) {
-                case ' ':
-                case '\t':
-                case '=':
-                    if(token_sz > 0) {
-                        if(cur_type == BOBi_TOKEN_ATTRIB) {
-                            cur_attrib = BOBi_parse_char_attrib(&data[token_start], token_sz);
-                            if(cur_attrib == BOBi_BMF_CHAR_ATTRIB_INVALID) return -2;
-                            cur_type = BOBi_TOKEN_VAL;
-                            token_sz = 0;
-                        }
                         else {
                             int32_t val;
                             if(!BOBi_parse_val(&data[token_start], token_sz, &val)) return -2;
-                            switch (cur_attrib) {
-                                case BOBi_BMF_CHAR_ATTRIB_ID: glyph->codepoint = val; break;
-                                case BOBi_BMF_CHAR_ATTRIB_X: glyph->sub_rect.x = val; break;
-                                case BOBi_BMF_CHAR_ATTRIB_Y: glyph->sub_rect.y = val; break;
-                                case BOBi_BMF_CHAR_ATTRIB_WIDTH: glyph->sub_rect.w = val; break;
-                                case BOBi_BMF_CHAR_ATTRIB_HEIGHT: glyph->sub_rect.h = val; break;
-                                case BOBi_BMF_CHAR_ATTRIB_XOFFSET: glyph->x_offset = val; break;
-                                case BOBi_BMF_CHAR_ATTRIB_YOFFSET: glyph->y_offset = val; break;
-                                case BOBi_BMF_CHAR_ATTRIB_XADVANCE: glyph->x_advance = val; break;
-                                case BOBi_BMF_CHAR_ATTRIB_PAGE: glyph->page = val; break;
-                                case BOBi_BMF_CHAR_ATTRIB_CHANNEL: glyph->channel = val; break;
-                                case BOBi_BMF_CHAR_ATTRIB_INVALID: return -2;
+                            switch(line_type) {
+                                case BOBi_BNF_COMMON: {
+                                    BOB_BMF_Font *font = (BOB_BMF_Font *)out;
+                                    switch (cur_attrib) {
+                                        case BOBi_BMF_ATTRIB_LINE_HEIGHT: font->line_height = val; break;
+                                        case BOBi_BMF_ATTRIB_BASE: font->base = val; break;
+                                        case BOBi_BMF_ATTRIB_SCALE_W:
+                                        case BOBi_BMF_ATTRIB_SCALE_H:
+                                        case BOBi_BMF_ATTRIB_PAGES:
+                                        case BOBi_BMF_ATTRIB_PACKED:
+                                        case BOBi_BMF_ATTRIB_ALPHA_CHANNEL:
+                                        case BOBi_BMF_ATTRIB_RED_CHANNEL:
+                                        case BOBi_BMF_ATTRIB_GREEN_CHANNEL:
+                                        case BOBi_BMF_ATTRIB_BLUE_CHANNEL: break;
+                                        default: return -2;
+                                    }
+                                }
+                                break;
+                                case BOBi_BNF_CHAR: {
+                                    BOB_BMF_Glyph *glyph = (BOB_BMF_Glyph *)out;
+                                    switch (cur_attrib) {
+                                        case BOBi_BMF_ATTRIB_ID: glyph->codepoint = val; break;
+                                        case BOBi_BMF_ATTRIB_X: glyph->sub_rect.x = val; break;
+                                        case BOBi_BMF_ATTRIB_Y: glyph->sub_rect.y = val; break;
+                                        case BOBi_BMF_ATTRIB_WIDTH: glyph->sub_rect.w = val; break;
+                                        case BOBi_BMF_ATTRIB_HEIGHT: glyph->sub_rect.h = val; break;
+                                        case BOBi_BMF_ATTRIB_XOFFSET: glyph->x_offset = val; break;
+                                        case BOBi_BMF_ATTRIB_YOFFSET: glyph->y_offset = val; break;
+                                        case BOBi_BMF_ATTRIB_XADVANCE: glyph->x_advance = val; break;
+                                        case BOBi_BMF_ATTRIB_PAGE: glyph->page = val; break;
+                                        case BOBi_BMF_ATTRIB_CHANNEL: glyph->channel = val; break;
+                                        default: return -2;
+                                    }
+                                }
+                                break;
+                                case BOBi_BNF_KERNING: {
+                                    BOB_BMF_Kerning *kerning = (BOB_BMF_Kerning *)out;
+                                    switch (cur_attrib) {
+                                        case BOBi_BMF_ATTRIB_FIRST: kerning->first = val; break;
+                                        case BOBi_BMF_ATTRIB_SECOND: kerning->second = val; break;
+                                        case BOBi_BMF_ATTRIB_AMOUNT: kerning->amount = val; break;
+                                        default: return -2;
+                                    }
+                                }
+                                break;
                             }
                             cur_type = BOBi_TOKEN_VAL;
                             token_sz = 0;

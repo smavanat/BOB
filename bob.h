@@ -33,13 +33,12 @@
 #endif //BOB_PRINT
 
 //TODO: Proper bitmap font support
+//      Vulkan support
 //      Make it so that unfilled shapes don't have the full outline drawn when clipped
-//      Debug mode/Release mode building (turning asserts on and off)
 //      Figure out whether some functions will return error codes or not e.g. BOB_draw_char
 //      Add an arena to manage the total memory easily and get rid of BOB_MEMSET and BOB_MEMCPY since these should all take place within the arena
-//      Vulkan support
+//      Draw call sorting (quicksort) internally rather than relying on the depth buffer -> Should actually do this since dealing with the depth buffer is a giant pain
 //      Allow the user to define render passes -> Custom framebuffers
-//      Draw call sorting internally rather than relying on the depth buffer -> Should actually do this since dealing with the depth buffer is a giant pain
 //      Maybe allow custom vertex layout?
 typedef struct {
     float m[4][4];
@@ -67,7 +66,7 @@ typedef struct {
 #define INIT_STACK_CAPACITY 64
 #define BOB_MAX_LAYER 1024
 
-void BOB_init(void);
+int BOB_init(GLADloadproc proc);
 void BOB_terminate(void);
 
 typedef struct {
