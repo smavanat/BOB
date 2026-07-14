@@ -32,15 +32,14 @@
 #define BOB_PRINT printf
 #endif //BOB_PRINT
 
-//TODO: Create an internal struct to manage state - And actually make removing an object associated with a handle invalidate that object in the internal storage
-//      Proper bitmap font support
+//TODO: Proper bitmap font support
 //      Make it so that unfilled shapes don't have the full outline drawn when clipped
 //      Debug mode/Release mode building (turning asserts on and off)
 //      Figure out whether some functions will return error codes or not e.g. BOB_draw_char
 //      Add an arena to manage the total memory easily and get rid of BOB_MEMSET and BOB_MEMCPY since these should all take place within the arena
 //      Vulkan support
 //      Allow the user to define render passes -> Custom framebuffers
-//      Maybe draw call sorting internally rather than relying on the depth buffer?
+//      Draw call sorting internally rather than relying on the depth buffer -> Should actually do this since dealing with the depth buffer is a giant pain
 //      Maybe allow custom vertex layout?
 typedef struct {
     float m[4][4];
@@ -111,32 +110,37 @@ typedef enum {
 
 typedef struct {
     uint32_t texture, width, height;
+    uint8_t init;
 } BOB_Texture;
 
 //Creates a new texture on the gpu
 BOB_Texture_Handle BOB_create_texture(uint32_t width, uint32_t height, uint8_t *data, BOB_Format format);
-void BOB_remove_texture(BOB_Texture_Handle tex);
+void BOB_texture_free(BOB_Texture_Handle *tex);
+BOB_Texture *BOB_get_tex_ref(BOB_Texture_Handle tex);
 
 typedef struct {
     size_t buf_sz;
     uint32_t pbo; //pbo this renderer uses
     uint32_t pixel_tex; //The texture the pbo is rendered to
+    uint8_t init;
 } BOB_PixelBuffer;
 
 //Creates a pixel buffer to hold the pixels representing a texture of size width * height
 BOB_PixelBuffer_Handle BOB_pixelbuffer_init(size_t width, size_t height, BOB_Format format);
 //Frees the data used by a pixel buffer
-void BOB_pixelbuffer_free(BOB_PixelBuffer_Handle pb);
+void BOB_pixelbuffer_free(BOB_PixelBuffer_Handle *pb);
 //Draws a frame straight to a texture by uploading it to a pixel buffer
 void BOB_pixelbuffer_updload_data(BOB_PixelBuffer_Handle pb, uint8_t *data);
 //Gets the pixel data from a PixelBuffer
 void BOB_pixelbuffer_get_data(BOB_PixelBuffer_Handle pb, uint8_t *dest);
+BOB_PixelBuffer *BOB_get_pixelbuf_ref(BOB_PixelBuffer_Handle pb);
 
 typedef struct {
     BOB_Texture_Handle texture; //GL index of the atlas texture
     uint32_t cursor_x, cursor_y; //Current packing position
     uint32_t row_height; //Height of the tallest texture on the current row
     BOB_Format format; //Pixel format of the texture
+    uint8_t init;
 } BOB_TextureAtlas;
 
 //Initialises a blank texture atlas
@@ -145,7 +149,8 @@ BOB_Atlas_Handle BOB_atlas_init(uint32_t width, uint32_t height, BOB_Format form
 //TODO: Add a way of returning an error if there was no space to add new stuff
 BOB_Quad BOB_atlas_pack(BOB_Atlas_Handle a, uint8_t* pixels, size_t w, size_t h);
 //Frees a texture atlas
-void BOB_atlas_free(BOB_Atlas_Handle a);
+void BOB_atlas_free(BOB_Atlas_Handle *a);
+BOB_TextureAtlas *BOB_get_atlas_ref(BOB_Atlas_Handle a);
 
 typedef enum {
     BOB_VERTEX_SHADER,
@@ -215,10 +220,12 @@ typedef struct {
     BOB_Uniform *uniforms;
     size_t uniform_count;
     uint32_t shader;
+    uint8_t init;
 } BOB_Material;
 
 BOB_Material_Handle BOB_create_material(BOB_Shader_Data *data, size_t num_shaders, BOB_Uniform *uniforms, size_t num_uniforms);
-void BOB_destroy_material(BOB_Material_Handle mat);
+void BOB_material_free(BOB_Material_Handle *mat);
+BOB_Material *BOB_get_mat_ref(BOB_Material_Handle mat);
 
 void BOB_set_material_float(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, float value);
 void BOB_set_material_unsigned_int(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, uint32_t value);
@@ -303,7 +310,7 @@ void BOB_renderer_update_dimensions(BOB_Renderer *r, uint32_t width, uint32_t he
 //Draws a quad
 void BOB_draw_atlas_quad(BOB_Renderer *r, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, BOB_Atlas_Handle atlas, uint16_t layer, float rotation);
 //Draws a dynamically allocated texture
-void BOB_draw_texture(BOB_Renderer *r, uint32_t texture, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, uint16_t layer, float rotation);
+void BOB_draw_texture(BOB_Renderer *r, BOB_Texture_Handle texture, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, uint16_t layer, float rotation);
 //Draws a pixel buffer
 void BOB_draw_pixel_buffer(BOB_Renderer *r, BOB_PixelBuffer_Handle pb, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, uint16_t layer, float rotation);
 //Draws a filled circle
@@ -324,7 +331,7 @@ void BOB_draw_line(BOB_Renderer *r, BOB_Vector2 start_pos, BOB_Vector2 end_pos, 
 //Draws a quad with a specified material
 void BOB_draw_atlas_quad_mat(BOB_Renderer *r, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, BOB_Atlas_Handle atlas, uint16_t layer, float rotation, BOB_Material_Handle mat);
 //Draws a dynamically allocated texture with a specified material
-void BOB_draw_texture_mat(BOB_Renderer *r, uint32_t texture, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, uint16_t layer, float rotation, BOB_Material_Handle mat);
+void BOB_draw_texture_mat(BOB_Renderer *r, BOB_Texture_Handle texture, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, uint16_t layer, float rotation, BOB_Material_Handle mat);
 //Draws a pixel buffer with a specified material
 void BOB_draw_pixel_buffer_mat(BOB_Renderer *r, BOB_PixelBuffer_Handle pb, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, uint16_t layer, float rotation, BOB_Material_Handle mat);
 //Draws a filled circle with a specified material
