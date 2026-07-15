@@ -7,3 +7,4 @@ build/
 GLFW/
 *.fnt
 *.png
+stb_image.h

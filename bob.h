@@ -391,7 +391,9 @@ typedef struct {
     BOB_Texture_Handle pages[256]; //Each glyph's page attribute is 1 byte in the binary format, so only need to worry about 256 pages max
     BOB_BMF_Glyph *glyphs;
     BOB_BMF_Kerning *kernings;
+    size_t glyph_capacity;
     size_t glyph_count;
+    size_t kerning_capacity;
     size_t kerning_count;
     uint32_t line_height;
     uint32_t base;
@@ -436,7 +438,8 @@ uint8_t BOB_draw_char(BOB_Renderer *r, BOB_Bitmap_Font*bf, char c, BOB_Quad dime
 uint8_t BOB_draw_string(BOB_Renderer *r, BOB_Bitmap_Font*bf, const char *str, size_t str_len, BOB_Vector2 gap, BOB_Vector2 start, BOB_Vector2 scale, BOB_Vector4 colour, uint16_t layer);
 BOB_Vector2 BOB_measure_text(const char *str, size_t str_len, BOB_Vector2 gap, BOB_Vector2 scale);
 
-BOB_Font_Handle BOB_load_bmf_font(const char *font_path);
+int8_t BOB_load_bmf_font(const char *font_path, BOB_Font_Handle *font);
 void BOB_add_font_page(BOB_Font_Handle font, uint32_t page_width, uint32_t page_height, uint8_t *page_data, BOB_Format page_format);
+void BOB_print_parsing_error(void);
 
 #endif //BOB_H

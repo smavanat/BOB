@@ -687,6 +687,10 @@ void BOB_terminate() {
     for(size_t i = 0; i < BOB_MAX_PIXELBUFFER_CAPACITY; i++) {
         BOBi_pixelbuffer_free(i);
     }
+    for(size_t i = 0; i < BOB_MAX_FONT_CAPACITY; i++) {
+        if(intrn_data.font_table[i].glyphs) BOB_FREE(intrn_data.font_table[i].glyphs);
+        if(intrn_data.font_table[i].kernings) BOB_FREE(intrn_data.font_table[i].kernings);
+    }
 }
 
 //========================================================== RENDERER FUNCTIONS ===========================================
@@ -1825,7 +1829,7 @@ int BOBi_read_to_end(char const *path, uint8_t **buf, uint8_t add_null) {
 
     //Place the file into a buffer
     if(fsz != fread(*buf, 1, fsz, fp)) {
-        free(buf);
+        free(*buf);
         return -1;
     }
 
@@ -1837,7 +1841,7 @@ int BOBi_read_to_end(char const *path, uint8_t **buf, uint8_t add_null) {
 
     //Add null terminator
     if(add_null) {
-        buf[fsz] = 0;
+        (*buf)[fsz] = 0;
     }
 
     return fsz;
@@ -1944,22 +1948,35 @@ uint8_t is_letter(char c) {
 
 uint8_t BOBi_parse_val(uint8_t *str, size_t strlen, int32_t *out) {
     int32_t sign = 1;
-    int32_t val = 0;
-    for(int i = strlen-1; i > -1; i--) {
-        if(i == 0 && str[i] == '-') sign = -1;
-        else if(!is_digit(str[i])) return 0;
-        else val = (val * 10) + (str[i] - '0');
+    size_t i = 0;
+
+    if (strlen > 0 && str[0] == '-') {
+        sign = -1;
+        i = 1;
     }
 
-    val *= sign;
-    *out = val;
+    int32_t val = 0;
+
+    for (; i < strlen; i++) {
+        if (!is_digit(str[i]))
+            return 0;
+
+        val = val * 10 + (str[i] - '0');
+    }
+
+    *out = val * sign;
     return 1;
 }
 
 typedef enum {
-    BOBi_BNF_COMMON,
-    BOBi_BNF_CHAR,
-    BOBi_BNF_KERNING,
+    BOBi_BMF_INFO,
+    BOBi_BMF_COMMON,
+    BOBi_BMF_PAGE,
+    BOBi_BMF_CHAR,
+    BOBi_BMF_CHARS,
+    BOBi_BMF_KERNING,
+    BOBi_BMF_KERNINGS,
+    BOBi_BMF_INVALID,
 } BOBi_BMF_Line_Type;
 
 uint8_t BOBi_parse_line(BOBi_BMF_Line_Type line_type, uint8_t *data, void *out) {
@@ -1968,8 +1985,9 @@ uint8_t BOBi_parse_line(BOBi_BMF_Line_Type line_type, uint8_t *data, void *out) 
     size_t index = 0;
     size_t token_sz = 0;
     size_t token_start = 0;
+    uint8_t line_end = 0;
 
-    while(data[index] != '\n' || data[index] != '\0') {
+    while(!line_end && data[index] != '\0') {
         if(is_letter(data[index])) {
             if(token_sz == 0) {
                 token_start = index;
@@ -1999,21 +2017,23 @@ uint8_t BOBi_parse_line(BOBi_BMF_Line_Type line_type, uint8_t *data, void *out) 
                 case ' ':
                 case '\t':
                 case '=':
+                case '\n':
                     if(token_sz > 0) {
                         if(cur_type == BOBi_TOKEN_ATTRIB) {
                             switch(line_type) {
-                                case BOBi_BNF_COMMON:
+                                case BOBi_BMF_COMMON:
                                     cur_attrib = BOBi_parse_common_attrib(&data[token_start], token_sz);
                                     if(cur_attrib == BOBi_BMF_ATTRIB_INVALID) return -2;
                                     break;
-                                case BOBi_BNF_CHAR:
+                                case BOBi_BMF_CHAR:
                                     cur_attrib = BOBi_parse_char_attrib(&data[token_start], token_sz);
                                     if(cur_attrib == BOBi_BMF_ATTRIB_INVALID) return -2;
                                     break;
-                                case BOBi_BNF_KERNING:
+                                case BOBi_BMF_KERNING:
                                     cur_attrib = BOBi_parse_kerning_attrib(&data[token_start], token_sz);
                                     if(cur_attrib == BOBi_BMF_ATTRIB_INVALID) return -2;
                                     break;
+                                default: return -2;
                             }
                             cur_type = BOBi_TOKEN_VAL;
                             token_sz = 0;
@@ -2022,7 +2042,7 @@ uint8_t BOBi_parse_line(BOBi_BMF_Line_Type line_type, uint8_t *data, void *out) 
                             int32_t val;
                             if(!BOBi_parse_val(&data[token_start], token_sz, &val)) return -2;
                             switch(line_type) {
-                                case BOBi_BNF_COMMON: {
+                                case BOBi_BMF_COMMON: {
                                     BOB_BMF_Font *font = (BOB_BMF_Font *)out;
                                     switch (cur_attrib) {
                                         case BOBi_BMF_ATTRIB_LINE_HEIGHT: font->line_height = val; break;
@@ -2039,7 +2059,7 @@ uint8_t BOBi_parse_line(BOBi_BMF_Line_Type line_type, uint8_t *data, void *out) 
                                     }
                                 }
                                 break;
-                                case BOBi_BNF_CHAR: {
+                                case BOBi_BMF_CHAR: {
                                     BOB_BMF_Glyph *glyph = (BOB_BMF_Glyph *)out;
                                     switch (cur_attrib) {
                                         case BOBi_BMF_ATTRIB_ID: glyph->codepoint = val; break;
@@ -2056,7 +2076,7 @@ uint8_t BOBi_parse_line(BOBi_BMF_Line_Type line_type, uint8_t *data, void *out) 
                                     }
                                 }
                                 break;
-                                case BOBi_BNF_KERNING: {
+                                case BOBi_BMF_KERNING: {
                                     BOB_BMF_Kerning *kerning = (BOB_BMF_Kerning *)out;
                                     switch (cur_attrib) {
                                         case BOBi_BMF_ATTRIB_FIRST: kerning->first = val; break;
@@ -2066,11 +2086,13 @@ uint8_t BOBi_parse_line(BOBi_BMF_Line_Type line_type, uint8_t *data, void *out) 
                                     }
                                 }
                                 break;
+                                default: return -2;
                             }
                             cur_type = BOBi_TOKEN_VAL;
                             token_sz = 0;
                         }
                     }
+                    if(data[index] == '\n') line_end = 1;
                     break;
                 case '-':
                     if(cur_type != BOBi_TOKEN_VAL || token_sz != 0) {
@@ -2082,17 +2104,130 @@ uint8_t BOBi_parse_line(BOBi_BMF_Line_Type line_type, uint8_t *data, void *out) 
                     token_sz++;
                     break;
                 default:
-                    break;
+                    error_data.error_col = index;
+                    error_data.error_char = data[index];
+                    return -1;
             }
         }
         index++;
     }
+    return 1;
 }
 
-BOB_Font_Handle BOB_load_bmf_font(const char *font_path) {
+int BOBi_parse_count(uint8_t *str, size_t *out) {
+    BOBi_token_type cur_type = BOBi_TOKEN_ATTRIB;
+    size_t index = 0;
+    size_t token_sz = 0;
+    size_t token_start = 0;
+    uint8_t line_end = 0;
+
+    while(!line_end && str[index] != '\0') {
+        if(is_letter(str[index])) {
+            if(token_sz == 0) {
+                token_start = index;
+                cur_type = BOBi_TOKEN_ATTRIB;
+            }
+            if(cur_type != BOBi_TOKEN_ATTRIB) {
+                error_data.error_col = index;
+                error_data.error_char = str[index];
+                return -1;
+            }
+            token_sz++;
+        }
+        else if(is_digit(str[index])) {
+            if(token_sz == 0) {
+                token_start = index;
+                cur_type = BOBi_TOKEN_VAL;
+            }
+            if(cur_type != BOBi_TOKEN_VAL) {
+                error_data.error_col = index;
+                error_data.error_char = str[index];
+                return -1;
+            }
+            token_sz++;
+        }
+        else {
+            switch (str[index]) {
+                case ' ':
+                case '\t':
+                case '=':
+                case '\n':
+                    if(token_sz > 0) {
+                        if(cur_type == BOBi_TOKEN_ATTRIB) {
+                            char buf[token_sz+1];
+                            BOB_MEMCPY(buf, &str[token_start], token_sz);
+                            buf[token_sz] = '\0';
+
+                            if(strcmp(buf, "count")) return -2;
+                            cur_type = BOBi_TOKEN_VAL;
+                            token_sz = 0;
+                        }
+                        else {
+                            int32_t val;
+                            if(!BOBi_parse_val(&str[token_start], token_sz, &val)) return -2;
+                            *out = val;
+                        }
+                    }
+                    if(str[index] == '\n') line_end = 1;
+                    break;
+                default:
+                    error_data.error_col = index;
+                    error_data.error_char = str[index];
+                    return -1;
+            }
+        }
+        index++;
+    }
+    return index;
+}
+
+BOBi_BMF_Line_Type BOBi_parse_tag(uint8_t *str, size_t strlen) {
+    char buf[strlen+1];
+    BOB_MEMCPY(buf, str, strlen);
+    buf[strlen] = '\0';
+
+    if(!strcmp("info", buf)) return BOBi_BMF_INFO;
+    else if(!strcmp("common", buf)) return BOBi_BMF_COMMON;
+    else if(!strcmp("page", buf)) return BOBi_BMF_PAGE;
+    else if(!strcmp("char", buf)) return BOBi_BMF_CHAR;
+    else if(!strcmp("chars", buf)) return BOBi_BMF_CHARS;
+    else if(!strcmp("kerning", buf)) return BOBi_BMF_KERNING;
+    else if(!strcmp("kernings", buf)) return BOBi_BMF_KERNINGS;
+    else return BOBi_BMF_INVALID;
+}
+
+void BOBi_append_glyph(BOB_BMF_Font *font, BOB_BMF_Glyph g) {
+    if(font->glyphs == NULL) font->glyphs = BOB_MALLOC(sizeof(BOB_BMF_Glyph) * font->glyph_capacity);
+    if(font->glyph_count >= font->glyph_capacity) {
+        size_t new_cap = font->glyph_capacity * 2;
+        BOB_BMF_Glyph *temp = BOB_MALLOC(sizeof(BOB_BMF_Glyph) * new_cap);
+        BOB_MEMCPY(temp, font->glyphs, sizeof(BOB_BMF_Glyph) * font->glyph_capacity);
+        free(font->glyphs);
+        font->glyphs = temp;
+        font->glyph_capacity = new_cap;
+    }
+
+    font->glyphs[font->glyph_count++] = g;
+}
+void BOBi_append_kerning(BOB_BMF_Font *font, BOB_BMF_Kerning k) {
+    if(font->kernings == NULL) font->kernings = BOB_MALLOC(sizeof(BOB_BMF_Kerning) * font->kerning_capacity);
+    if(font->kerning_count >= font->kerning_capacity) {
+        size_t new_cap = font->kerning_capacity * 2;
+        BOB_BMF_Kerning *temp = BOB_MALLOC(sizeof(BOB_BMF_Kerning) * new_cap);
+        BOB_MEMCPY(temp, font->kernings, sizeof(BOB_BMF_Kerning) * font->kerning_capacity);
+        free(font->kernings);
+        font->kernings = temp;
+        font->kerning_capacity = new_cap;
+    }
+
+    font->kernings[font->kerning_count++] = k;
+}
+
+int8_t BOB_load_bmf_font(const char *font_path, BOB_Font_Handle *font) {
     if(intrn_data.num_fonts >= BOB_MAX_FONT_CAPACITY) {
         BOB_PRINT("ERROR: Exceeded Font Capacity");
-        return UINT32_MAX;
+        *font |= BOBi_MSB;
+        return 0;
     }
 
     uint32_t index;
@@ -2113,13 +2248,100 @@ BOB_Font_Handle BOB_load_bmf_font(const char *font_path) {
     }
 
     intrn_data.font_table[index].init = 1; //Setting the value to be initialised
+    // intrn_data.font_table[index].glyph_capacity = 96; //Setting the value to be initialised
+    // intrn_data.font_table[index].kerning_capacity = 96; //Setting the value to be initialised
 
-    //TODO: FILE PARSING
     uint8_t *buf;
-    BOBi_read_to_end(font_path, &buf, 1);
+    int size = BOBi_read_to_end(font_path, &buf, 1);
+    if(size < 0) return 0;
+
+    size_t i = 0;
+    size_t token_sz = 0, token_start = 0;
+    size_t col = 0;
+    while(buf[i] != '\0') {
+        if(is_letter(buf[i])) {
+            if(token_sz == 0) {
+                token_start = i;
+            }
+            token_sz++;
+            i++;
+            col++;
+        }
+        else if(buf[i] == ' ' || buf[i] == '\t' || buf[i] == '\n') {
+            if(token_sz > 0) {
+                BOBi_BMF_Line_Type type = BOBi_parse_tag(&buf[token_start], token_sz);
+                switch(type) {
+                    case BOBi_BMF_INFO:
+                    case BOBi_BMF_PAGE:
+                        break;
+                    case BOBi_BMF_COMMON:
+                        BOBi_parse_line(type, &buf[token_start + token_sz], &intrn_data.font_table[index]);
+                        break;
+                    case BOBi_BMF_CHARS: {
+                        int new_i = BOBi_parse_count(&buf[token_start + token_sz], &intrn_data.font_table[index].glyph_capacity);
+                        if(new_i <= 0) {
+                            index |= BOBi_MSB;
+                            free(buf);
+                            return -2;
+                        }
+                        i += (size_t) new_i;
+                    }
+                    break;
+                    case BOBi_BMF_KERNINGS: {
+                        int new_i = BOBi_parse_count(&buf[token_start + token_sz], &intrn_data.font_table[index].kerning_capacity);
+                        if(new_i <= 0) {
+                            index |= BOBi_MSB;
+                            free(buf);
+                            return -2;
+                        }
+                        i += (size_t) new_i;
+                    }
+                    break;
+                    case BOBi_BMF_CHAR: {
+                        BOB_BMF_Glyph g;
+                        BOBi_parse_line(type, &buf[token_start + token_sz], &g);
+                        BOBi_append_glyph(&intrn_data.font_table[index], g);
+                    }
+                    break;
+                    case BOBi_BMF_KERNING: {
+                        BOB_BMF_Kerning k;
+                        BOBi_parse_line(type, &buf[token_start + token_sz], &k);
+                        BOBi_append_kerning(&intrn_data.font_table[index], k);
+                    }
+                    break;
+                    case BOBi_BMF_INVALID:
+                        index |= BOBi_MSB;
+                        free(buf);
+                        return -2;
+                }
+                //Keep going until we hit the next line
+                while(buf[i] != '\n' && buf[i] != '\0') {
+                    i++;
+                    col++;
+                }
+                token_sz = 0;
+                token_start = 0;
+            }
+            if(buf[i] == '\n') {
+                error_data.error_line++;
+                col = 0;
+            }
+            i++;
+            col++;
+        }
+        else {
+            error_data.error_col = col;
+            error_data.error_char = buf[i];
+            index |= BOBi_MSB;
+            free(buf);
+            return -1;
+        }
+    }
+    free(buf);
 
     intrn_data.num_fonts++;
-    return index;
+    *font = index;
+    return 1;
 }
 
 void BOB_add_font_page(BOB_Font_Handle font, uint32_t page_width, uint32_t page_height, uint8_t *page_data, BOB_Format page_format) {
@@ -2128,3 +2350,6 @@ void BOB_add_font_page(BOB_Font_Handle font, uint32_t page_width, uint32_t page_
     intrn_data.font_table[font].pages[intrn_data.font_table[font].page_count++] = BOB_create_texture(page_width, page_height, page_data, page_format);
 }
 
+void BOB_print_parsing_error(void) {
+    printf("Error Line: %u\nError Column: %u\nError Char: %c\n", error_data.error_line, error_data.error_col, error_data.error_char);
+}
