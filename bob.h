@@ -449,6 +449,7 @@ BOB_Vector2 BOB_measure_text(const char *str, size_t str_len, BOB_Vector2 gap, B
 
 int8_t BOB_load_bmf_font(const char *font_path, BOB_Font_Handle *font);
 void BOB_add_font_page(BOB_Font_Handle font, uint32_t page_width, uint32_t page_height, uint8_t *page_data, BOB_Format page_format);
+uint8_t BOB_BMF_render_char(BOB_Renderer *r, BOB_Font_Handle font, uint32_t codepoint, BOB_Vector2 pos, BOB_Vector4 colour, uint16_t layer, float rotation);
 void BOB_print_parsing_error(void);
 
 #endif //BOB_H
