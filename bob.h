@@ -383,14 +383,23 @@ typedef struct {
 } BOB_BMF_Glyph;
 
 typedef struct {
-    uint32_t first, second; //Ids of the chars involved in the kerning
+    uint32_t first, second; //Codepoints of the chars involved in the kerning
     float amount; //How much the xpos should be adjusted when drawing the second char immediately following the first
 } BOB_BMF_Kerning;
+
+typedef struct {
+    size_t size;
+    size_t capacity;
+    uint64_t *keys;
+    uint32_t *values;
+} BOBi_Hashmap;
 
 typedef struct {
     BOB_Texture_Handle pages[256]; //Each glyph's page attribute is 1 byte in the binary format, so only need to worry about 256 pages max
     BOB_BMF_Glyph *glyphs;
     BOB_BMF_Kerning *kernings;
+    BOBi_Hashmap *glyph_map;
+    BOBi_Hashmap *kerning_map;
     size_t glyph_capacity;
     size_t glyph_count;
     size_t kerning_capacity;

@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 typedef struct {
@@ -589,6 +590,174 @@ void BOBi_material_free(BOB_Material_Handle mat) {
     intrn_data.material_table[mat] = (BOB_Material){0}; //Clear the data
 }
 
+#define BOBi_HASHMAP_DUMMY UINT64_MAX
+
+uint32_t BOBi_hashmap_add(BOBi_Hashmap *h, uint64_t key, uint32_t value);
+
+//Checks if n is prime
+uint64_t BOBi_is_prime(uint64_t n) {
+    if(n <= 1) return 0;
+    if(n <= 3) return 1;
+    if(0 == n % 2 || 0 == n % 3) return 0;
+
+    for(size_t i = 5; i * i <= n; i +=6) {
+        if(n % i == 0 || n % (i + 2) == 0) return 0;
+    }
+    return 1;
+}
+
+//Gets the next prime number after n
+uint64_t BOBi_next_prime(uint64_t n) {
+    if(n <= 2) return 2;
+    n = (0 == n % 2) ? n +1 : n; //Make sure n is odd
+
+    while(!BOBi_is_prime(n)){
+        n += 2; //Skip even numbers
+    }
+    return n;
+
+}
+
+BOBi_Hashmap BOBi_hashmap_init(size_t init_capacity) {
+    BOBi_Hashmap ret = {0};
+    ret.capacity = BOBi_next_prime(init_capacity);
+    ret.keys = BOB_MALLOC(sizeof(uint64_t) * ret.capacity);
+    BOB_MEMSET(ret.keys, 0xFF, sizeof(uint64_t) * ret.capacity);
+    ret.values = BOB_MALLOC(sizeof(uint32_t) * ret.capacity);
+    BOB_MEMSET(ret.values, 0xFF, sizeof(uint32_t) * ret.capacity);
+
+    return ret;
+}
+
+//Primary hash funtion.
+uint64_t BOBi_hash_int(uint64_t key, size_t length) {
+    return (key & 0x7FFFFFFFFFFFFFFF) % length;
+}
+
+//Secondary hash funtion.
+uint64_t BOBi_second_hash_int(uint64_t key, size_t length) {
+    return 1 + (key & 0x7FFFFFFFFFFFFFFF) % (length - 1);
+}
+
+//Finds the next slot that we can put a value into in the hashmap
+uint64_t BOBi_hashmap_find(const BOBi_Hashmap *h, uint64_t key) {
+    uint64_t hash = BOBi_hash_int(key, h->capacity);
+    uint64_t step = BOBi_second_hash_int(key, h->capacity);
+
+    uint64_t j = hash;
+
+    for (size_t i = 0; i < h->capacity; ++i) {
+        if (h->keys[j] == BOBi_HASHMAP_DUMMY) //At an empty slot
+            return UINT64_MAX;
+
+        if (h->keys[j] == key)
+            return j;
+
+        j = (j + step) % h->capacity;
+    }
+
+    return UINT64_MAX;
+}
+
+uint64_t BOBi_hashmap_find_insert(const BOBi_Hashmap *h, uint64_t key) {
+    uint64_t hash = BOBi_hash_int(key, h->capacity);
+    uint64_t step = BOBi_second_hash_int(key, h->capacity);
+
+    uint64_t j = hash;
+    uint64_t first_deleted = UINT64_MAX;
+
+    for (size_t i = 0; i < h->capacity; ++i) {
+        if (h->keys[j] == BOBi_HASHMAP_DUMMY) {
+            return (first_deleted != UINT64_MAX) ? first_deleted : j;
+        }
+
+        if (h->keys[j] == BOBi_HASHMAP_DUMMY &&
+            first_deleted == UINT64_MAX) {
+            first_deleted = j;
+        }
+
+        if (h->keys[j] == key)
+            return j;
+
+        j = (j + step) % h->capacity;
+    }
+
+    return first_deleted;
+}
+
+//Resizes the hashmap to a new size
+void BOBi_hashmap_resize(BOBi_Hashmap *h, size_t newCap) {
+    //Save the old values for rehashing:
+    uint64_t *oldKeys = h->keys;
+    uint32_t *oldVals = h->values;
+    size_t oldCap = h->capacity;
+
+    //Update the capcity to the new value:
+    h->capacity = newCap;
+    h->size = 0; //Reset the size to 0 as it will be naturally incremented in add()
+
+    //Create the new arrays with the new capacity
+    h->keys = BOB_MALLOC(sizeof(uint64_t) * newCap);
+    BOB_MEMSET(h->keys, 0xFF, sizeof(uint64_t) * newCap);
+    h->values = BOB_MALLOC(sizeof(uint32_t) * newCap);
+    BOB_MEMSET(h->values, 0xFF, sizeof(uint32_t) * newCap);
+
+    //Rehash and reinsert all entries from the old table into the new one
+    for(size_t i = 0; i < oldCap; i++) {
+        if(oldKeys[i] != BOBi_HASHMAP_DUMMY) {
+            BOBi_hashmap_add(h, oldKeys[i], oldVals[i]);
+        }
+    }
+    BOB_FREE(oldKeys);
+    BOB_FREE(oldVals);
+}
+
+//Gets a value from a int_hashmap
+uint32_t BOBi_hashmap_get(BOBi_Hashmap *h, uint64_t key) {
+    uint64_t j = BOBi_hashmap_find(h, key);
+    if(j == BOBi_HASHMAP_DUMMY) return UINT32_MAX;
+    return h->values[j];
+}
+
+//Removes a kvp from the int_hashmap and returns its value
+uint32_t BOBi_hashmap_remove(BOBi_Hashmap *h, uint64_t key) {
+    uint64_t j = BOBi_hashmap_find(h, key);
+    if(j == BOBi_HASHMAP_DUMMY) return UINT32_MAX;
+
+    uint32_t val = h->values[j];
+    h->keys[j] = BOBi_HASHMAP_DUMMY;
+    h->values[j] = UINT32_MAX;
+    h->size--;
+    return val;
+}
+
+//Adds a kvp to the int_hashmap, replacing the value if the key already exists in the hashmap
+uint32_t BOBi_hashmap_add(BOBi_Hashmap *h, uint64_t key, uint32_t value) {
+    uint64_t j = BOBi_hashmap_find_insert(h, key);
+    if(j == BOBi_HASHMAP_DUMMY) return UINT32_MAX;
+
+    if(j >= 0) {
+        uint32_t oldVal = h->values[j];
+        h->values[j] = value;
+        return oldVal;
+    }
+    h->keys[-(j+1)] = key;
+    h->values[-(j+1)] = value;
+    h->size++;
+
+    //If we are above the load factor of 0.75, we need to resize the hashmap
+    if(h->size > h->capacity * 0.75)
+        BOBi_hashmap_resize(h, BOBi_next_prime(2 * h->capacity));
+    return UINT32_MAX;
+}
+
+void BOBi_hashmap_free(BOBi_Hashmap *h) {
+    if(h->keys) BOB_FREE(h->keys);
+    h->keys = NULL;
+    if(h->values) BOB_FREE(h->values);
+    h->values = NULL;
+}
+
 // ==================================== MISCELLANEOUS FUNCTIONS ========================================
 
 //Calculates the projection matrix
@@ -690,6 +859,14 @@ void BOB_terminate() {
     for(size_t i = 0; i < BOB_MAX_FONT_CAPACITY; i++) {
         if(intrn_data.font_table[i].glyphs) BOB_FREE(intrn_data.font_table[i].glyphs);
         if(intrn_data.font_table[i].kernings) BOB_FREE(intrn_data.font_table[i].kernings);
+        if(intrn_data.font_table[i].glyph_map) {
+            BOBi_hashmap_free(intrn_data.font_table[i].glyph_map);
+            BOB_FREE(intrn_data.font_table[i].glyph_map);
+        }
+        if(intrn_data.font_table[i].kerning_map) {
+            BOBi_hashmap_free(intrn_data.font_table[i].kerning_map);
+            BOB_FREE(intrn_data.font_table[i].kerning_map);
+        }
     }
 }
 
@@ -2207,6 +2384,7 @@ void BOBi_append_glyph(BOB_BMF_Font *font, BOB_BMF_Glyph g) {
         font->glyph_capacity = new_cap;
     }
 
+    BOBi_hashmap_add(font->glyph_map, g.codepoint, font->glyph_count);
     font->glyphs[font->glyph_count++] = g;
 }
 void BOBi_append_kerning(BOB_BMF_Font *font, BOB_BMF_Kerning k) {
@@ -2220,6 +2398,7 @@ void BOBi_append_kerning(BOB_BMF_Font *font, BOB_BMF_Kerning k) {
         font->kerning_capacity = new_cap;
     }
 
+    BOBi_hashmap_add(font->kerning_map, ((uint64_t)k.first << 32) | k.second, font->kerning_count);
     font->kernings[font->kerning_count++] = k;
 }
 
@@ -2248,8 +2427,6 @@ int8_t BOB_load_bmf_font(const char *font_path, BOB_Font_Handle *font) {
     }
 
     intrn_data.font_table[index].init = 1; //Setting the value to be initialised
-    // intrn_data.font_table[index].glyph_capacity = 96; //Setting the value to be initialised
-    // intrn_data.font_table[index].kerning_capacity = 96; //Setting the value to be initialised
 
     uint8_t *buf;
     int size = BOBi_read_to_end(font_path, &buf, 1);
@@ -2279,6 +2456,8 @@ int8_t BOB_load_bmf_font(const char *font_path, BOB_Font_Handle *font) {
                         break;
                     case BOBi_BMF_CHARS: {
                         int new_i = BOBi_parse_count(&buf[token_start + token_sz], &intrn_data.font_table[index].glyph_capacity);
+                        intrn_data.font_table[index].glyph_map = malloc(sizeof(BOBi_Hashmap));
+                        *intrn_data.font_table[index].glyph_map = BOBi_hashmap_init(intrn_data.font_table[index].glyph_capacity);
                         if(new_i <= 0) {
                             index |= BOBi_MSB;
                             free(buf);
@@ -2289,6 +2468,8 @@ int8_t BOB_load_bmf_font(const char *font_path, BOB_Font_Handle *font) {
                     break;
                     case BOBi_BMF_KERNINGS: {
                         int new_i = BOBi_parse_count(&buf[token_start + token_sz], &intrn_data.font_table[index].kerning_capacity);
+                        intrn_data.font_table[index].kerning_map = malloc(sizeof(BOBi_Hashmap));
+                        *intrn_data.font_table[index].kerning_map = BOBi_hashmap_init(intrn_data.font_table[index].kerning_capacity);
                         if(new_i <= 0) {
                             index |= BOBi_MSB;
                             free(buf);
