@@ -41,6 +41,7 @@
 //      Allow the user to define render passes -> Custom framebuffers
 //      Maybe allow custom vertex layout?
 //      Fix the bitmap font parser
+//      Do proper error reporting and document what each error code means somewhere
 typedef struct {
     float m[4][4];
 } BOB_Mat4;
@@ -360,20 +361,6 @@ float BOB_degrees_to_radians(float angle);
 
 //TODO: support the .fnt metadata from AngelCode (binary)
 
-typedef enum {
-    BOB_BITMAP_FONT_IMAGE,
-    BOB_BITMAP_FONT_BMF_TEXT,
-    BOB_BITMAP_FONT_BMF_BINARY,
-} BOB_Bitmap_Font_Type;
-
-//Way of telling the bitmap renderer what layout your bitmap uses
-typedef enum {
-    BOB_BITMAP_IMAGE_STANDARD, //Standard ASCII bitmap with chars from 32 to 126
-    BOB_BITMAP_IMAGE_OFFSET, //Some subset of the standard ASCII ordering that still adheres to the original, e.g. having only chars 46 - 97
-    BOB_BITMAP_IMAGE_CUSTOM, //A completely custom ordering of chars
-    BOB_NUM_BITMAP_IMAGE_LAYOUTS,
-} BOB_Bitmap_Image_Layout;
-
 //BMFont structs:
 typedef struct {
     uint32_t codepoint; //Unicode codepoint
@@ -381,12 +368,12 @@ typedef struct {
     float x_offset, y_offset, x_advance;
     uint8_t page;
     uint8_t channel;
-} BOB_BMF_Glyph;
+} BOB_Glyph;
 
 typedef struct {
     uint32_t first, second; //Codepoints of the chars involved in the kerning
     float amount; //How much the xpos should be adjusted when drawing the second char immediately following the first
-} BOB_BMF_Kerning;
+} BOB_Kerning;
 
 typedef struct {
     size_t size;
@@ -397,8 +384,8 @@ typedef struct {
 
 typedef struct {
     BOB_Texture_Handle pages[256]; //Each glyph's page attribute is 1 byte in the binary format, so only need to worry about 256 pages max
-    BOB_BMF_Glyph *glyphs;
-    BOB_BMF_Kerning *kernings;
+    BOB_Glyph *glyphs;
+    BOB_Kerning *kernings;
     BOBi_Hashmap *glyph_map;
     BOBi_Hashmap *kerning_map;
     size_t glyph_capacity;
@@ -409,53 +396,19 @@ typedef struct {
     uint32_t base;
     uint8_t page_count;
     uint8_t init;
-} BOB_BMF_Font;
-
-//TODO: Make this hidden and only accessible through a macro
-typedef union {
-    //Stores the jump table for a custom layout
-    //Stores the offsets for a subset layout
-    struct {} standard_desc;
-    struct {
-        size_t start_offset;
-        size_t end_offset;
-    } offset_desc;
-    struct {
-        char *data;
-        size_t len;
-    } custom_desc;
-} BOB_Bitmap_Image_Layout_Desc;
-
-typedef struct {
-    BOB_Texture_Handle tex; //Reference to the TextureAtlas used to store the bitmap
-
-    uint32_t char_pixel_width;
-    uint32_t char_pixel_height;
-
-    uint32_t char_padding_x; //Horizontal padding between chars on the atlas
-    uint32_t char_padding_y; //Vertical padding between chars on the atlas
-    uint32_t tex_border_padding_x;
-    uint32_t tex_border_padding_y;
-
-    BOB_Bitmap_Image_Layout layout;
-    BOB_Bitmap_Image_Layout_Desc desc;
-} BOB_Bitmap_Font;
-
-uint8_t BOB_bitmap_font_init(BOB_Bitmap_Font*opts, uint32_t atls, uint32_t cpw, uint32_t cph, uint32_t cpx, uint32_t cpy, uint32_t tbpx, uint32_t tbpy, BOB_Bitmap_Image_Layout lyt, BOB_Bitmap_Image_Layout_Desc desc);
-void BOB_bitmap_font_free(BOB_Bitmap_Font*bf);
-
-uint8_t BOB_draw_char(BOB_Renderer *r, BOB_Bitmap_Font*bf, char c, BOB_Quad dimensions, BOB_Vector4 colour, uint16_t layer);
-uint8_t BOB_draw_string(BOB_Renderer *r, BOB_Bitmap_Font*bf, const char *str, size_t str_len, BOB_Vector2 gap, BOB_Vector2 start, BOB_Vector2 scale, BOB_Vector4 colour, uint16_t layer);
-BOB_Vector2 BOB_measure_text(const char *str, size_t str_len, BOB_Vector2 gap, BOB_Vector2 scale);
+} BOB_Font;
 
 uint8_t BOBi_create_custom_font(BOB_Font_Handle *font, size_t num_glyphs, size_t num_kernings, size_t line_height, size_t base);
 int8_t BOB_load_bmf_font(const char *font_path, BOB_Font_Handle *font);
 void BOB_add_font_page(BOB_Font_Handle font, uint32_t page_width, uint32_t page_height, uint8_t *page_data, BOB_Format page_format);
-uint8_t BOB_BMF_render_char(BOB_Renderer *r, BOB_Font_Handle font, uint32_t codepoint, BOB_Vector2 *pos, BOB_Vector4 colour, uint16_t layer);
-uint8_t BOB_BMF_render_char_string(BOB_Renderer *r, BOB_Font_Handle font, char *str, size_t str_len, BOB_Vector2 *start, BOB_Vector4 colour, uint16_t layer);
-uint8_t BOB_BMF_render_codepoint_string(BOB_Renderer *r, BOB_Font_Handle font, uint32_t *str, size_t str_len, BOB_Vector2 *start, BOB_Vector4 colour, uint16_t layer);
-uint8_t BOB_append_glyph(BOB_Font_Handle font, BOB_BMF_Glyph glyph);
-uint8_t BOB_append_kerning(BOB_Font_Handle font, BOB_BMF_Kerning kerning);
+uint8_t BOB_draw_codepoint(BOB_Renderer *r, BOB_Font_Handle font, uint32_t codepoint, BOB_Vector2 *pos, BOB_Vector4 colour, uint16_t layer);
+uint8_t BOB_draw_char_string(BOB_Renderer *r, BOB_Font_Handle font, char *str, size_t str_len, BOB_Vector2 *start, BOB_Vector4 colour, uint16_t layer);
+uint8_t BOB_draw_codepoint_string(BOB_Renderer *r, BOB_Font_Handle font, uint32_t *str, size_t str_len, BOB_Vector2 *start, BOB_Vector4 colour, uint16_t layer);
+uint8_t BOB_font_append_glyph(BOB_Font_Handle font, BOB_Glyph glyph);
+uint8_t BOB_font_append_kerning(BOB_Font_Handle font, BOB_Kerning kerning);
+uint8_t BOB_measure_char_string(const char *str, size_t str_len, BOB_Font_Handle font, BOB_Vector2 *out);
+uint8_t BOB_measure_codepoint_string(const uint32_t *str, size_t str_len, BOB_Font_Handle font, BOB_Vector2 *out);
 void BOB_print_parsing_error(void);
+uint8_t BOB_font_free(BOB_Font_Handle *font);
 
 #endif //BOB_H
