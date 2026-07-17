@@ -32,8 +32,7 @@
 #define BOB_PRINT printf
 #endif //BOB_PRINT
 
-//TODO: Proper bitmap font support
-//      Vulkan support
+//TODO: Vulkan support
 //      Make it so that unfilled shapes don't have the full outline drawn when clipped
 //      Figure out whether some functions will return error codes or not e.g. BOB_draw_char
 //      Add an arena to manage the total memory easily and get rid of BOB_MEMSET and BOB_MEMCPY since these should all take place within the arena
@@ -398,7 +397,7 @@ typedef struct {
     uint8_t init;
 } BOB_Font;
 
-uint8_t BOBi_create_custom_font(BOB_Font_Handle *font, size_t num_glyphs, size_t num_kernings, size_t line_height, size_t base);
+uint8_t BOB_create_custom_font(BOB_Font_Handle *font, size_t num_glyphs, size_t num_kernings, size_t line_height, size_t base);
 int8_t BOB_load_bmf_font(const char *font_path, BOB_Font_Handle *font);
 void BOB_add_font_page(BOB_Font_Handle font, uint32_t page_width, uint32_t page_height, uint8_t *page_data, BOB_Format page_format);
 uint8_t BOB_draw_codepoint(BOB_Renderer *r, BOB_Font_Handle font, uint32_t codepoint, BOB_Vector2 *pos, BOB_Vector4 colour, uint16_t layer);
