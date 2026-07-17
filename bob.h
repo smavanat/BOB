@@ -40,6 +40,7 @@
 //      Draw call sorting (quicksort) internally rather than relying on the depth buffer -> Should actually do this since dealing with the depth buffer is a giant pain
 //      Allow the user to define render passes -> Custom framebuffers
 //      Maybe allow custom vertex layout?
+//      Fix the bitmap font parser
 typedef struct {
     float m[4][4];
 } BOB_Mat4;
@@ -357,7 +358,7 @@ void BOB_clear_colour(BOB_Vector4 colour);
 //Converts an angle in degrees to radians
 float BOB_degrees_to_radians(float angle);
 
-//TODO: support the .fnt metadata from AngelCode (text and binary)
+//TODO: support the .fnt metadata from AngelCode (binary)
 
 typedef enum {
     BOB_BITMAP_FONT_IMAGE,
@@ -447,9 +448,14 @@ uint8_t BOB_draw_char(BOB_Renderer *r, BOB_Bitmap_Font*bf, char c, BOB_Quad dime
 uint8_t BOB_draw_string(BOB_Renderer *r, BOB_Bitmap_Font*bf, const char *str, size_t str_len, BOB_Vector2 gap, BOB_Vector2 start, BOB_Vector2 scale, BOB_Vector4 colour, uint16_t layer);
 BOB_Vector2 BOB_measure_text(const char *str, size_t str_len, BOB_Vector2 gap, BOB_Vector2 scale);
 
+uint8_t BOBi_create_custom_font(BOB_Font_Handle *font, size_t num_glyphs, size_t num_kernings, size_t line_height, size_t base);
 int8_t BOB_load_bmf_font(const char *font_path, BOB_Font_Handle *font);
 void BOB_add_font_page(BOB_Font_Handle font, uint32_t page_width, uint32_t page_height, uint8_t *page_data, BOB_Format page_format);
-uint8_t BOB_BMF_render_char(BOB_Renderer *r, BOB_Font_Handle font, uint32_t codepoint, BOB_Vector2 pos, BOB_Vector4 colour, uint16_t layer, float rotation);
+uint8_t BOB_BMF_render_char(BOB_Renderer *r, BOB_Font_Handle font, uint32_t codepoint, BOB_Vector2 *pos, BOB_Vector4 colour, uint16_t layer);
+uint8_t BOB_BMF_render_char_string(BOB_Renderer *r, BOB_Font_Handle font, char *str, size_t str_len, BOB_Vector2 *start, BOB_Vector4 colour, uint16_t layer);
+uint8_t BOB_BMF_render_codepoint_string(BOB_Renderer *r, BOB_Font_Handle font, uint32_t *str, size_t str_len, BOB_Vector2 *start, BOB_Vector4 colour, uint16_t layer);
+uint8_t BOB_append_glyph(BOB_Font_Handle font, BOB_BMF_Glyph glyph);
+uint8_t BOB_append_kerning(BOB_Font_Handle font, BOB_BMF_Kerning kerning);
 void BOB_print_parsing_error(void);
 
 #endif //BOB_H

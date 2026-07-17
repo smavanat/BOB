@@ -672,18 +672,6 @@ uint64_t BOBi_hashmap_find_insert(const BOBi_Hashmap *h, uint64_t key) {
 
         if (h->keys[j] == key)
             return j;
-        // if (h->keys[j] == BOBi_HASHMAP_DUMMY) {
-        //     return (first_deleted != UINT64_MAX) ? first_deleted : j;
-        // }
-        //
-        // if (h->keys[j] == BOBi_HASHMAP_DUMMY &&
-        //     first_deleted == UINT64_MAX) {
-        //     first_deleted = j;
-        // }
-        //
-        // if (h->keys[j] == key)
-        //     return j;
-
         j = (j + step) % h->capacity;
     }
 
@@ -2198,6 +2186,7 @@ uint8_t BOBi_parse_line(BOBi_BMF_Line_Type line_type, uint8_t *data, void *out) 
                 case '\t':
                 case '=':
                 case '\n':
+                case '\r':
                     if(token_sz > 0) {
                         if(cur_type == BOBi_TOKEN_ATTRIB) {
                             switch(line_type) {
@@ -2272,7 +2261,7 @@ uint8_t BOBi_parse_line(BOBi_BMF_Line_Type line_type, uint8_t *data, void *out) 
                             token_sz = 0;
                         }
                     }
-                    if(data[index] == '\n') line_end = 1;
+                    if(data[index] == '\n' || data[index] == '\r') line_end = 1;
                     break;
                 case '-':
                     if(cur_type != BOBi_TOKEN_VAL || token_sz != 0) {
@@ -2332,6 +2321,7 @@ int BOBi_parse_count(uint8_t *str, size_t *out) {
                 case '\t':
                 case '=':
                 case '\n':
+                case '\r':
                     if(token_sz > 0) {
                         if(cur_type == BOBi_TOKEN_ATTRIB) {
                             char buf[token_sz+1];
@@ -2348,7 +2338,7 @@ int BOBi_parse_count(uint8_t *str, size_t *out) {
                             *out = val;
                         }
                     }
-                    if(str[index] == '\n') line_end = 1;
+                    if(str[index] == '\n' || str[index] == '\r') line_end = 1;
                     break;
                 default:
                     error_data.error_col = index;
@@ -2379,7 +2369,7 @@ BOBi_BMF_Line_Type BOBi_parse_tag(uint8_t *str, size_t strlen) {
 void BOBi_append_glyph(BOB_BMF_Font *font, BOB_BMF_Glyph g) {
     if(font->glyphs == NULL) font->glyphs = BOB_MALLOC(sizeof(BOB_BMF_Glyph) * font->glyph_capacity);
     if(font->glyph_count >= font->glyph_capacity) {
-        size_t new_cap = font->glyph_capacity * 2;
+        size_t new_cap = (font->glyph_capacity > 0) ? font->glyph_capacity * 2 : 16;
         BOB_BMF_Glyph *temp = BOB_MALLOC(sizeof(BOB_BMF_Glyph) * new_cap);
         BOB_MEMCPY(temp, font->glyphs, sizeof(BOB_BMF_Glyph) * font->glyph_capacity);
         free(font->glyphs);
@@ -2399,7 +2389,7 @@ void BOBi_append_glyph(BOB_BMF_Font *font, BOB_BMF_Glyph g) {
 void BOBi_append_kerning(BOB_BMF_Font *font, BOB_BMF_Kerning k) {
     if(font->kernings == NULL) font->kernings = BOB_MALLOC(sizeof(BOB_BMF_Kerning) * font->kerning_capacity);
     if(font->kerning_count >= font->kerning_capacity) {
-        size_t new_cap = font->kerning_capacity * 2;
+        size_t new_cap = (font->kerning_capacity > 0) ? font->kerning_capacity * 2 : 16;
         BOB_BMF_Kerning *temp = BOB_MALLOC(sizeof(BOB_BMF_Kerning) * new_cap);
         BOB_MEMCPY(temp, font->kernings, sizeof(BOB_BMF_Kerning) * font->kerning_capacity);
         free(font->kernings);
@@ -2453,7 +2443,7 @@ int8_t BOB_load_bmf_font(const char *font_path, BOB_Font_Handle *font) {
             i++;
             col++;
         }
-        else if(buf[i] == ' ' || buf[i] == '\t' || buf[i] == '\n') {
+        else if(buf[i] == ' ' || buf[i] == '\t' || buf[i] == '\n' || buf[i] == '\r') {
             if(token_sz > 0) {
                 BOBi_BMF_Line_Type type = BOBi_parse_tag(&buf[token_start], token_sz);
                 switch(type) {
@@ -2484,7 +2474,6 @@ int8_t BOB_load_bmf_font(const char *font_path, BOB_Font_Handle *font) {
                             free(buf);
                             return -2;
                         }
-                        // i += (size_t) new_i;
                         i = token_start + token_sz + (size_t) new_i;
                     }
                     break;
@@ -2535,19 +2524,144 @@ int8_t BOB_load_bmf_font(const char *font_path, BOB_Font_Handle *font) {
     return 1;
 }
 
+uint8_t BOBi_create_custom_font(BOB_Font_Handle *font, size_t num_glyphs, size_t num_kernings, size_t line_height, size_t base) {
+    if(intrn_data.num_fonts >= BOB_MAX_FONT_CAPACITY) {
+        BOB_PRINT("ERROR: Exceeded Font Capacity");
+        *font |= BOBi_MSB;
+        return 0;
+    }
+
+    uint32_t index;
+    if (intrn_data.next_font_slot == UINT32_MAX) {
+        index = intrn_data.num_fonts;
+    }
+    else {
+        index = intrn_data.next_font_slot;
+
+        //Linearly searching to find the next empty slot. Yes I know that this is slow
+        for (intrn_data.next_font_slot = index + 1; intrn_data.next_font_slot < intrn_data.num_fonts; intrn_data.next_font_slot++) {
+            if (!intrn_data.font_table[intrn_data.next_font_slot].init)
+                break;
+        }
+
+        if (intrn_data.next_font_slot >= intrn_data.num_fonts)
+            intrn_data.next_font_slot = UINT32_MAX;
+    }
+
+    intrn_data.font_table[index].init = 1; //Setting the value to be initialised
+    intrn_data.font_table[index].base = base;
+    intrn_data.font_table[index].line_height = line_height;
+    intrn_data.font_table[index].glyph_capacity = num_glyphs;
+    intrn_data.font_table[index].glyph_count = 0;
+    intrn_data.font_table[index].kerning_capacity = num_kernings;
+    intrn_data.font_table[index].kerning_count = 0;
+    intrn_data.font_table[index].page_count = 0;
+    if(num_glyphs) {
+        intrn_data.font_table[index].glyphs = malloc(sizeof(BOB_BMF_Glyph) * num_glyphs);
+        intrn_data.font_table[index].glyph_map = malloc(sizeof(BOBi_Hashmap));
+        *intrn_data.font_table[index].glyph_map = BOBi_hashmap_init(intrn_data.font_table[index].glyph_capacity);
+    }
+    if(num_kernings) {
+        intrn_data.font_table[index].kernings = malloc(sizeof(BOB_BMF_Kerning) * num_kernings);
+        intrn_data.font_table[index].kerning_map = malloc(sizeof(BOBi_Hashmap));
+        *intrn_data.font_table[index].kerning_map = BOBi_hashmap_init(intrn_data.font_table[index].kerning_capacity);
+    }
+
+    *font = index;
+
+    return 1;
+}
+
 void BOB_add_font_page(BOB_Font_Handle font, uint32_t page_width, uint32_t page_height, uint8_t *page_data, BOB_Format page_format) {
     if(font & BOBi_MSB) return; //Do not do anything with invalid handles
 
     intrn_data.font_table[font].pages[intrn_data.font_table[font].page_count++] = BOB_create_texture(page_width, page_height, page_data, page_format);
 }
 
-uint8_t BOB_BMF_render_char(BOB_Renderer *r, BOB_Font_Handle font, uint32_t codepoint, BOB_Vector2 pos, BOB_Vector4 colour, uint16_t layer, float rotation) {
+uint8_t BOB_BMF_render_char(BOB_Renderer *r, BOB_Font_Handle font, uint32_t codepoint, BOB_Vector2 *pos, BOB_Vector4 colour, uint16_t layer) {
     BOB_BMF_Font f = intrn_data.font_table[font];
     uint32_t index = BOBi_hashmap_get(f.glyph_map, codepoint);
     if(index == UINT32_MAX) return 0; //Codepoint doesn't exist
 
     BOB_BMF_Glyph g = f.glyphs[index];
-    BOB_draw_texture(r, f.pages[g.page], (BOB_Quad){pos.x, pos.y, g.sub_rect.w, g.sub_rect.h}, g.sub_rect, colour, layer, rotation);
+    BOB_draw_texture(r, f.pages[g.page], (BOB_Quad){pos->x + g.x_offset, pos->y + g.y_offset, g.sub_rect.w, g.sub_rect.h}, g.sub_rect, colour, layer, 0.0f);
+    pos->x += g.x_advance;
+    return 1;
+}
+
+uint8_t BOB_BMF_render_char_string(BOB_Renderer *r, BOB_Font_Handle font, char *str, size_t str_len, BOB_Vector2 *start, BOB_Vector4 colour, uint16_t layer) {
+    BOB_BMF_Font f = intrn_data.font_table[font];
+    float start_x = start->x;
+    for(size_t i = 0; i < str_len; i++) {
+        switch (str[i]) {
+            case '\n':
+                start->x = start_x;
+                start->y += f.line_height;
+            continue;
+            case '\t': {
+                uint32_t index = BOBi_hashmap_get(f.glyph_map, 32);
+                if(index == UINT32_MAX) return 0; //Codepoint doesn't exist
+                start->x += f.glyphs[index].x_advance * 4;
+            }
+            continue;
+            default:
+            break;
+        }
+
+        if(f.kerning_capacity > 0 && i > 0 && str[i-1] != '\n' && str[i] != '\n') {
+            uint32_t index = BOBi_hashmap_get(f.kerning_map, ((uint64_t)str[i-1] << 32) | (uint32_t)str[i]);
+            if(index != UINT32_MAX) start->x += f.kernings[index].amount;
+        }
+
+        if(!BOB_BMF_render_char(r, font, str[i], start, colour, layer)) return 0;
+
+    }
+
+    return 1;
+}
+
+
+uint8_t BOB_BMF_render_codepoint_string(BOB_Renderer *r, BOB_Font_Handle font, uint32_t *str, size_t str_len, BOB_Vector2 *start, BOB_Vector4 colour, uint16_t layer) {
+    BOB_BMF_Font f = intrn_data.font_table[font];
+    float start_x = start->x;
+    for(size_t i = 0; i < str_len; i++) {
+        switch (str[i]) {
+            case '\n':
+                start->x = start_x;
+                start->y += f.line_height;
+            continue;
+            case '\t': {
+                uint32_t index = BOBi_hashmap_get(f.glyph_map, 32);
+                if(index == UINT32_MAX) return 0; //Codepoint doesn't exist
+                start->x += f.glyphs[index].x_advance * 4;
+            }
+            continue;
+            default:
+            break;
+        }
+
+        if(f.kerning_capacity > 0 && i > 0 && str[i-1] != '\n' && str[i] != '\n') {
+            uint32_t index = BOBi_hashmap_get(f.kerning_map, ((uint64_t)str[i-1] << 32) | (uint32_t)str[i]);
+            if(index != UINT32_MAX) start->x += f.kernings[index].amount;
+        }
+
+        if(!BOB_BMF_render_char(r, font, str[i], start, colour, layer)) return 0;
+
+    }
+
+    return 1;
+}
+
+uint8_t BOB_append_glyph(BOB_Font_Handle font, BOB_BMF_Glyph glyph) {
+    if((font) & BOBi_MSB) return 0; //Do not work with already invalid handles
+
+    BOBi_append_glyph(&intrn_data.font_table[font], glyph);
+    return 1;
+}
+uint8_t BOB_append_kerning(BOB_Font_Handle font, BOB_BMF_Kerning kerning) {
+    if((font) & BOBi_MSB) return 0; //Do not work with already invalid handles
+
+    BOBi_append_kerning(&intrn_data.font_table[font], kerning);
     return 1;
 }
 
