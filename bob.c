@@ -34,7 +34,7 @@ BOBi_Data intrn_data = {0};
 #define BOBi_GET_RENDER_BATCH(tex, mat) intrn_data.batch_table[(tex)][(mat)]
 #define BOBi_MSB 0x80000000
 
-//================================================= intrnAL HELPER FUNCTIONS ===================================================
+//================================================= INTERNAL HELPER FUNCTIONS ===================================================
 
 void BOBi_update_uniform(BOB_Uniform uniform) {
     switch(uniform.type) {
@@ -2064,7 +2064,154 @@ uint8_t BOBi_parse_line(char *line, BOB_Font *font) {
     else return 0;
 }
 
-int8_t BOB_load_bmf_font(const char *font_path, BOB_Font_Handle *font) {
+uint8_t BOBi_parse_text(BOB_Font *font, uint8_t *data, size_t data_sz) {
+    char *line = strtok((char *)data, "\r\n");
+
+    while(line) {
+        if(!BOBi_parse_line(line, font)) return 0;
+        line = strtok(NULL, "\r\n");
+    }
+
+    return 1;
+}
+
+//Need to pack these structs since the data itself is packed
+#pragma pack(push,1)
+typedef struct {
+    uint16_t line_height;
+    uint16_t base;
+    uint16_t scale_w;
+    uint16_t scale_h;
+    uint16_t pages;
+    uint8_t bitfield;
+    uint8_t alpha;
+    uint8_t red;
+    uint8_t green;
+    uint8_t blue;
+} BOBi_BMF_Common_Block;
+#pragma pack(pop)
+uint8_t BOBi_parse_common_block(BOB_Font *font, uint8_t *data, size_t data_sz) {
+    if(data_sz != sizeof(BOBi_BMF_Common_Block)) {
+        printf("ERROR: Incorrect Common Block size\n");
+        return 0;
+    }
+
+    BOBi_BMF_Common_Block block;
+    BOB_MEMCPY(&block, data, sizeof(BOBi_BMF_Common_Block));
+    font->line_height = block.line_height;
+    font->base = block.base;
+    return 1;
+}
+//Need to pack these structs since the data itself is packed
+#pragma pack(push,1)
+typedef struct {
+    uint32_t id;
+    uint16_t x;
+    uint16_t y;
+    uint16_t width;
+    uint16_t height;
+    int16_t x_offset;
+    int16_t y_offset;
+    int16_t x_advance;
+    uint8_t page;
+    uint8_t channel;
+} BOBi_BMF_Chars_Block;
+#pragma pack(pop)
+uint8_t BOBi_parse_chars_block(BOB_Font *font, uint8_t *data, size_t data_sz) {
+    if(data_sz % sizeof(BOBi_BMF_Chars_Block) != 0) {
+        printf("ERROR: Incorrect Char Block size\n");
+        return 0;
+    }
+
+    size_t num_chars = data_sz / sizeof(BOBi_BMF_Chars_Block);
+    font->glyph_capacity = num_chars;
+    font->glyph_map = malloc(sizeof(BOBi_Hashmap));
+    *font->glyph_map = BOBi_hashmap_init(font->glyph_capacity);
+
+    for(size_t i = 0; i < num_chars; i++) {
+        BOBi_BMF_Chars_Block block;
+        BOB_MEMCPY(&block, data, sizeof(BOBi_BMF_Chars_Block));
+        BOBi_append_glyph(font, (BOB_Glyph){block.id, (BOB_Quad){block.x, block.y, block.width, block.height}, block.x_offset, block.y_offset, block.x_advance, block.page, block.channel});
+
+        data += sizeof(BOBi_BMF_Chars_Block);
+    }
+
+    return 1;
+}
+//Need to pack these structs since the data itself is packed
+#pragma pack(push,1)
+typedef struct {
+    uint32_t first;
+    uint32_t second;
+    int16_t amount;
+} BOBi_BMF_Kernings_Block;
+#pragma pack(pop)
+uint8_t BOBi_parse_kernings_block(BOB_Font *font, uint8_t *data, size_t data_sz) {
+    if(data_sz % sizeof(BOBi_BMF_Kernings_Block) != 0) {
+        printf("ERROR: Incorrect Kerning Block size\n");
+        return 0;
+    }
+
+    size_t num_kernings = data_sz / sizeof(BOBi_BMF_Kernings_Block);
+    font->kerning_capacity = num_kernings;
+    font->kerning_map = malloc(sizeof(BOBi_Hashmap));
+    *font->kerning_map = BOBi_hashmap_init(font->kerning_capacity);
+
+    for(size_t i = 0; i < num_kernings; i++) {
+        BOBi_BMF_Kernings_Block block;
+        BOB_MEMCPY(&block, data, sizeof(BOBi_BMF_Kernings_Block));
+        BOBi_append_kerning(font, (BOB_Kerning){block.first, block.second, block.amount});
+
+        data += sizeof(BOBi_BMF_Kernings_Block);
+    }
+
+    return 1;
+}
+
+uint8_t BOBi_parse_binary(BOB_Font *font, uint8_t *data, size_t data_sz) {
+    if(data_sz < 4 || data[0] != 'B' || data[1] != 'M' || data[2] != 'F' || data[3] != 3) {
+        printf("ERROR: Unsupported format\n");
+        return 0;
+    }
+
+    uint8_t *ptr = data + 4;
+    uint8_t *end = data + data_sz;
+
+    while(ptr + 5 <= end) {
+        uint8_t block_type = *ptr++;
+        uint32_t block_sz;
+        BOB_MEMCPY(&block_sz, ptr, sizeof(block_sz));
+        ptr += 4;
+
+        if (ptr + block_sz > end) {
+            printf("ERROR: Corrupt BMF file\n");
+            return 0;
+        }
+
+        switch (block_type) {
+            case 1: break; //Info block. Do not need to parse
+            case 2: //Common block
+                if(!BOBi_parse_common_block(font, ptr, block_sz)) return 0;
+                break;
+            case 3: break; //Pages block. Do not need to parse;
+            case 4: //Chars block
+                if(!BOBi_parse_chars_block(font, ptr, block_sz)) return 0;
+                break;
+            case 5: //Kernings block
+                if(!BOBi_parse_kernings_block(font, ptr, block_sz)) return 0;
+                break;
+            default:
+                printf("ERROR: NON-Existent BMF Binary Block type\n");
+                return 0;
+        }
+
+        ptr += block_sz;
+    }
+
+    return 1;
+}
+
+int8_t BOB_load_bmf_font(const char *font_path, BOB_Font_Handle *font, BOB_BMF_Format format) {
     if(intrn_data.num_fonts >= BOB_MAX_FONT_CAPACITY) {
         BOB_PRINT("ERROR: Exceeded Font Capacity");
         *font |= BOBi_MSB;
@@ -2097,18 +2244,13 @@ int8_t BOB_load_bmf_font(const char *font_path, BOB_Font_Handle *font) {
         return 0;
     }
 
-    char *line = strtok((char *)buf, "\r\n");
-
-    while(line) {
-        if(!BOBi_parse_line(line, &intrn_data.font_table[index])) {
-            *font |= BOBi_MSB;
-            free(buf);
-            return 0;
-        }
-        line = strtok(NULL, "\r\n");
-    }
-
+    uint8_t res = (format == BOB_BMF_TEXT) ? BOBi_parse_text(&intrn_data.font_table[index], buf, size) : BOBi_parse_binary(&intrn_data.font_table[index], buf, size);
     free(buf);
+    if(!res) {
+        *font |= BOBi_MSB;
+        intrn_data.font_table[index] = (BOB_Font){0}; //Clear all of the initially assigned font data
+        return 0;
+    }
 
     intrn_data.num_fonts++;
     *font = index;

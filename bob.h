@@ -3,12 +3,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-//TODO: Fix this
-#ifndef GLAD_PATH
-#define GLAD_PATH "glad.h"
-#endif //GLAD_PATH
-
-#include GLAD_PATH
+#include <glad/glad.h>
 
 #ifndef BOB_MALLOC
 #include <stdlib.h>
@@ -34,12 +29,10 @@
 
 //TODO: Vulkan support
 //      Make it so that unfilled shapes don't have the full outline drawn when clipped
-//      Figure out whether some functions will return error codes or not e.g. BOB_draw_char
 //      Add an arena to manage the total memory easily and get rid of BOB_MEMSET and BOB_MEMCPY since these should all take place within the arena
 //      Draw call sorting (quicksort) internally rather than relying on the depth buffer -> Should actually do this since dealing with the depth buffer is a giant pain
 //      Allow the user to define render passes -> Custom framebuffers
 //      Maybe allow custom vertex layout?
-//      Fix the bitmap font parser
 //      Do proper error reporting and document what each error code means somewhere
 typedef struct {
     float m[4][4];
@@ -358,9 +351,9 @@ void BOB_clear_colour(BOB_Vector4 colour);
 //Converts an angle in degrees to radians
 float BOB_degrees_to_radians(float angle);
 
-//TODO: support the .fnt metadata from AngelCode (binary)
+//TODO: Support chars being packed into specific channels
 
-//BMFont structs:
+//Font structs:
 typedef struct {
     uint32_t codepoint; //Unicode codepoint
     BOB_Quad sub_rect;
@@ -374,6 +367,7 @@ typedef struct {
     float amount; //How much the xpos should be adjusted when drawing the second char immediately following the first
 } BOB_Kerning;
 
+//TODO: Make this hidden
 typedef struct {
     size_t size;
     size_t capacity;
@@ -397,8 +391,13 @@ typedef struct {
     uint8_t init;
 } BOB_Font;
 
+typedef enum {
+    BOB_BMF_BINARY,
+    BOB_BMF_TEXT,
+} BOB_BMF_Format;
+
 uint8_t BOB_create_custom_font(BOB_Font_Handle *font, size_t num_glyphs, size_t num_kernings, size_t line_height, size_t base);
-int8_t BOB_load_bmf_font(const char *font_path, BOB_Font_Handle *font);
+int8_t BOB_load_bmf_font(const char *font_path, BOB_Font_Handle *font, BOB_BMF_Format format);
 void BOB_add_font_page(BOB_Font_Handle font, uint32_t page_width, uint32_t page_height, uint8_t *page_data, BOB_Format page_format);
 uint8_t BOB_draw_codepoint(BOB_Renderer *r, BOB_Font_Handle font, uint32_t codepoint, BOB_Vector2 *pos, BOB_Vector4 colour, uint16_t layer);
 uint8_t BOB_draw_char_string(BOB_Renderer *r, BOB_Font_Handle font, char *str, size_t str_len, BOB_Vector2 *start, BOB_Vector4 colour, uint16_t layer);
