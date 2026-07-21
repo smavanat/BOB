@@ -396,15 +396,15 @@ typedef enum {
 } BOB_BMF_Format;
 
 uint8_t BOB_create_custom_font(BOB_Font_Handle *font, size_t num_glyphs, size_t num_kernings, size_t line_height, size_t base);
-int8_t BOB_load_bmf_font(const char *font_path, BOB_Font_Handle *font, BOB_BMF_Format format);
+uint8_t BOB_load_bmf_font(const char *font_path, BOB_Font_Handle *font, BOB_BMF_Format format);
 uint8_t BOB_add_font_page(BOB_Font_Handle font, uint32_t page_width, uint32_t page_height, uint8_t *page_data, BOB_Format page_format);
 uint8_t BOB_draw_codepoint(BOB_Renderer *r, BOB_Font_Handle font, uint32_t codepoint, BOB_Vector2 *pos, BOB_Vector4 colour, uint16_t layer);
 uint8_t BOB_draw_char_string(BOB_Renderer *r, BOB_Font_Handle font, char *str, size_t str_len, BOB_Vector2 *start, BOB_Vector4 colour, uint16_t layer);
 uint8_t BOB_draw_codepoint_string(BOB_Renderer *r, BOB_Font_Handle font, uint32_t *str, size_t str_len, BOB_Vector2 *start, BOB_Vector4 colour, uint16_t layer);
 uint8_t BOB_font_append_glyph(BOB_Font_Handle font, BOB_Glyph glyph);
 uint8_t BOB_font_append_kerning(BOB_Font_Handle font, BOB_Kerning kerning);
-uint8_t BOB_measure_char_string(const char *str, size_t str_len, BOB_Font_Handle font, BOB_Vector2 *out);
-uint8_t BOB_measure_codepoint_string(const uint32_t *str, size_t str_len, BOB_Font_Handle font, BOB_Vector2 *out);
+uint8_t BOB_measure_char_string(char *str, size_t str_len, BOB_Font_Handle font, BOB_Vector2 *out);
+uint8_t BOB_measure_codepoint_string(uint32_t *str, size_t str_len, BOB_Font_Handle font, BOB_Vector2 *out);
 void BOB_print_parsing_error(void);
 uint8_t BOB_font_free(BOB_Font_Handle *font);
 

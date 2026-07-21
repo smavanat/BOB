@@ -258,27 +258,27 @@ unsigned int BOBi_create_shader(BOB_Shader_Data s) {
 }
 
 //Draws a mesh of triangles
-void BOBi_draw_mesh(BOB_Renderer *r, BOB_Vector3 *vertices, size_t vertex_count, uint32_t *indices, size_t index_count, BOB_Vector4 colour, BOB_Material_Handle mat) {
+void BOBi_draw_mesh(BOB_Renderer *r, BOB_Vector3 *vertices, size_t vertex_count, BOB_Vector2 *uv, uint32_t *indices, size_t index_count, BOB_Vector4 colour, BOB_Texture_Handle tex, BOB_Material_Handle mat) {
     //Lazy allocation of memory
-    if(!BOBi_GET_RENDER_BATCH(intrn_data.default_tex, mat).init) {
-        BOBi_GET_RENDER_BATCH(intrn_data.default_tex, mat).index_data = BOB_MALLOC(sizeof(uint32_t) * BOB_INIT_INDEX_CAPACITY);
-        BOBi_GET_RENDER_BATCH(intrn_data.default_tex, mat).vertex_data = BOB_MALLOC(sizeof(BOB_Render_Vertex) * BOB_INIT_VERTEX_CAPACITY);
-        BOBi_GET_RENDER_BATCH(intrn_data.default_tex, mat).index_size = BOB_INIT_INDEX_CAPACITY;
-        BOBi_GET_RENDER_BATCH(intrn_data.default_tex, mat).vertex_size = BOB_INIT_VERTEX_CAPACITY;
-        BOBi_GET_RENDER_BATCH(intrn_data.default_tex, mat).init = 1;
+    if(!BOBi_GET_RENDER_BATCH(tex, mat).init) {
+        BOBi_GET_RENDER_BATCH(tex, mat).index_data = BOB_MALLOC(sizeof(uint32_t) * BOB_INIT_INDEX_CAPACITY);
+        BOBi_GET_RENDER_BATCH(tex, mat).vertex_data = BOB_MALLOC(sizeof(BOB_Render_Vertex) * BOB_INIT_VERTEX_CAPACITY);
+        BOBi_GET_RENDER_BATCH(tex, mat).index_size = BOB_INIT_INDEX_CAPACITY;
+        BOBi_GET_RENDER_BATCH(tex, mat).vertex_size = BOB_INIT_VERTEX_CAPACITY;
+        BOBi_GET_RENDER_BATCH(tex, mat).init = 1;
     }
 
-    BOBi_check_capacity(r, intrn_data.default_tex, mat, vertex_count, index_count);
+    BOBi_check_capacity(r, tex, mat, vertex_count, index_count);
 
     //Update the vertex count and vertex data stored in the renderer
-    uint32_t base_index = BOBi_GET_RENDER_BATCH(intrn_data.default_tex, mat).vertex_count;
+    uint32_t base_index = BOBi_GET_RENDER_BATCH(tex, mat).vertex_count;
 
     for(size_t i = 0; i < vertex_count; i++) {
-        BOBi_GET_RENDER_BATCH(intrn_data.default_tex, mat).vertex_data[BOBi_GET_RENDER_BATCH(0,0).vertex_count++] = (BOB_Render_Vertex){colour, vertices[i]};
+        BOBi_GET_RENDER_BATCH(tex, mat).vertex_data[BOBi_GET_RENDER_BATCH(tex,mat).vertex_count++] = (BOB_Render_Vertex){colour, vertices[i], (uv == NULL) ? (BOB_Vector2){0} : uv[i]};
     }
 
     for(size_t i = 0; i < index_count; i++) {
-        BOBi_GET_RENDER_BATCH(intrn_data.default_tex, mat).index_data[BOBi_GET_RENDER_BATCH(0,0).index_count++] = base_index + indices[i];
+        BOBi_GET_RENDER_BATCH(tex, mat).index_data[BOBi_GET_RENDER_BATCH(tex,mat).index_count++] = base_index + indices[i];
     }
 }
 
@@ -1530,25 +1530,9 @@ uint8_t BOB_draw_unfilled_circle(BOB_Renderer *r, BOB_Vector2 centre, float radi
 }
 
 //Draws a dynamically allocated texture with a specified material
-//TODO: Create a new function that this and BOBi_draw_mesh call that handles all of the batching by itself
 uint8_t BOB_draw_texture_mat(BOB_Renderer *r, BOB_Texture_Handle texture, BOB_Quad screen_quad, BOB_Quad tex_sub_rect, BOB_Vector4 colour, uint16_t layer, float rotation, BOB_Material_Handle mat) {
     if((texture & BOBi_MSB) || (mat & BOBi_MSB)) return 0; //Do not work with already invalid handles
     if(!BOBi_clip_quad(r, &screen_quad)) return 1; //Early exit
-
-    //Lazy allocation of memory
-    if(!BOBi_GET_RENDER_BATCH(texture, mat).init) {
-        BOBi_GET_RENDER_BATCH(texture, mat).index_data = BOB_MALLOC(sizeof(uint32_t) * BOB_INIT_INDEX_CAPACITY);
-        BOBi_GET_RENDER_BATCH(texture, mat).vertex_data = BOB_MALLOC(sizeof(BOB_Render_Vertex) * BOB_INIT_VERTEX_CAPACITY);
-        BOBi_GET_RENDER_BATCH(texture, mat).index_size = BOB_INIT_INDEX_CAPACITY;
-        BOBi_GET_RENDER_BATCH(texture, mat).vertex_size = BOB_INIT_VERTEX_CAPACITY;
-        BOBi_GET_RENDER_BATCH(texture, mat).init = 1;
-    }
-
-    //If we have overreached our current rendering limit or we cannot store any more textures, end the current draw call and start a new one
-    BOBi_check_capacity(r, texture, mat, BOB_VERTICIES_PER_QUAD, BOB_INDECIES_PER_QUAD);
-
-    //Update the vertex count and vertex data stored in the renderer
-    uint32_t base_index = BOBi_GET_RENDER_BATCH(texture, mat).vertex_count;
 
     BOB_Vector2 rotated_coords[4];
     BOBi_rotate_quad(screen_quad, rotated_coords, rotation);
@@ -1572,26 +1556,7 @@ uint8_t BOB_draw_texture_mat(BOB_Renderer *r, BOB_Texture_Handle texture, BOB_Qu
         {(tex_sub_rect.x + tex_sub_rect.w) / width , tex_sub_rect.y / height}
     };
 
-    //Lazy allocation of memory
-    if(BOBi_GET_RENDER_BATCH(texture, mat).vertex_data == NULL || BOBi_GET_RENDER_BATCH(texture, mat).index_data == NULL) {
-        BOBi_GET_RENDER_BATCH(texture, mat).index_data = BOB_MALLOC(sizeof(uint32_t) * BOB_INIT_INDEX_CAPACITY);
-        BOBi_GET_RENDER_BATCH(texture, mat).vertex_data = BOB_MALLOC(sizeof(BOB_Render_Vertex) * BOB_INIT_VERTEX_CAPACITY);
-    }
-
-    for(int i = 0; i < BOB_VERTICIES_PER_QUAD; i++) {
-        BOBi_GET_RENDER_BATCH(texture, mat).vertex_data[BOBi_GET_RENDER_BATCH(texture, mat).vertex_count++] = (BOB_Render_Vertex){colour, coords[i], uv[i]};
-    }
-
-    //Need to also add ebo data so we can remove overlapping vertices
-    //First triangle
-    BOBi_GET_RENDER_BATCH(texture, mat).index_data[BOBi_GET_RENDER_BATCH(texture, mat).index_count++] = base_index;
-    BOBi_GET_RENDER_BATCH(texture, mat).index_data[BOBi_GET_RENDER_BATCH(texture, mat).index_count++] = base_index + 1;
-    BOBi_GET_RENDER_BATCH(texture, mat).index_data[BOBi_GET_RENDER_BATCH(texture, mat).index_count++] = base_index + 3;
-
-    //Second triangle
-    BOBi_GET_RENDER_BATCH(texture, mat).index_data[BOBi_GET_RENDER_BATCH(texture, mat).index_count++] = base_index + 1;
-    BOBi_GET_RENDER_BATCH(texture, mat).index_data[BOBi_GET_RENDER_BATCH(texture, mat).index_count++] = base_index + 2;
-    BOBi_GET_RENDER_BATCH(texture, mat).index_data[BOBi_GET_RENDER_BATCH(texture, mat).index_count++] = base_index + 3;
+    BOBi_draw_mesh(r, coords, 4, uv, (uint32_t[6]){0, 1, 3, 1, 2, 3}, 6, colour, texture, mat);
 
     return 1;
 }
@@ -1651,7 +1616,7 @@ uint8_t BOB_draw_circle_mat(BOB_Renderer *r, BOB_Vector2 centre, float radius, B
         indices[index_count++] = ((i+1) % clipped_size);
     }
 
-    BOBi_draw_mesh(r, points3, clipped_size, indices, index_count, colour, mat);
+    BOBi_draw_mesh(r, points3, clipped_size, NULL, indices, index_count, colour, intrn_data.default_tex, mat);
     return 1;
 }
 
@@ -1671,7 +1636,7 @@ uint8_t BOB_draw_quad_mat(BOB_Renderer *r, BOB_Quad quad, BOB_Vector4 colour, ui
         {rotated_coords[3].x, rotated_coords[3].y, layer}
     };
 
-    BOBi_draw_mesh(r, strip, 4, (uint32_t[6]){0,1,3,1,2,3}, 6, colour, mat);
+    BOBi_draw_mesh(r, strip, 4, NULL, (uint32_t[6]){0,1,3,1,2,3}, 6, colour, intrn_data.default_tex, mat);
     return 1;
 }
 
@@ -1712,7 +1677,7 @@ uint8_t BOB_draw_polygon_mat(BOB_Renderer *r, BOB_Vector2* poly_points, size_t p
         triangle_indices[i] = vertex_map[old];
     }
 
-    BOBi_draw_mesh(r, vertices, vertex_count, triangle_indices, triangle_count * 3, colour, mat);
+    BOBi_draw_mesh(r, vertices, vertex_count, NULL, triangle_indices, triangle_count * 3, colour, intrn_data.default_tex, mat);
     return 1;
 }
 //Draws an unfilled circle with a specified material
@@ -1797,7 +1762,7 @@ uint8_t BOB_draw_line_mat(BOB_Renderer *r, BOB_Vector2 start_pos, BOB_Vector2 en
             {end_pos.x + radius.x, end_pos.y + radius.y, layer},
         };
 
-        BOBi_draw_mesh(r, strip, 4, (uint32_t[6]){0,1,2,1,2,3}, 6, colour, mat);
+        BOBi_draw_mesh(r, strip, 4, NULL, (uint32_t[6]){0,1,2,1,2,3}, 6, colour, intrn_data.default_tex, mat);
     }
 
     return 1;
@@ -2261,7 +2226,7 @@ uint8_t BOBi_parse_binary(BOB_Font *font, uint8_t *data, size_t data_sz) {
     return 1;
 }
 
-int8_t BOB_load_bmf_font(const char *font_path, BOB_Font_Handle *font, BOB_BMF_Format format) {
+uint8_t BOB_load_bmf_font(const char *font_path, BOB_Font_Handle *font, BOB_BMF_Format format) {
     if(intrn_data.num_fonts >= BOB_MAX_FONT_CAPACITY) {
         BOB_PRINT("ERROR: Exceeded Font Capacity");
         *font |= BOBi_MSB;
@@ -2372,67 +2337,53 @@ uint8_t BOB_draw_codepoint(BOB_Renderer *r, BOB_Font_Handle font, uint32_t codep
     return 1;
 }
 
-uint8_t BOB_draw_char_string(BOB_Renderer *r, BOB_Font_Handle font, char *str, size_t str_len, BOB_Vector2 *start, BOB_Vector4 colour, uint16_t layer) {
+//TODO: Compress this and the next function since they are almost identical
+typedef uint32_t (*BOBi_Codepoint_Reader)(void *str, size_t index);
+static uint32_t BOBi_read_char(void *str, size_t index) { return (uint32_t)((char *)str)[index]; }
+static uint32_t BOBi_read_codepoint(void *str, size_t index) { return ((uint32_t *)str)[index]; }
+
+static uint8_t BOBi_draw_string(BOB_Renderer *r, BOB_Font_Handle font, void *str, size_t str_len, BOBi_Codepoint_Reader reader, BOB_Vector2 *start, BOB_Vector4 colour, uint16_t layer) {
     BOB_Font f = intrn_data.font_table[font];
     float start_x = start->x;
+    uint32_t prev = 0;
+
     for(size_t i = 0; i < str_len; i++) {
-        switch (str[i]) {
+        uint32_t codepoint = reader(str, i);
+        switch (codepoint) {
             case '\n':
                 start->x = start_x;
                 start->y += f.line_height;
+                prev = 0;
             continue;
             case '\t': {
                 uint32_t index = BOBi_hashmap_get(f.glyph_map, 32);
                 if(index == UINT32_MAX) return 0; //Codepoint doesn't exist
                 start->x += f.glyphs[index].x_advance * 4;
+                prev = 0;
             }
             continue;
             default:
             break;
         }
 
-        if(f.kerning_capacity > 0 && i > 0 && str[i-1] != '\n' && str[i] != '\n') {
-            uint32_t index = BOBi_hashmap_get(f.kerning_map, ((uint64_t)str[i-1] << 32) | (uint32_t)str[i]);
+        if(f.kerning_capacity > 0 && prev != 0) {
+            uint32_t index = BOBi_hashmap_get(f.kerning_map, ((uint64_t)prev << 32) | codepoint);
             if(index != UINT32_MAX) start->x += f.kernings[index].amount;
         }
 
-        if(!BOB_draw_codepoint(r, font, str[i], start, colour, layer)) return 0;
-
+        if(!BOB_draw_codepoint(r, font, codepoint, start, colour, layer)) return 0;
+        prev = codepoint;
     }
 
     return 1;
 }
 
+uint8_t BOB_draw_char_string(BOB_Renderer *r, BOB_Font_Handle font, char *str, size_t str_len, BOB_Vector2 *start, BOB_Vector4 colour, uint16_t layer) {
+    return BOBi_draw_string(r, font, str, str_len, BOBi_read_char, start, colour, layer);
+}
 
 uint8_t BOB_draw_codepoint_string(BOB_Renderer *r, BOB_Font_Handle font, uint32_t *str, size_t str_len, BOB_Vector2 *start, BOB_Vector4 colour, uint16_t layer) {
-    BOB_Font f = intrn_data.font_table[font];
-    float start_x = start->x;
-    for(size_t i = 0; i < str_len; i++) {
-        switch (str[i]) {
-            case '\n':
-                start->x = start_x;
-                start->y += f.line_height;
-            continue;
-            case '\t': {
-                uint32_t index = BOBi_hashmap_get(f.glyph_map, 32);
-                if(index == UINT32_MAX) return 0; //Codepoint doesn't exist
-                start->x += f.glyphs[index].x_advance * 4;
-            }
-            continue;
-            default:
-            break;
-        }
-
-        if(f.kerning_capacity > 0 && i > 0 && str[i-1] != '\n' && str[i] != '\n') {
-            uint32_t index = BOBi_hashmap_get(f.kerning_map, ((uint64_t)str[i-1] << 32) | (uint32_t)str[i]);
-            if(index != UINT32_MAX) start->x += f.kernings[index].amount;
-        }
-
-        if(!BOB_draw_codepoint(r, font, str[i], start, colour, layer)) return 0;
-
-    }
-
-    return 1;
+    return BOBi_draw_string(r, font, str, str_len, BOBi_read_codepoint, start, colour, layer);
 }
 
 uint8_t BOB_append_glyph(BOB_Font_Handle font, BOB_Glyph glyph) {
@@ -2448,84 +2399,57 @@ uint8_t BOB_append_kerning(BOB_Font_Handle font, BOB_Kerning kerning) {
     return 1;
 }
 
-uint8_t BOB_measure_char_string(const char *str, size_t str_len, BOB_Font_Handle font, BOB_Vector2 *out) {
+static uint8_t BOBi_measure_string(void *str, size_t str_len, BOBi_Codepoint_Reader reader, BOB_Font_Handle font, BOB_Vector2 *out) {
     if((font) & BOBi_MSB) return 0; //Do not work with already invalid handles
     BOB_Font f = intrn_data.font_table[font];
     float max_w = 0;
     float h = f.line_height;
     float cur_w = 0;
+    uint32_t prev = 0;
 
     for(size_t i = 0; i < str_len; i++) {
-        switch(str[i]) {
+        uint32_t codepoint = reader(str, i);
+        switch(codepoint) {
             case '\n':
                 if(cur_w > max_w) max_w = cur_w;
                 cur_w = 0;
                 h += f.line_height;
+                prev = 0;
             continue;
             case '\t': {
                 uint32_t index = BOBi_hashmap_get(f.glyph_map, 32);
                 if(index == UINT32_MAX) return 0; //Codepoint doesn't exist
                 cur_w +=  f.glyphs[index].x_advance * 4;
+                prev = 0;
             }
             continue;
             default:
             break;
         }
 
-        if(f.kerning_capacity > 0 && i > 0 && str[i-1] != '\n' && str[i] != '\n') {
-            uint32_t index = BOBi_hashmap_get(f.kerning_map, ((uint64_t)str[i-1] << 32) | (uint32_t)str[i]);
+        if(f.kerning_capacity > 0 && prev != 0) {
+            uint32_t index = BOBi_hashmap_get(f.kerning_map, ((uint64_t)prev << 32) | codepoint);
             if(index != UINT32_MAX) cur_w += f.kernings[index].amount;
         }
-        uint32_t index = BOBi_hashmap_get(f.glyph_map, str[i]);
+        uint32_t index = BOBi_hashmap_get(f.glyph_map, codepoint);
         if(index == UINT32_MAX) return 0; //Codepoint doesn't exist
         cur_w += f.glyphs[index].x_advance;
+        prev = codepoint;
     }
 
     if(cur_w > max_w) max_w = cur_w;
-
     *out = (BOB_Vector2){max_w, h};
 
     return 1;
 }
 
-uint8_t BOB_measure_codepoint_string(const uint32_t *str, size_t str_len, BOB_Font_Handle font, BOB_Vector2 *out) {
-    if((font) & BOBi_MSB) return 0; //Do not work with already invalid handles
-    BOB_Font f = intrn_data.font_table[font];
-    float max_w = 0;
-    float h = f.line_height;
-    float cur_w = 0;
+//TODO: Compress this and the next function since they are almost identical
+uint8_t BOB_measure_char_string(char *str, size_t str_len, BOB_Font_Handle font, BOB_Vector2 *out) {
+    return BOBi_measure_string(str, str_len, BOBi_read_char, font, out);
+}
 
-    for(size_t i = 0; i < str_len; i++) {
-        switch(str[i]) {
-            case '\n':
-                if(cur_w > max_w) max_w = cur_w;
-                cur_w = 0;
-                h += f.line_height;
-            continue;
-            case '\t': {
-                uint32_t index = BOBi_hashmap_get(f.glyph_map, 32);
-                if(index == UINT32_MAX) return 0; //Codepoint doesn't exist
-                cur_w +=  f.glyphs[index].x_advance * 4;
-            }
-            continue;
-            default:
-            break;
-        }
-
-        if(f.kerning_capacity > 0 && i > 0 && str[i-1] != '\n' && str[i] != '\n') {
-            uint32_t index = BOBi_hashmap_get(f.kerning_map, ((uint64_t)str[i-1] << 32) | (uint32_t)str[i]);
-            if(index != UINT32_MAX) cur_w += f.kernings[index].amount;
-        }
-        uint32_t index = BOBi_hashmap_get(f.glyph_map, str[i]);
-        if(index == UINT32_MAX) return 0; //Codepoint doesn't exist
-        cur_w += f.glyphs[index].x_advance;
-    }
-
-    if(cur_w > max_w) max_w = cur_w;
-
-    *out = (BOB_Vector2){max_w, h};
-
-    return 1;
+uint8_t BOB_measure_codepoint_string(uint32_t *str, size_t str_len, BOB_Font_Handle font, BOB_Vector2 *out) {
+    return BOBi_measure_string(str, str_len, BOBi_read_codepoint, font, out);
 }
 
 void BOB_print_parsing_error(void) {
