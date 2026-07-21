@@ -8,3 +8,4 @@ GLFW/
 *.fnt
 *.png
 stb_image.h
+.clangd
