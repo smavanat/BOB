@@ -246,19 +246,19 @@ unsigned int BOBi_create_shader(BOB_Shader_Data s) {
     glGetShaderiv(shader, GL_COMPILE_STATUS, &result);
     if(!result) {
         glGetShaderInfoLog(shader, 512, NULL, infolog);
-        BOB_PRINT("ERROR::SHADER::COMPILATION_FAILED\n");
+        printf("ERROR::SHADER::COMPILATION_FAILED\n");
         for(int i = 0; i < 512; i++){
             if(infolog[i] == '\0') break;
-            BOB_PRINT("%c", infolog[i]);
+            printf("%c", infolog[i]);
         }
-        BOB_PRINT("\n");
+        printf("\n");
     }
 
     return shader;
 }
 
 //Draws a mesh of triangles
-void BOBi_draw_mesh(BOB_Renderer *r, BOB_Vector3 *vertices, size_t vertex_count, BOB_Vector2 *uv, uint32_t *indices, size_t index_count, BOB_Vector4 colour, BOB_Texture_Handle tex, BOB_Material_Handle mat) {
+void BOBi_draw_mesh(BOB_Renderer *r, BOB_Vector3 *vertices, size_t vertex_count, BOB_Vector2 *uv, uint32_t *indices, size_t index_count, BOB_Vector4 colour, BOB_Texture_Handle tex, BOB_Material_Handle mat, uint8_t channel) {
     //Lazy allocation of memory
     if(!BOBi_GET_RENDER_BATCH(tex, mat).init) {
         BOBi_GET_RENDER_BATCH(tex, mat).index_data = BOB_MALLOC(sizeof(uint32_t) * BOB_INIT_INDEX_CAPACITY);
@@ -274,7 +274,7 @@ void BOBi_draw_mesh(BOB_Renderer *r, BOB_Vector3 *vertices, size_t vertex_count,
     uint32_t base_index = BOBi_GET_RENDER_BATCH(tex, mat).vertex_count;
 
     for(size_t i = 0; i < vertex_count; i++) {
-        BOBi_GET_RENDER_BATCH(tex, mat).vertex_data[BOBi_GET_RENDER_BATCH(tex,mat).vertex_count++] = (BOB_Render_Vertex){colour, vertices[i], (uv == NULL) ? (BOB_Vector2){0} : uv[i]};
+        BOBi_GET_RENDER_BATCH(tex, mat).vertex_data[BOBi_GET_RENDER_BATCH(tex,mat).vertex_count++] = (BOB_Render_Vertex){colour, vertices[i], (uv == NULL) ? (BOB_Vector2){0} : uv[i], channel};
     }
 
     for(size_t i = 0; i < index_count; i++) {
@@ -331,7 +331,7 @@ size_t BOBi_clip_edge(BOB_Vector2 *poly_points, size_t poly_size, BOBi_Clip_Edge
 
         if(start_inside && end_inside) {
             if(new_poly_size >= BOBi_MAX_POLY_SIZE) {
-                BOB_PRINT("Exceeded new polygon point capacity\n");
+                printf("Exceeded new polygon point capacity\n");
                 break;
             }
             //Only second point is added
@@ -339,7 +339,7 @@ size_t BOBi_clip_edge(BOB_Vector2 *poly_points, size_t poly_size, BOBi_Clip_Edge
         }
         else if(!start_inside && end_inside) {
             if(new_poly_size+1 >= BOBi_MAX_POLY_SIZE) {
-                BOB_PRINT("Exceeded new polygon point capacity\n");
+                printf("Exceeded new polygon point capacity\n");
                 break;
             }
             //Point of intersection with edge and second point is added
@@ -349,7 +349,7 @@ size_t BOBi_clip_edge(BOB_Vector2 *poly_points, size_t poly_size, BOBi_Clip_Edge
         //When only second point is outside
         else if(start_inside && !end_inside) {
             if(new_poly_size >= BOBi_MAX_POLY_SIZE) {
-                BOB_PRINT("Exceeded new polygon point capacity\n");
+                printf("Exceeded new polygon point capacity\n");
                 break;
             }
             //Only point of intersection with edge is added
@@ -804,21 +804,49 @@ const char *vertex_shader = "#version 330 core\n"
                             "layout (location = 0) in vec4 aColor;\n"
                             "layout (location = 1) in vec3 aPos;\n"
                             "layout (location = 2) in vec2 aTexCoord;\n"
+                            "layout (location = 3) in uint aChannel;\n"
                             "uniform mat4 uProjection;\n"
                             "out vec4 ourColor;\n"
                             "out vec2 TexCoord;\n"
+                            "flat out uint Channel;\n"
                             "void main() {\n"
                             "    gl_Position = uProjection * vec4(aPos, 1.0);\n"
                             "    ourColor = aColor;"
                             "    TexCoord = aTexCoord;\n"
+                            "    Channel = aChannel;\n"
                             "}\n";
 const char *fragment_shader = "#version 330 core\n"
                               "out vec4 FragColor;\n"
                               "in vec2 TexCoord;\n"
                               "in vec4 ourColor;\n"
+                              "flat in uint Channel;\n"
                               "uniform sampler2D screenTexture;\n"
                               "void main() {\n"
-                              "    FragColor = texture(screenTexture, TexCoord) * ourColor;\n"
+                              "    if((Channel & 16u) != 0u) {\n"//Glyph bit set
+                              "        vec4 texel = texture(screenTexture, TexCoord);\n"
+                              "        float glyphAlpha;\n"
+                              "        if((Channel & 15u) == 0u) {\n" //Non-packed glyph
+                              "            if((Channel & 32u) == 0u)\n" //Not greyscale
+                              "                glyphAlpha = texel.a;\n"
+                              "            else\n"
+                              "                glyphAlpha = texel.r;\n"
+                              "        }\n"
+                              "        else {\n"
+                              "            glyphAlpha = 0.0;\n"
+                              "            if ((Channel & 8u) != 0u)\n"
+                              "                glyphAlpha = max(glyphAlpha, texel.a);\n"
+                              "            if ((Channel & 4u) != 0u)\n"
+                              "                glyphAlpha = max(glyphAlpha, texel.r);\n"
+                              "            if ((Channel & 2u) != 0u)\n"
+                              "                glyphAlpha = max(glyphAlpha, texel.g);\n"
+                              "            if ((Channel & 1u) != 0u)\n"
+                              "                glyphAlpha = max(glyphAlpha, texel.b);\n"
+                              "        }\n"
+                              "        FragColor = vec4(ourColor.rgb, ourColor.a * glyphAlpha);\n"
+                              "    }\n"
+                              "    else {\n" //Glyph bit not set
+                              "        FragColor = texture(screenTexture, TexCoord) * ourColor;\n"
+                              "    }\n"
                               "}\n";
 
 // ============================================= BOB STATE MANAGEMENT ============================================================
@@ -894,6 +922,8 @@ uint8_t BOB_renderer_init(size_t width, size_t height, BOB_Renderer *out) {
     glEnableVertexAttribArray(1);
     glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(BOB_Render_Vertex), (void *)offsetof(BOB_Render_Vertex, uv)); //UV
     glEnableVertexAttribArray(2);
+    glVertexAttribPointer(3, 1, GL_UNSIGNED_BYTE, GL_FALSE, sizeof(BOB_Render_Vertex), (void *)offsetof(BOB_Render_Vertex, flags));
+    glEnableVertexAttribArray(3);
 
     //Setting the projection matrix
     BOB_ortho(0.0f, r.screen_width, r.screen_height, 0.0f, -BOB_MAX_LAYER, 0.0f, &r.projection);
@@ -993,7 +1023,7 @@ void BOB_renderer_update_dimensions(BOB_Renderer *r, uint32_t width, uint32_t he
 //Creates a new texture on the gpu
 uint8_t BOB_create_texture(uint32_t width, uint32_t height, uint8_t *data, BOB_Format format, BOB_Texture_Handle *tex) {
     if(intrn_data.num_textures >= BOB_MAX_TEX_CAPACITY) {
-        BOB_PRINT("ERROR: Exceeded Texture Capacity");
+        printf("ERROR: Exceeded Texture Capacity");
         *tex |= BOBi_MSB;
         return 0;
     }
@@ -1069,7 +1099,7 @@ uint8_t get_uniform(BOB_Material_Handle mat, char *name, BOB_Uniform_Handle *uni
 
 uint8_t BOB_create_material(BOB_Shader_Data *data, size_t num_shaders, BOB_Uniform *uniforms, size_t num_uniforms, BOB_Material_Handle *mat) {
     if(intrn_data.num_materials >= BOB_MAX_MATERIAL_CAPACITY) {
-        BOB_PRINT("ERROR: Exceeded Material Capacity\n");
+        printf("ERROR: Exceeded Material Capacity\n");
         *mat |= BOBi_MSB;
         return 0;
     }
@@ -1109,12 +1139,12 @@ uint8_t BOB_create_material(BOB_Shader_Data *data, size_t num_shaders, BOB_Unifo
     glGetProgramiv(s, GL_LINK_STATUS, &result);
     if(!result) {
         glGetProgramInfoLog(s, 512, NULL, infolog);
-        BOB_PRINT("ERROR::SHADER::LINKING_FAILED\n");
+        printf("ERROR::SHADER::LINKING_FAILED\n");
         for(int i = 0; i < 512; i++){
             if(infolog[i] == '\0') break;
-            BOB_PRINT("%c", infolog[i]);
+            printf("%c", infolog[i]);
         }
-        BOB_PRINT("\n");
+        printf("\n");
         *mat |= BOBi_MSB;
         return 0;
     }
@@ -1289,7 +1319,7 @@ uint8_t BOB_set_material_mat4_ref(BOB_Material_Handle mat, BOB_Uniform_Handle un
 //Initialises a texture atlas
 uint8_t BOB_atlas_init(uint32_t width, uint32_t height, BOB_Format format, BOB_Atlas_Handle *a) {
     if(intrn_data.num_atlases >= BOB_MAX_ATLAS_CAPACITY) {
-        BOB_PRINT("ERROR: Exceeded Atlas Capacity");
+        printf("ERROR: Exceeded Atlas Capacity");
         *a |= BOBi_MSB;
         return 0;
     }
@@ -1385,7 +1415,7 @@ uint8_t BOB_atlas_pack(BOB_Atlas_Handle a, uint8_t* pixels, size_t w, size_t h, 
 //Pixel size should be either 3 or 4 (rgb/rgba)
 uint8_t BOB_pixelbuffer_init(size_t width, size_t height, BOB_Format format, BOB_PixelBuffer_Handle *pb) {
     if(intrn_data.num_pixelbuffers >= BOB_MAX_PIXELBUFFER_CAPACITY) {
-        BOB_PRINT("ERROR: Exceeded PixelBuffer Capacity");
+        printf("ERROR: Exceeded PixelBuffer Capacity");
         *pb |= BOBi_MSB;
         return 0;
     }
@@ -1488,16 +1518,16 @@ uint8_t BOB_pixelbuffer_get_data(BOB_PixelBuffer_Handle pb, uint8_t *dest) {
 //============================================================= DRAWING FUNCTIONS ===========================================
 
 uint8_t BOB_draw_texture(BOB_Renderer *r, BOB_Texture_Handle texture, BOB_Quad screen_quad, BOB_Quad tex_sub_rect, BOB_Vector4 colour, uint16_t layer, float rotation) {
-    return BOB_draw_texture_mat(r, texture, screen_quad, tex_sub_rect, colour, layer, rotation, r->default_mat);
+    return BOB_draw_texture_channel(r, texture, screen_quad, tex_sub_rect, colour, layer, rotation, r->default_mat, 0);
 }
 
 //Draws an atlas quad
 uint8_t BOB_draw_atlas_quad(BOB_Renderer *r, BOB_Quad screen_quad, BOB_Quad tex_sub_rect, BOB_Vector4 colour, BOB_Atlas_Handle atlas, uint16_t layer, float rotation) {
-    return BOB_draw_atlas_quad_mat(r, screen_quad, tex_sub_rect, colour, intrn_data.atlas_table[atlas].texture, layer, rotation, r->default_mat);
+    return BOB_draw_atlas_quad_channel(r, screen_quad, tex_sub_rect, colour, intrn_data.atlas_table[atlas].texture, layer, rotation, r->default_mat, 0);
 }
 
 uint8_t BOB_draw_pixel_buffer(BOB_Renderer *r, BOB_PixelBuffer_Handle pb, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, uint16_t layer, float rotation) {
-    return BOB_draw_pixel_buffer_mat(r, pb, dimensions, uv_dimensions, colour, layer, rotation, r->default_mat);
+    return BOB_draw_pixel_buffer_channel(r, pb, dimensions, uv_dimensions, colour, layer, rotation, r->default_mat, 0);
 }
 
 uint8_t BOB_draw_line(BOB_Renderer *r, BOB_Vector2 start_pos, BOB_Vector2 end_pos, float thickness, BOB_Vector4 colour, uint16_t layer) {
@@ -1531,54 +1561,17 @@ uint8_t BOB_draw_unfilled_circle(BOB_Renderer *r, BOB_Vector2 centre, float radi
 
 //Draws a dynamically allocated texture with a specified material
 uint8_t BOB_draw_texture_mat(BOB_Renderer *r, BOB_Texture_Handle texture, BOB_Quad screen_quad, BOB_Quad tex_sub_rect, BOB_Vector4 colour, uint16_t layer, float rotation, BOB_Material_Handle mat) {
-    if((texture & BOBi_MSB) || (mat & BOBi_MSB)) return 0; //Do not work with already invalid handles
-    if(!BOBi_clip_quad(r, &screen_quad)) return 1; //Early exit
-
-    BOB_Vector2 rotated_coords[4];
-    BOBi_rotate_quad(screen_quad, rotated_coords, rotation);
-
-    if(layer > BOB_MAX_LAYER) layer = BOB_MAX_LAYER-1; //Normalise it to be within the required range
-
-    BOB_Vector3 coords[4] = {
-        {rotated_coords[0].x, rotated_coords[0].y, layer},
-        {rotated_coords[1].x, rotated_coords[1].y, layer},
-        {rotated_coords[2].x, rotated_coords[2].y, layer},
-        {rotated_coords[3].x, rotated_coords[3].y, layer}
-    };
-
-    float width = intrn_data.texture_table[texture].width;
-    float height = intrn_data.texture_table[texture].height;
-
-    BOB_Vector2 uv[4] = {
-        {tex_sub_rect.x / width, tex_sub_rect.y / height},
-        {tex_sub_rect.x / width, (tex_sub_rect.y + tex_sub_rect.h) / height},
-        {(tex_sub_rect.x + tex_sub_rect.w) / width, (tex_sub_rect.y + tex_sub_rect.h) / height},
-        {(tex_sub_rect.x + tex_sub_rect.w) / width , tex_sub_rect.y / height}
-    };
-
-    BOBi_draw_mesh(r, coords, 4, uv, (uint32_t[6]){0, 1, 3, 1, 2, 3}, 6, colour, texture, mat);
-
-    return 1;
+    return BOB_draw_texture_channel(r, texture, screen_quad, tex_sub_rect, colour, layer, rotation, mat, 0);
 }
 
 //Draws a quad with a specified material
 uint8_t BOB_draw_atlas_quad_mat(BOB_Renderer *r, BOB_Quad screen_quad, BOB_Quad tex_sub_rect, BOB_Vector4 colour, BOB_Atlas_Handle atlas, uint16_t layer, float rotation, BOB_Material_Handle mat) {
-    return BOB_draw_texture_mat(r, intrn_data.atlas_table[atlas].texture, screen_quad, tex_sub_rect, colour, layer, rotation, mat);
+    return BOB_draw_texture_channel(r, intrn_data.atlas_table[atlas].texture, screen_quad, tex_sub_rect, colour, layer, rotation, mat, 0);
 }
 
 //Draws a pixel buffer with a specified material
 uint8_t BOB_draw_pixel_buffer_mat(BOB_Renderer *r, BOB_PixelBuffer_Handle pb, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, uint16_t layer, float rotation, BOB_Material_Handle mat) {
-    if((pb & BOBi_MSB) || (mat & BOBi_MSB)) return 0; //Do not work with already invalid handles
-    if(!BOBi_clip_quad(r, &dimensions)) return 1; //Early exit
-    BOB_Texture tex = intrn_data.texture_table[intrn_data.pixelbuffer_table[pb].pixel_tex];
-
-    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, intrn_data.pixelbuffer_table[pb].pbo);
-    glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
-    glBindTexture(GL_TEXTURE_2D, tex.texture);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, tex.width, tex.height, GL_RGB, GL_UNSIGNED_BYTE, 0);
-    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
-
-    return BOB_draw_texture_mat(r, intrn_data.pixelbuffer_table[pb].pixel_tex, dimensions, uv_dimensions, colour, layer, rotation, mat);
+    return BOB_draw_pixel_buffer_channel(r, pb, dimensions, uv_dimensions, colour, layer, rotation, mat, 0);
 }
 
 //Draws a filled circle with a specified material
@@ -1616,7 +1609,7 @@ uint8_t BOB_draw_circle_mat(BOB_Renderer *r, BOB_Vector2 centre, float radius, B
         indices[index_count++] = ((i+1) % clipped_size);
     }
 
-    BOBi_draw_mesh(r, points3, clipped_size, NULL, indices, index_count, colour, intrn_data.default_tex, mat);
+    BOBi_draw_mesh(r, points3, clipped_size, NULL, indices, index_count, colour, intrn_data.default_tex, mat, 0);
     return 1;
 }
 
@@ -1636,7 +1629,7 @@ uint8_t BOB_draw_quad_mat(BOB_Renderer *r, BOB_Quad quad, BOB_Vector4 colour, ui
         {rotated_coords[3].x, rotated_coords[3].y, layer}
     };
 
-    BOBi_draw_mesh(r, strip, 4, NULL, (uint32_t[6]){0,1,3,1,2,3}, 6, colour, intrn_data.default_tex, mat);
+    BOBi_draw_mesh(r, strip, 4, NULL, (uint32_t[6]){0,1,3,1,2,3}, 6, colour, intrn_data.default_tex, mat, 0);
     return 1;
 }
 
@@ -1677,7 +1670,7 @@ uint8_t BOB_draw_polygon_mat(BOB_Renderer *r, BOB_Vector2* poly_points, size_t p
         triangle_indices[i] = vertex_map[old];
     }
 
-    BOBi_draw_mesh(r, vertices, vertex_count, NULL, triangle_indices, triangle_count * 3, colour, intrn_data.default_tex, mat);
+    BOBi_draw_mesh(r, vertices, vertex_count, NULL, triangle_indices, triangle_count * 3, colour, intrn_data.default_tex, mat, 0);
     return 1;
 }
 //Draws an unfilled circle with a specified material
@@ -1762,10 +1755,63 @@ uint8_t BOB_draw_line_mat(BOB_Renderer *r, BOB_Vector2 start_pos, BOB_Vector2 en
             {end_pos.x + radius.x, end_pos.y + radius.y, layer},
         };
 
-        BOBi_draw_mesh(r, strip, 4, NULL, (uint32_t[6]){0,1,2,1,2,3}, 6, colour, intrn_data.default_tex, mat);
+        BOBi_draw_mesh(r, strip, 4, NULL, (uint32_t[6]){0,1,2,1,2,3}, 6, colour, intrn_data.default_tex, mat, 0);
     }
 
     return 1;
+}
+
+//Draws a dynamically allocated texture with a specified material
+uint8_t BOB_draw_texture_channel(BOB_Renderer *r, BOB_Texture_Handle texture, BOB_Quad screen_quad, BOB_Quad tex_sub_rect, BOB_Vector4 colour, uint16_t layer, float rotation, BOB_Material_Handle mat, uint8_t channel) {
+    if((texture & BOBi_MSB) || (mat & BOBi_MSB) || channel > 63) return 0; //Do not work with already invalid handles
+    if(!BOBi_clip_quad(r, &screen_quad)) return 1; //Early exit
+
+    BOB_Vector2 rotated_coords[4];
+    BOBi_rotate_quad(screen_quad, rotated_coords, rotation);
+
+    if(layer > BOB_MAX_LAYER) layer = BOB_MAX_LAYER-1; //Normalise it to be within the required range
+
+    BOB_Vector3 coords[4] = {
+        {rotated_coords[0].x, rotated_coords[0].y, layer},
+        {rotated_coords[1].x, rotated_coords[1].y, layer},
+        {rotated_coords[2].x, rotated_coords[2].y, layer},
+        {rotated_coords[3].x, rotated_coords[3].y, layer}
+    };
+
+    float width = intrn_data.texture_table[texture].width;
+    float height = intrn_data.texture_table[texture].height;
+
+    BOB_Vector2 uv[4] = {
+        {tex_sub_rect.x / width, tex_sub_rect.y / height},
+        {tex_sub_rect.x / width, (tex_sub_rect.y + tex_sub_rect.h) / height},
+        {(tex_sub_rect.x + tex_sub_rect.w) / width, (tex_sub_rect.y + tex_sub_rect.h) / height},
+        {(tex_sub_rect.x + tex_sub_rect.w) / width , tex_sub_rect.y / height}
+    };
+
+    BOBi_draw_mesh(r, coords, 4, uv, (uint32_t[6]){0, 1, 3, 1, 2, 3}, 6, colour, texture, mat, channel);
+
+    return 1;
+}
+
+//Draws a quad with a specified material
+uint8_t BOB_draw_atlas_quad_channel(BOB_Renderer *r, BOB_Quad screen_quad, BOB_Quad tex_sub_rect, BOB_Vector4 colour, BOB_Atlas_Handle atlas, uint16_t layer, float rotation, BOB_Material_Handle mat, uint8_t channel) {
+    if((atlas & BOBi_MSB) || (mat & BOBi_MSB) || channel > 63) return 0; //Do not work with already invalid handles
+    return BOB_draw_texture_channel(r, intrn_data.atlas_table[atlas].texture, screen_quad, tex_sub_rect, colour, layer, rotation, mat, channel);
+}
+
+//Draws a pixel buffer with a specified material
+uint8_t BOB_draw_pixel_buffer_channel(BOB_Renderer *r, BOB_PixelBuffer_Handle pb, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, uint16_t layer, float rotation, BOB_Material_Handle mat, uint8_t channel) {
+    if((pb & BOBi_MSB) || (mat & BOBi_MSB) || channel > 63) return 0; //Do not work with already invalid handles
+    if(!BOBi_clip_quad(r, &dimensions)) return 1; //Early exit
+    BOB_Texture tex = intrn_data.texture_table[intrn_data.pixelbuffer_table[pb].pixel_tex];
+
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, intrn_data.pixelbuffer_table[pb].pbo);
+    glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
+    glBindTexture(GL_TEXTURE_2D, tex.texture);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, tex.width, tex.height, GL_RGB, GL_UNSIGNED_BYTE, 0);
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+
+    return BOB_draw_texture_channel(r, intrn_data.pixelbuffer_table[pb].pixel_tex, dimensions, uv_dimensions, colour, layer, rotation, mat, channel);
 }
 
 //=================================== CLIPPING FUNCTIONS =====================================
@@ -2228,7 +2274,7 @@ uint8_t BOBi_parse_binary(BOB_Font *font, uint8_t *data, size_t data_sz) {
 
 uint8_t BOB_load_bmf_font(const char *font_path, BOB_Font_Handle *font, BOB_BMF_Format format) {
     if(intrn_data.num_fonts >= BOB_MAX_FONT_CAPACITY) {
-        BOB_PRINT("ERROR: Exceeded Font Capacity");
+        printf("ERROR: Exceeded Font Capacity");
         *font |= BOBi_MSB;
         return 0;
     }
@@ -2274,7 +2320,7 @@ uint8_t BOB_load_bmf_font(const char *font_path, BOB_Font_Handle *font, BOB_BMF_
 
 uint8_t BOB_create_custom_font(BOB_Font_Handle *font, size_t num_glyphs, size_t num_kernings, size_t line_height, size_t base) {
     if(intrn_data.num_fonts >= BOB_MAX_FONT_CAPACITY) {
-        BOB_PRINT("ERROR: Exceeded Font Capacity");
+        printf("ERROR: Exceeded Font Capacity");
         *font |= BOBi_MSB;
         return 0;
     }
@@ -2332,12 +2378,15 @@ uint8_t BOB_draw_codepoint(BOB_Renderer *r, BOB_Font_Handle font, uint32_t codep
     if(index == UINT32_MAX) return 0; //Codepoint doesn't exist
 
     BOB_Glyph g = f.glyphs[index];
-    BOB_draw_texture(r, f.pages[g.page], (BOB_Quad){pos->x + g.x_offset, pos->y + g.y_offset, g.sub_rect.w, g.sub_rect.h}, g.sub_rect, colour, layer, 0.0f);
+    //Setting the flags we pass to the shader
+    uint8_t chnl_flags = g.channel | BOB_GLYPH_BIT;
+    if(intrn_data.texture_table[f.pages[g.page]].format == BOB_RED) chnl_flags |= BOB_GREYSCALE_BIT;
+
+    BOB_draw_texture_channel(r, f.pages[g.page], (BOB_Quad){pos->x + g.x_offset, pos->y + g.y_offset, g.sub_rect.w, g.sub_rect.h}, g.sub_rect, colour, layer, 0.0f, r->default_mat, chnl_flags);
     pos->x += g.x_advance;
     return 1;
 }
 
-//TODO: Compress this and the next function since they are almost identical
 typedef uint32_t (*BOBi_Codepoint_Reader)(void *str, size_t index);
 static uint32_t BOBi_read_char(void *str, size_t index) { return (uint32_t)((char *)str)[index]; }
 static uint32_t BOBi_read_codepoint(void *str, size_t index) { return ((uint32_t *)str)[index]; }
@@ -2443,7 +2492,6 @@ static uint8_t BOBi_measure_string(void *str, size_t str_len, BOBi_Codepoint_Rea
     return 1;
 }
 
-//TODO: Compress this and the next function since they are almost identical
 uint8_t BOB_measure_char_string(char *str, size_t str_len, BOB_Font_Handle font, BOB_Vector2 *out) {
     return BOBi_measure_string(str, str_len, BOBi_read_char, font, out);
 }

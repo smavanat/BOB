@@ -2,7 +2,6 @@
 #define BOB_H
 #include <stdint.h>
 #include <stddef.h>
-
 #include <glad/glad.h>
 
 #ifndef BOB_MALLOC
@@ -21,11 +20,6 @@
 #include <string.h>
 #define BOB_MEMCPY memcpy
 #endif //BOB_MEMCPY
-
-#ifndef BOB_PRINT
-#include <stdio.h>
-#define BOB_PRINT printf
-#endif //BOB_PRINT
 
 //TODO: Vulkan support
 //      Make it so that unfilled shapes don't have the full outline drawn when clipped
@@ -87,7 +81,15 @@ typedef struct {
     BOB_Vector4 colour; //The colour of the vertex
     BOB_Vector3 pos; //The on-screen position of the render vertex
     BOB_Vector2 uv; //The (u,v) coordinates of the vertex
+    uint8_t flags; //Flag order: 0:red, 1:green, 2:blue, 3:alpha, 4:glyph, 5:greyscale.
 } BOB_Render_Vertex;
+
+#define BOB_RED_CHNL_BIT 1
+#define BOB_GREEN_CHNL_BIT 2
+#define BOB_BLUE_CHNL_BIT 4
+#define BOB_ALPHA_CHNL_BIT 8
+#define BOB_GLYPH_BIT 16
+#define BOB_GREYSCALE_BIT 32
 
 typedef uint32_t BOB_Texture_Handle;
 typedef uint32_t BOB_Material_Handle;
@@ -106,6 +108,7 @@ typedef enum {
 typedef struct {
     uint32_t texture, width, height;
     uint8_t init;
+    BOB_Format format;
 } BOB_Texture;
 
 //Creates a new texture on the gpu
@@ -343,14 +346,19 @@ uint8_t BOB_draw_unfilled_polygon_mat(BOB_Renderer *r, BOB_Vector2 *poly_points,
 //Draws a line between two points with a specified material
 uint8_t BOB_draw_line_mat(BOB_Renderer *r, BOB_Vector2 start_pos, BOB_Vector2 end_pos, float thickness, BOB_Vector4 colour, uint16_t layer, BOB_Material_Handle mat);
 
+//Draws a quad with a specified material
+uint8_t BOB_draw_atlas_quad_channel(BOB_Renderer *r, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, BOB_Atlas_Handle atlas, uint16_t layer, float rotation, BOB_Material_Handle mat, uint8_t channel);
+//Draws a dynamically allocated texture with a specified material and channel
+uint8_t BOB_draw_texture_channel(BOB_Renderer *r, BOB_Texture_Handle texture, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, uint16_t layer, float rotation, BOB_Material_Handle mat, uint8_t channel);
+//Draws a pixel buffer with a specified erial and channel
+uint8_t BOB_draw_pixel_buffer_channel(BOB_Renderer *r, BOB_PixelBuffer_Handle pb, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, uint16_t layer, float rotation, BOB_Material_Handle mat, uint8_t channel);
+
 //Determines the projection matrix
 void BOB_ortho(float left, float right, float bottom, float top, float nearZ, float farZ, BOB_Mat4 *dest);
 //Clears the collur of the screen
 void BOB_clear_colour(BOB_Vector4 colour);
 //Converts an angle in degrees to radians
 float BOB_degrees_to_radians(float angle);
-
-//TODO: Support chars being packed into specific channels
 
 //Font structs:
 typedef struct {
