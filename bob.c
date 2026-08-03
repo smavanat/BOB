@@ -1,14 +1,52 @@
 #include "bob.h"
 #include <ctype.h>
 #include <math.h>
+#include <stdalign.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+// ================================ BOB ARENA IMPLEMENTATION =================================
+
+#define MIN_ALIGNMENT alignof(max_align_t)
+
+uint8_t BOB_init_arena(BOB_Arena *arena, size_t capacity) {
+    arena->capacity = capacity;
+    arena->offset = 0;
+    arena->memory = malloc(capacity);
+
+    return arena->memory != NULL;
+}
+
+void BOB_destroy_arena(BOB_Arena *arena) {
+    if(arena->memory) free(arena->memory);
+    *arena = (BOB_Arena){0};
+}
+
+void *BOB_arena_alloc(BOB_Arena *arena, size_t size, size_t alignment) {
+    //Assert that alignments are powers of 2:
+    assert(alignment != 0);
+    assert((alignment & (alignment - 1)) == 0);
+
+    uintptr_t current = (uintptr_t)arena->memory + arena->offset;
+    uintptr_t offset = (current + (alignment - 1)) & ~(alignment - 1);
+    offset -= (uintptr_t)(arena->memory);
+
+    if(offset + size > arena->capacity) return NULL; //Out of memory
+
+    void *ptr = (void *)((uintptr_t)arena->memory + offset);
+    arena->offset = offset + size;
+
+    return ptr;
+}
+
+void BOB_arena_clear(BOB_Arena *arena) {
+    arena->offset = 0;
+}
+
 typedef struct {
-    BOB_RenderBatch batch_table[BOB_MAX_TEX_CAPACITY][BOB_MAX_MATERIAL_CAPACITY];
     BOB_TextureAtlas atlas_table[BOB_MAX_ATLAS_CAPACITY];
     BOB_PixelBuffer pixelbuffer_table[BOB_MAX_PIXELBUFFER_CAPACITY];
     BOB_Texture texture_table[BOB_MAX_TEX_CAPACITY];
@@ -31,8 +69,24 @@ BOBi_Data intrn_data = {0};
 
 //Return the value of the element at the top of the stack without popping it
 #define BOB_peek_clip_rect(stack) (((stack)->size > 0) ? (stack)->elems[(stack)->size-1] : (BOBi_Clip_Rect){0})
-#define BOBi_GET_RENDER_BATCH(tex, mat) intrn_data.batch_table[(tex)][(mat)]
 #define BOBi_MSB 0x80000000
+
+typedef enum {
+    BOBi_DRAW_QUAD,
+    BOBi_DRAW_CIRCLE,
+    BOBi_DRAW_POLY,
+} BOBi_Draw_Type;
+
+typedef struct {
+    BOB_Render_Vertex *vertices; //Pointer into the vertex arena where this draw call's vertices start
+    uint32_t *indices; //Pointer into the index arena where this draw call's indices start. Only initialised after draw call has been sorted and indices created
+    size_t num_vertices; //Number of vertices in the draw call
+    size_t num_indices; //Number of indices in the draw call
+    BOB_Texture_Handle tex; //Texture handle. Primary sorting key of draw calls
+    BOB_Material_Handle mat; //Material handle. Secondary sorting key of draw calls
+    uint32_t submission_id; //Tertiary sorting key of draw calls. Since this should be unique for each draw call associated with a renderer, this acts as a tiebreaker
+    BOBi_Draw_Type type; //Determines how the draw call's indicies are generated
+} BOBi_Draw_Call;
 
 //================================================= INTERNAL HELPER FUNCTIONS ===================================================
 
@@ -65,55 +119,79 @@ void BOBi_update_uniform(BOB_Uniform uniform) {
     }
 }
 
-void BOBi_flush_batch(BOB_Renderer *r, BOB_Texture_Handle tex, BOB_Material_Handle mat) {
-    glUseProgram(intrn_data.material_table[mat].shader);
-    //Setting the uniforms
-    for(size_t i = 0; i < intrn_data.material_table[mat].uniform_count; i++) {
-        BOBi_update_uniform(intrn_data.material_table[mat].uniforms[i]);
+// ============= QUICKSORT IMPLEMENTATION ===============
+#define BOBi_get_arena_elem(arena, index, type) ((type *)(arena).memory)[(index)]
+
+int8_t BOBi_compare_draw_calls(BOBi_Draw_Call a, BOBi_Draw_Call b, uint8_t strict) {
+    if(a.tex < b.tex) return -1;
+    if(a.tex > b.tex) return 1;
+    if(a.mat < b.mat) return -1;
+    if(a.mat > b.mat) return 1;
+    if(strict) {
+        if(a.submission_id < b.submission_id) return -1;
+        if(a.submission_id > b.submission_id) return 1;
     }
-
-    //Bind all of the arrays and buffers we will reuse over time
-    glBindVertexArray(r->vao);
-    glBindBuffer(GL_ARRAY_BUFFER, r->vbo);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, r->ebo);
-
-    glBufferSubData(GL_ARRAY_BUFFER, 0, BOBi_GET_RENDER_BATCH(tex, mat).vertex_count * sizeof(BOB_Render_Vertex), BOBi_GET_RENDER_BATCH(tex, mat).vertex_data); //Copies the data from renderer's triangle data into the vbo
-    glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, BOBi_GET_RENDER_BATCH(tex, mat).index_count * sizeof(uint32_t), BOBi_GET_RENDER_BATCH(tex, mat).index_data); //Copies the quad data into the vbo
-
-    //Bind the atlas texture
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, intrn_data.texture_table[tex].texture);
-
-    glDrawElements(GL_TRIANGLES, BOBi_GET_RENDER_BATCH(tex, mat).index_count, GL_UNSIGNED_INT, 0); //Make the draw call
-
-    BOBi_GET_RENDER_BATCH(tex, mat).index_count = 0;
-    BOBi_GET_RENDER_BATCH(tex, mat).vertex_count = 0;
+    return 0; //Should not be reached since submission_id should act as a tiebreaker
 }
 
-void BOBi_check_capacity(BOB_Renderer *r, BOB_Texture_Handle tex, BOB_Material_Handle mat, uint32_t num_vertices, uint32_t num_indices) {
-    if(BOBi_GET_RENDER_BATCH(tex, mat).index_count + num_indices >= BOB_MAX_INDEX_CAPACITY ||
-      BOBi_GET_RENDER_BATCH(tex, mat).vertex_count + num_vertices >= BOB_MAX_VERTEX_CAPACITY) {
-        BOBi_flush_batch(r, tex, mat);
-        return;
+void BOBi_swap_draw_calls(BOBi_Draw_Call *a, BOBi_Draw_Call *b) {
+    BOBi_Draw_Call temp = *a;
+    *a = *b;
+    *b = temp;
+}
+
+size_t BOBi_quicksort_median_of_three(BOB_Renderer *r, size_t lo, size_t hi)
+{
+    size_t mid = lo + (hi - lo) / 2;
+
+    BOBi_Draw_Call *a = &BOBi_get_arena_elem(r->batch.draw_call_arena, lo, BOBi_Draw_Call);
+    BOBi_Draw_Call *b = &BOBi_get_arena_elem(r->batch.draw_call_arena, mid, BOBi_Draw_Call);
+    BOBi_Draw_Call *c = &BOBi_get_arena_elem(r->batch.draw_call_arena, hi, BOBi_Draw_Call);
+
+    if (BOBi_compare_draw_calls(*a, *b, 1) > 0)
+        BOBi_swap_draw_calls(a, b);
+
+    if (BOBi_compare_draw_calls(*a, *c, 1) > 0)
+        BOBi_swap_draw_calls(a, c);
+
+    if (BOBi_compare_draw_calls(*b, *c, 1) > 0)
+        BOBi_swap_draw_calls(b, c);
+
+    return mid;
+}
+
+//Implementing Hoare's partition. Based on the code found here:
+//https://www.geeksforgeeks.org/dsa/hoares-vs-lomuto-partition-scheme-quicksort/
+size_t BOBi_quicksort_partition(BOB_Renderer *r, size_t subarr_start, size_t subarr_end) {
+    size_t pivot = BOBi_quicksort_median_of_three(r, subarr_start, subarr_end);
+
+    BOBi_Draw_Call pivot_call = BOBi_get_arena_elem(r->batch.draw_call_arena, pivot, BOBi_Draw_Call);
+    size_t i = subarr_start, j = subarr_end;
+    while(1) {
+        //Find leftmost element >= pivot
+        while(BOBi_compare_draw_calls(BOBi_get_arena_elem(r->batch.draw_call_arena, i, BOBi_Draw_Call), pivot_call, 1) < 0)
+            i++;
+
+        //Find rightmost element <= pivot;
+        while(BOBi_compare_draw_calls(BOBi_get_arena_elem(r->batch.draw_call_arena, j, BOBi_Draw_Call), pivot_call, 1) > 0)
+            j--;
+
+        if(i >= j) return j;
+
+        BOBi_swap_draw_calls(&BOBi_get_arena_elem(r->batch.draw_call_arena, i, BOBi_Draw_Call), &BOBi_get_arena_elem(r->batch.draw_call_arena, j, BOBi_Draw_Call));
+
+        i++;
+        j--;
     }
 
-    if(BOBi_GET_RENDER_BATCH(tex, mat).index_count + num_indices >= BOBi_GET_RENDER_BATCH(tex, mat).index_size) {
-        size_t new_cap = BOBi_GET_RENDER_BATCH(tex, mat).index_size * 2;
-        if(new_cap < BOBi_GET_RENDER_BATCH(tex, mat).index_count + num_indices) new_cap = BOBi_GET_RENDER_BATCH(tex, mat).index_count + num_indices;
-        uint32_t *temp = BOB_MALLOC(new_cap * sizeof(uint32_t));
-        BOB_MEMCPY(temp, BOBi_GET_RENDER_BATCH(tex, mat).index_data, sizeof(uint32_t) * BOBi_GET_RENDER_BATCH(tex, mat).index_size);
-        BOB_FREE(BOBi_GET_RENDER_BATCH(tex, mat).index_data);
-        BOBi_GET_RENDER_BATCH(tex, mat).index_data = temp;
-        BOBi_GET_RENDER_BATCH(tex, mat).index_size = new_cap;
-    }
-    if(BOBi_GET_RENDER_BATCH(tex, mat).vertex_count + num_vertices >= BOBi_GET_RENDER_BATCH(tex, mat).vertex_size) {
-        size_t new_cap = BOBi_GET_RENDER_BATCH(tex, mat).vertex_size * 2;
-        if(new_cap < BOBi_GET_RENDER_BATCH(tex, mat).vertex_count + num_vertices) new_cap = BOBi_GET_RENDER_BATCH(tex, mat).vertex_count + num_vertices;
-        BOB_Render_Vertex *temp = BOB_MALLOC(new_cap * sizeof(BOB_Render_Vertex));
-        BOB_MEMCPY(temp, BOBi_GET_RENDER_BATCH(tex, mat).vertex_data, sizeof(BOB_Render_Vertex) * BOBi_GET_RENDER_BATCH(tex, mat).vertex_size);
-        BOB_FREE(BOBi_GET_RENDER_BATCH(tex, mat).vertex_data);
-        BOBi_GET_RENDER_BATCH(tex, mat).vertex_data = temp;
-        BOBi_GET_RENDER_BATCH(tex, mat).vertex_size = new_cap;
+    return i;
+}
+
+void BOBi_quicksort_draw_calls(BOB_Renderer *r, size_t subarr_start, size_t subarr_end) {
+    if(subarr_start < subarr_end) {
+        size_t pos_pivot = BOBi_quicksort_partition(r, subarr_start, subarr_end);
+        BOBi_quicksort_draw_calls(r, subarr_start, pos_pivot);
+        BOBi_quicksort_draw_calls(r, pos_pivot+1, subarr_end);
     }
 }
 
@@ -255,31 +333,6 @@ unsigned int BOBi_create_shader(BOB_Shader_Data s) {
     }
 
     return shader;
-}
-
-//Draws a mesh of triangles
-void BOBi_draw_mesh(BOB_Renderer *r, BOB_Vector3 *vertices, size_t vertex_count, BOB_Vector2 *uv, uint32_t *indices, size_t index_count, BOB_Vector4 colour, BOB_Texture_Handle tex, BOB_Material_Handle mat, uint8_t channel) {
-    //Lazy allocation of memory
-    if(!BOBi_GET_RENDER_BATCH(tex, mat).init) {
-        BOBi_GET_RENDER_BATCH(tex, mat).index_data = BOB_MALLOC(sizeof(uint32_t) * BOB_INIT_INDEX_CAPACITY);
-        BOBi_GET_RENDER_BATCH(tex, mat).vertex_data = BOB_MALLOC(sizeof(BOB_Render_Vertex) * BOB_INIT_VERTEX_CAPACITY);
-        BOBi_GET_RENDER_BATCH(tex, mat).index_size = BOB_INIT_INDEX_CAPACITY;
-        BOBi_GET_RENDER_BATCH(tex, mat).vertex_size = BOB_INIT_VERTEX_CAPACITY;
-        BOBi_GET_RENDER_BATCH(tex, mat).init = 1;
-    }
-
-    BOBi_check_capacity(r, tex, mat, vertex_count, index_count);
-
-    //Update the vertex count and vertex data stored in the renderer
-    uint32_t base_index = BOBi_GET_RENDER_BATCH(tex, mat).vertex_count;
-
-    for(size_t i = 0; i < vertex_count; i++) {
-        BOBi_GET_RENDER_BATCH(tex, mat).vertex_data[BOBi_GET_RENDER_BATCH(tex,mat).vertex_count++] = (BOB_Render_Vertex){colour, vertices[i], (uv == NULL) ? (BOB_Vector2){0} : uv[i], channel};
-    }
-
-    for(size_t i = 0; i < index_count; i++) {
-        BOBi_GET_RENDER_BATCH(tex, mat).index_data[BOBi_GET_RENDER_BATCH(tex,mat).index_count++] = base_index + indices[i];
-    }
 }
 
 #define BOBi_MAX_POLY_SIZE 256
@@ -524,6 +577,44 @@ size_t BOBi_triangulate_ec(BOB_Vector2 *poly_points, size_t poly_size, uint32_t 
     triangle_count++;
 
     return triangle_count;
+}
+
+void BOBi_flush_draw_calls(BOB_Renderer *r) {
+    BOB_renderer_end(r);
+    BOB_renderer_begin(r);
+}
+
+void BOBi_check_draw_capacity(BOB_Renderer *r, uint32_t num_vertices, uint32_t num_indices) {
+    if(num_indices + r->batch.num_indices >= BOB_MAX_INDEX_CAPACITY ||
+       num_vertices + r->batch.num_vertices >= BOB_MAX_VERTEX_CAPACITY ||
+       r->batch.num_draw_calls + 1 >= BOB_MAX_DRAW_CALL_CAPACITY) {
+        BOBi_flush_draw_calls(r);
+        r->batch.num_draw_calls = 0;
+        r->batch.num_indices = 0;
+        r->batch.num_vertices = 0;
+    }
+}
+
+void BOBi_create_draw_call(BOB_Renderer *r, BOB_Vector3 *vertices, size_t vertex_count, BOB_Vector2 *uv, size_t index_count, BOB_Vector4 colour, BOB_Texture_Handle tex, BOB_Material_Handle mat, uint8_t channel, BOBi_Draw_Type type) {
+    BOBi_check_draw_capacity(r, vertex_count, index_count);
+
+    BOBi_Draw_Call *dc = (BOBi_Draw_Call *)BOB_arena_alloc(&r->batch.draw_call_arena, sizeof(BOBi_Draw_Call), alignof(BOBi_Draw_Call));
+    BOB_Render_Vertex *alloc_vertices = (BOB_Render_Vertex *)BOB_arena_alloc(&r->batch.vertex_arena, sizeof(BOB_Render_Vertex) * vertex_count, alignof(BOB_Render_Vertex));
+    dc->num_indices = index_count;
+    dc->num_vertices = vertex_count;
+    dc->vertices = alloc_vertices;
+    dc->type = type;
+    dc->mat = mat;
+    dc->tex = tex;
+    dc->submission_id = r->batch.num_draw_calls;
+
+    r->batch.num_draw_calls++;
+    r->batch.num_indices += index_count;
+    r->batch.num_vertices += vertex_count;
+
+    for(size_t i = 0; i < vertex_count; i++) {
+        dc->vertices[i] = (BOB_Render_Vertex){colour, vertices[i], (uv == NULL) ? (BOB_Vector2){0} : uv[i], channel};
+    }
 }
 
 BOB_Vector2 BOBi_rotate_about_point(BOB_Vector2 point, BOB_Vector2 rot_center, float rotation) {
@@ -881,12 +972,6 @@ void BOB_terminate() {
     for(size_t i = 0; i < BOB_MAX_MATERIAL_CAPACITY; i++) {
         BOBi_material_free(i);
     }
-    for(size_t i = 0; i < BOB_MAX_TEX_CAPACITY; i++) {
-        for(size_t j = 0; j < BOB_MAX_MATERIAL_CAPACITY; j++) {
-            BOB_FREE(BOBi_GET_RENDER_BATCH(i, j).index_data);
-            BOB_FREE(BOBi_GET_RENDER_BATCH(i, j).vertex_data);
-        }
-    }
     for(size_t i = 0; i < BOB_MAX_PIXELBUFFER_CAPACITY; i++) {
         BOBi_pixelbuffer_free(i);
     }
@@ -936,6 +1021,10 @@ uint8_t BOB_renderer_init(size_t width, size_t height, BOB_Renderer *out) {
     r.stack->elems = BOB_MALLOC(sizeof(BOBi_Clip_Rect) * INIT_STACK_CAPACITY);
     r.stack->capacity = INIT_STACK_CAPACITY;
     r.stack->size = 0;
+
+    BOB_init_arena(&r.batch.vertex_arena, BOB_MAX_VERTEX_CAPACITY * sizeof(BOB_Render_Vertex));
+    BOB_init_arena(&r.batch.vertex_arena_2, BOB_MAX_VERTEX_CAPACITY * sizeof(BOB_Render_Vertex));
+    BOB_init_arena(&r.batch.draw_call_arena, BOB_MAX_VERTEX_CAPACITY * sizeof(BOBi_Draw_Call));
     *out = r;
 
     return 1;
@@ -950,48 +1039,144 @@ void BOB_renderer_free(BOB_Renderer *r) {
     r->stack->elems = NULL;
     BOB_FREE(r->stack);
     r->stack = NULL;
+
+    BOB_destroy_arena(&r->batch.vertex_arena);
+    BOB_destroy_arena(&r->batch.vertex_arena_2);
+    BOB_destroy_arena(&r->batch.draw_call_arena);
 }
 
 //Sets up the variables for renderering to the pbo from the BOB_Renderer
 void BOB_renderer_begin(BOB_Renderer *r) {
-    for(int i = 0; i < BOB_MAX_TEX_CAPACITY; i++) {
-        for(int j = 0; j < BOB_MAX_MATERIAL_CAPACITY; j++) {
-            if(intrn_data.batch_table[i][j].init) {
-                intrn_data.batch_table[i][j].index_count = 0;
-                intrn_data.batch_table[i][j].vertex_count = 0;
-            }
-        }
-    }
+    BOB_arena_clear(&r->batch.vertex_arena);
+    BOB_arena_clear(&r->batch.vertex_arena_2);
+    BOB_arena_clear(&r->batch.draw_call_arena);
+
+    r->batch.num_draw_calls = 0;
+    r->batch.num_indices = 0;
+    r->batch.num_vertices = 0;
 }
 
 //Ends rendering to the current pixel frame
 void BOB_renderer_end(BOB_Renderer *r) {
+    //Sort the draw calls
+    BOBi_quicksort_draw_calls(r, 0, r->batch.num_draw_calls-1);
+
+    //Copy the vertices to be in sorted order
+    for(size_t i = 0; i < r->batch.num_draw_calls; i++) {
+        BOBi_Draw_Call *call = (BOBi_Draw_Call *)r->batch.draw_call_arena.memory + i;
+        BOB_Render_Vertex *new_pos = BOB_arena_alloc(&r->batch.vertex_arena_2, call->num_vertices * sizeof(BOB_Render_Vertex), alignof(BOB_Render_Vertex));
+        memcpy(new_pos, call->vertices, call->num_vertices * sizeof(BOB_Render_Vertex));
+        call->vertices = new_pos;
+    }
+
+    //Clear the orginial vertex arena so that we can re-use it for indicies
+    BOB_arena_clear(&r->batch.vertex_arena);
+
+    //Generate the indices for each draw call
+    size_t cur_index = 0;
+    for(size_t i = 0; i < r->batch.num_draw_calls; i++) {
+        BOBi_Draw_Call *call = (BOBi_Draw_Call *)r->batch.draw_call_arena.memory + i;
+        call->indices = BOB_arena_alloc(&r->batch.vertex_arena, sizeof(uint32_t) * call->num_indices, alignof(uint32_t));
+        switch(call->type) {
+            case BOBi_DRAW_CIRCLE: {
+                size_t index_count = 0;
+                for(int i = 0; i < call->num_vertices; i++) {
+                    call->indices[index_count++] = cur_index;
+                    call->indices[index_count++] = cur_index + i;
+                    call->indices[index_count++] = cur_index + ((i+1) % call->num_vertices);
+                }
+            }
+            break;
+            case BOBi_DRAW_QUAD:
+                call->indices[0] = cur_index;
+                call->indices[1] = cur_index+1;
+                call->indices[2] = cur_index+3;
+                call->indices[3] = cur_index+1;
+                call->indices[4] = cur_index+2;
+                call->indices[5] = cur_index+3;
+            break;
+            case BOBi_DRAW_POLY: {
+                uint32_t triangle_indices[(BOBi_MAX_POLY_SIZE - 2) * 3]; //Ear clipping always produces n-2 triangles for a polygon with n vertices
+                BOB_Vector2 base_vertices[BOBi_MAX_POLY_SIZE];
+                for(size_t j = 0; j < call->num_vertices; j++) {
+                    base_vertices[j] = (BOB_Vector2){call->vertices[j].pos.x, call->vertices[j].pos.y};
+                }
+
+                size_t triangle_count = BOBi_triangulate_ec(base_vertices, call->num_vertices, triangle_indices);
+
+                if(!triangle_count) return; //Early exit
+
+                //Processing the returned vertex data into a more compact form so we can pass it to the renderer
+                uint32_t vertex_map[BOBi_MAX_POLY_SIZE];
+
+                //Filling the map with dummy values
+                for(size_t i = 0; i < call->num_vertices; i++)
+                    vertex_map[i] = UINT32_MAX;
+
+                BOB_Render_Vertex compressed[BOBi_MAX_POLY_SIZE]; //Holds the compressed vertex values
+                size_t vertex_count = 0;
+
+                // printf("Indices:\n");
+                //Copying the old verticies into compressed format
+                for(size_t j = 0; j < triangle_count*3; j++) {
+                    uint32_t old = triangle_indices[j];
+                    if(vertex_map[old] == UINT32_MAX) {
+                        vertex_map[old] = vertex_count;
+                        BOB_Render_Vertex temp = call->vertices[vertex_count];
+                        compressed[vertex_count++] = call->vertices[old];
+                    }
+                    call->indices[j] = cur_index + vertex_map[old];
+                }
+
+                memcpy(call->vertices, compressed, vertex_count * sizeof(BOB_Render_Vertex));
+            }
+            break;
+        }
+
+        cur_index += call->num_vertices;
+    }
+
+    //Compress the draw calls:
+    size_t num_unique_calls = 1;
+    size_t i = 0;
+    BOBi_Draw_Call *curr = (BOBi_Draw_Call *)r->batch.draw_call_arena.memory + i;
+    while(i < r->batch.num_draw_calls-1) {
+        BOBi_Draw_Call next = BOBi_get_arena_elem(r->batch.draw_call_arena, i+1, BOBi_Draw_Call);
+        if(BOBi_compare_draw_calls(*curr, next, 0)) {
+            BOBi_get_arena_elem(r->batch.draw_call_arena, num_unique_calls, BOBi_Draw_Call) = next;
+            curr = (BOBi_Draw_Call *)r->batch.draw_call_arena.memory + num_unique_calls;
+            num_unique_calls++;
+        }
+        else {
+            curr->num_indices += next.num_indices;
+            curr->num_vertices += next.num_vertices;
+        }
+        i++;
+    }
+
+    r->batch.num_draw_calls = num_unique_calls;
+
     //Bind all of the arrays and buffers we will reuse over time
     glBindVertexArray(r->vao);
     glBindBuffer(GL_ARRAY_BUFFER, r->vbo);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, r->ebo);
-    for(int tex = 0; tex < BOB_MAX_TEX_CAPACITY; tex++) {
-        for(int mat = 0; mat < BOB_MAX_MATERIAL_CAPACITY; mat++) {
-            if(intrn_data.batch_table[tex][mat].init && intrn_data.batch_table[tex][mat].index_count > 0 && intrn_data.batch_table[tex][mat].vertex_count > 0) {
-                glUseProgram(intrn_data.material_table[mat].shader);
-                //Setting the uniforms
-                for(size_t i = 0; i < intrn_data.material_table[mat].uniform_count; i++) {
-                    BOBi_update_uniform(intrn_data.material_table[mat].uniforms[i]);
-                }
 
-                glBufferSubData(GL_ARRAY_BUFFER, 0, BOBi_GET_RENDER_BATCH(tex, mat).vertex_count * sizeof(BOB_Render_Vertex), BOBi_GET_RENDER_BATCH(tex, mat).vertex_data); //Copies the data from renderer's triangle data into the vbo
-                glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, BOBi_GET_RENDER_BATCH(tex, mat).index_count * sizeof(uint32_t), BOBi_GET_RENDER_BATCH(tex, mat).index_data); //Copies the quad data into the vbo
-
-                //Bind the atlas texture
-                glActiveTexture(GL_TEXTURE0);
-                glBindTexture(GL_TEXTURE_2D, intrn_data.texture_table[tex].texture);
-
-                glDrawElements(GL_TRIANGLES, BOBi_GET_RENDER_BATCH(tex, mat).index_count, GL_UNSIGNED_INT, 0); //Make the draw call
-
-                BOBi_GET_RENDER_BATCH(tex, mat).index_count = 0;
-                BOBi_GET_RENDER_BATCH(tex, mat).vertex_count = 0;
-            }
+    for(size_t i = 0; i < r->batch.num_draw_calls; i++) {
+        BOBi_Draw_Call call = BOBi_get_arena_elem(r->batch.draw_call_arena, i, BOBi_Draw_Call);
+        glUseProgram(intrn_data.material_table[call.mat].shader);
+        //Setting the uniforms
+        for(size_t i = 0; i < intrn_data.material_table[call.mat].uniform_count; i++) {
+            BOBi_update_uniform(intrn_data.material_table[call.mat].uniforms[i]);
         }
+
+        glBufferSubData(GL_ARRAY_BUFFER, 0, call.num_vertices * sizeof(BOB_Render_Vertex), call.vertices); //Copies the data from renderer's triangle data into the vbo
+        glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, call.num_indices * sizeof(uint32_t), call.indices); //Copies the quad data into the vbo
+
+        //Bind the atlas texture
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, intrn_data.texture_table[call.tex].texture);
+
+        glDrawElements(GL_TRIANGLES, call.num_indices, GL_UNSIGNED_INT, 0); //Make the draw call
     }
 }
 
@@ -1060,6 +1245,7 @@ uint8_t BOB_create_texture(uint32_t width, uint32_t height, uint8_t *data, BOB_F
 
     intrn_data.texture_table[index].width = width;
     intrn_data.texture_table[index].height = height;
+    intrn_data.texture_table[index].format = format;
 
     intrn_data.num_textures++;
     *tex = index;
@@ -1609,7 +1795,7 @@ uint8_t BOB_draw_circle_mat(BOB_Renderer *r, BOB_Vector2 centre, float radius, B
         indices[index_count++] = ((i+1) % clipped_size);
     }
 
-    BOBi_draw_mesh(r, points3, clipped_size, NULL, indices, index_count, colour, intrn_data.default_tex, mat, 0);
+    BOBi_create_draw_call(r, points3, clipped_size, NULL, clipped_size * 3, colour, intrn_data.default_tex, mat, 0, BOBi_DRAW_CIRCLE);
     return 1;
 }
 
@@ -1629,7 +1815,8 @@ uint8_t BOB_draw_quad_mat(BOB_Renderer *r, BOB_Quad quad, BOB_Vector4 colour, ui
         {rotated_coords[3].x, rotated_coords[3].y, layer}
     };
 
-    BOBi_draw_mesh(r, strip, 4, NULL, (uint32_t[6]){0,1,3,1,2,3}, 6, colour, intrn_data.default_tex, mat, 0);
+    // BOBi_draw_mesh(r, strip, 4, NULL, (uint32_t[6]){0,1,3,1,2,3}, 6, colour, intrn_data.default_tex, mat, 0);
+    BOBi_create_draw_call(r, strip, 4, NULL, 6, colour, intrn_data.default_tex, mat, 0, BOBi_DRAW_QUAD);
     return 1;
 }
 
@@ -1637,40 +1824,19 @@ uint8_t BOB_draw_quad_mat(BOB_Renderer *r, BOB_Quad quad, BOB_Vector4 colour, ui
 uint8_t BOB_draw_polygon_mat(BOB_Renderer *r, BOB_Vector2* poly_points, size_t poly_size, BOB_Vector4 colour, uint16_t layer, float rotation, BOB_Material_Handle mat) {
     if(mat & BOBi_MSB) return 0; //Do not work with already invalid handles
 
+    BOBi_rotate_polygon(poly_points, poly_size, rotation);
+
     BOB_Vector2 points[BOBi_MAX_POLY_SIZE];
     BOB_MEMCPY(points, poly_points, poly_size * sizeof(BOB_Vector2));
 
     size_t clipped_size = BOBi_clip_polygon(r, points, poly_size);
     if(clipped_size < 3) return 1; //Early exit
 
-    uint32_t triangle_indices[(BOBi_MAX_POLY_SIZE - 2) * 3]; //Ear clipping always produces n-2 triangles for a polygon with n vertices
-    size_t triangle_count = BOBi_triangulate_ec(points, clipped_size, triangle_indices);
-
-    if(!triangle_count) return 1; //Early exit
-
-    //Processing the returned vertex data into a more compact form so we can pass it to the renderer
-    uint32_t vertex_map[BOBi_MAX_POLY_SIZE];
-
-    //Filling the map with dummy values
-    for(size_t i = 0; i < clipped_size; i++)
-        vertex_map[i] = UINT32_MAX;
-
     BOB_Vector3 vertices[BOBi_MAX_POLY_SIZE]; //Holds the compressed vertex values
-    size_t vertex_count = 0;
-
-    if(layer > BOB_MAX_LAYER) layer = BOB_MAX_LAYER -1; //Normalise it to be within the required range
-
-    //Copying the old verticies into compressed format
-    for(size_t i = 0; i < triangle_count*3; i++) {
-        uint32_t old = triangle_indices[i];
-        if(vertex_map[old] == UINT32_MAX) {
-            vertex_map[old] = vertex_count;
-            vertices[vertex_count++] = (BOB_Vector3){points[old].x, points[old].y, layer};
-        }
-        triangle_indices[i] = vertex_map[old];
+    for(size_t i = 0; i < clipped_size; i++) {
+        vertices[i] = (BOB_Vector3){points[i].x, points[i].y, layer};
     }
-
-    BOBi_draw_mesh(r, vertices, vertex_count, NULL, triangle_indices, triangle_count * 3, colour, intrn_data.default_tex, mat, 0);
+    BOBi_create_draw_call(r, vertices, clipped_size, NULL, (clipped_size - 2) * 3, colour, intrn_data.default_tex, mat, 0, BOBi_DRAW_POLY);
     return 1;
 }
 //Draws an unfilled circle with a specified material
@@ -1750,12 +1916,12 @@ uint8_t BOB_draw_line_mat(BOB_Renderer *r, BOB_Vector2 start_pos, BOB_Vector2 en
         BOB_Vector2 radius = {-scale*delta.y, scale*delta.x};
         BOB_Vector3 strip[4] = {
             {start_pos.x - radius.x, start_pos.y - radius.y, layer},
-            {start_pos.x + radius.x, start_pos.y + radius.y, layer},
             {end_pos.x - radius.x, end_pos.y - radius.y, layer},
             {end_pos.x + radius.x, end_pos.y + radius.y, layer},
+            {start_pos.x + radius.x, start_pos.y + radius.y, layer},
         };
 
-        BOBi_draw_mesh(r, strip, 4, NULL, (uint32_t[6]){0,1,2,1,2,3}, 6, colour, intrn_data.default_tex, mat, 0);
+        BOBi_create_draw_call(r, strip, 4, NULL, 6, colour, intrn_data.default_tex, mat, 0, BOBi_DRAW_QUAD);
     }
 
     return 1;
@@ -1763,7 +1929,7 @@ uint8_t BOB_draw_line_mat(BOB_Renderer *r, BOB_Vector2 start_pos, BOB_Vector2 en
 
 //Draws a dynamically allocated texture with a specified material
 uint8_t BOB_draw_texture_channel(BOB_Renderer *r, BOB_Texture_Handle texture, BOB_Quad screen_quad, BOB_Quad tex_sub_rect, BOB_Vector4 colour, uint16_t layer, float rotation, BOB_Material_Handle mat, uint8_t channel) {
-    if((texture & BOBi_MSB) || (mat & BOBi_MSB) || channel > 63) return 0; //Do not work with already invalid handles
+    if((texture & BOBi_MSB) || (mat & BOBi_MSB)) return 0; //Do not work with already invalid handles
     if(!BOBi_clip_quad(r, &screen_quad)) return 1; //Early exit
 
     BOB_Vector2 rotated_coords[4];
@@ -1788,20 +1954,20 @@ uint8_t BOB_draw_texture_channel(BOB_Renderer *r, BOB_Texture_Handle texture, BO
         {(tex_sub_rect.x + tex_sub_rect.w) / width , tex_sub_rect.y / height}
     };
 
-    BOBi_draw_mesh(r, coords, 4, uv, (uint32_t[6]){0, 1, 3, 1, 2, 3}, 6, colour, texture, mat, channel);
+    BOBi_create_draw_call(r, coords, BOB_VERTICIES_PER_QUAD, uv, BOB_INDECIES_PER_QUAD, colour, texture, mat, channel, BOBi_DRAW_QUAD);
 
     return 1;
 }
 
 //Draws a quad with a specified material
 uint8_t BOB_draw_atlas_quad_channel(BOB_Renderer *r, BOB_Quad screen_quad, BOB_Quad tex_sub_rect, BOB_Vector4 colour, BOB_Atlas_Handle atlas, uint16_t layer, float rotation, BOB_Material_Handle mat, uint8_t channel) {
-    if((atlas & BOBi_MSB) || (mat & BOBi_MSB) || channel > 63) return 0; //Do not work with already invalid handles
+    if((atlas & BOBi_MSB) || (mat & BOBi_MSB)) return 0; //Do not work with already invalid handles
     return BOB_draw_texture_channel(r, intrn_data.atlas_table[atlas].texture, screen_quad, tex_sub_rect, colour, layer, rotation, mat, channel);
 }
 
 //Draws a pixel buffer with a specified material
 uint8_t BOB_draw_pixel_buffer_channel(BOB_Renderer *r, BOB_PixelBuffer_Handle pb, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, uint16_t layer, float rotation, BOB_Material_Handle mat, uint8_t channel) {
-    if((pb & BOBi_MSB) || (mat & BOBi_MSB) || channel > 63) return 0; //Do not work with already invalid handles
+    if((pb & BOBi_MSB) || (mat & BOBi_MSB)) return 0; //Do not work with already invalid handles
     if(!BOBi_clip_quad(r, &dimensions)) return 1; //Early exit
     BOB_Texture tex = intrn_data.texture_table[intrn_data.pixelbuffer_table[pb].pixel_tex];
 

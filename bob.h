@@ -22,12 +22,10 @@
 #endif //BOB_MEMCPY
 
 //TODO: Vulkan support
-//      Make it so that unfilled shapes don't have the full outline drawn when clipped
-//      Add an arena to manage the total memory easily and get rid of BOB_MEMSET and BOB_MEMCPY since these should all take place within the arena
-//      Draw call sorting (quicksort) internally rather than relying on the depth buffer -> Should actually do this since dealing with the depth buffer is a giant pain
+//      Draw call sorting (quicksort) internally rather than relying on the depth buffer -> Should actually do this since dealing with the depth buffer is a giant pain (Maybe??? Don't think this is good idea)
+//      Do proper error reporting and document what each error code means somewhere
 //      Allow the user to define render passes -> Custom framebuffers
 //      Maybe allow custom vertex layout?
-//      Do proper error reporting and document what each error code means somewhere
 typedef struct {
     float m[4][4];
 } BOB_Mat4;
@@ -51,8 +49,22 @@ typedef struct {
 #define BOB_MAX_PIXELBUFFER_CAPACITY 8
 #define BOB_MAX_MATERIAL_CAPACITY 16
 #define BOB_MAX_FONT_CAPACITY 32
+#define BOB_MAX_DRAW_CALL_CAPACITY BOB_MAX_VERTEX_CAPACITY / 3 //Since minimum number of vertices in a draw call is 3
 #define INIT_STACK_CAPACITY 64
 #define BOB_MAX_LAYER 1024
+
+typedef struct BOB_Arena_t BOB_Arena;
+
+struct BOB_Arena_t{
+    void *memory;
+    size_t capacity;
+    size_t offset;
+};
+
+uint8_t BOB_init_arena(BOB_Arena *arena, size_t capacity);
+void BOB_destroy_arena(BOB_Arena *arena);
+void *BOB_arena_alloc(BOB_Arena *arena, size_t size, size_t alignment);
+void BOB_arena_clear(BOB_Arena *arena);
 
 uint8_t BOB_init(GLADloadproc proc);
 void BOB_terminate(void);
@@ -241,17 +253,6 @@ uint8_t BOB_set_material_vector4_ref(BOB_Material_Handle mat, BOB_Uniform_Handle
 uint8_t BOB_set_material_texture_ref(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, BOB_Texture_Handle *value);
 uint8_t BOB_set_material_mat4_ref(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, BOB_Mat4 *value);
 
-//Represents a single batch sent off in a draw call from a texture atlas
-typedef struct {
-    BOB_Render_Vertex *vertex_data;
-    uint32_t *index_data; //The index count (for ebo) for this renderer
-    size_t vertex_size;
-    size_t index_size;
-    size_t vertex_count;
-    size_t index_count;
-    uint8_t init;
-} BOB_RenderBatch;
-
 typedef enum {
     BOB_CLIP_HORZ,
     BOB_CLIP_VERT,
@@ -273,6 +274,15 @@ typedef struct {
 } BOBi_Clip_Stack;
 
 typedef struct {
+    BOB_Arena vertex_arena;
+    BOB_Arena vertex_arena_2;
+    BOB_Arena draw_call_arena; //Could repurpose this for indices as well
+    size_t num_vertices;
+    size_t num_indices;
+    size_t num_draw_calls;
+} RenderBatch;
+
+typedef struct {
     // BOB_Render_Layer layer; //Layers of rendering
     BOBi_Clip_Stack *stack; //Stores the current clipping rect and the history
     BOB_Mat4 projection; //projection matrix for this renderer
@@ -280,6 +290,7 @@ typedef struct {
     uint32_t vbo; //vbo this renderer uses
     uint32_t ebo; //ebo this renderer uses
     BOB_Material_Handle default_mat; //Default material this renderer uses
+    RenderBatch batch;
 
     uint32_t screen_height;
     uint32_t screen_width;
@@ -360,7 +371,7 @@ void BOB_clear_colour(BOB_Vector4 colour);
 //Converts an angle in degrees to radians
 float BOB_degrees_to_radians(float angle);
 
-//Font structs:
+//Font structs
 typedef struct {
     uint32_t codepoint; //Unicode codepoint
     BOB_Quad sub_rect;
