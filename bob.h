@@ -2,24 +2,17 @@
 #define BOB_H
 #include <stdint.h>
 #include <stddef.h>
-#include <glad/glad.h>
 
-#ifndef BOB_MALLOC
-#include <stdlib.h>
-#define BOB_MALLOC malloc
-#define BOB_MEMSET memset
-#define BOB_FREE free
-#endif //BOB_MALLOC
+#define BOB_INCLUDE_GLAD
+
+#ifdef BOB_INCLUDE_GLAD
+#include <glad/glad.h>
+#endif // BOB_INCLUDE_GLAD
 
 #ifndef BOB_ASSERT
 #include <assert.h>
 #define BOB_ASSERT assert
 #endif //BOB_ASSERT
-
-#ifndef BOB_MEMCPY
-#include <string.h>
-#define BOB_MEMCPY memcpy
-#endif //BOB_MEMCPY
 
 //TODO: Vulkan support
 //      Draw call sorting (quicksort) internally rather than relying on the depth buffer -> Should actually do this since dealing with the depth buffer is a giant pain (Maybe??? Don't think this is good idea)
@@ -53,18 +46,36 @@ typedef struct {
 #define INIT_STACK_CAPACITY 64
 #define BOB_MAX_LAYER 1024
 
-typedef struct BOB_Arena_t BOB_Arena;
+typedef uint64_t BOB_Texture_Handle;
+typedef uint64_t BOB_Material_Handle;
+typedef uint64_t BOB_Atlas_Handle;
+typedef uint64_t BOB_PixelBuffer_Handle;
+typedef uint64_t BOB_Uniform_Handle;
+typedef uint64_t BOB_Font_Handle;
+typedef uint32_t BOB_Context_Handle;
 
-struct BOB_Arena_t{
+typedef struct BOBi_Arena_t BOBi_Arena;
+
+struct BOBi_Arena_t{
     void *memory;
     size_t capacity;
     size_t offset;
 };
 
-uint8_t BOB_init_arena(BOB_Arena *arena, size_t capacity);
-void BOB_destroy_arena(BOB_Arena *arena);
-void *BOB_arena_alloc(BOB_Arena *arena, size_t size, size_t alignment);
-void BOB_arena_clear(BOB_Arena *arena);
+uint8_t BOB_init_arena(BOBi_Arena *arena, size_t capacity);
+void BOB_destroy_arena(BOBi_Arena *arena);
+void *BOB_arena_alloc(BOBi_Arena *arena, size_t size, size_t alignment);
+void BOB_arena_clear(BOBi_Arena *arena);
+
+typedef enum {
+    BOB_VULKAN_CONTEXT,
+    BOB_OPENGL_CONTEXT,
+} BOB_Context_Type;
+
+typedef struct BOBi_Context_t BOB_Context;
+uint8_t BOB_create_context(BOB_Context_Type type, size_t atlas_capacity, size_t pixelbuf_capacity,
+                           size_t tex_capacity, size_t mat_capacity, size_t font_capacity, BOB_Context_Handle *context);
+void BOB_destroy_context(BOB_Context_Handle *context);
 
 uint8_t BOB_init(GLADloadproc proc);
 void BOB_terminate(void);
@@ -103,13 +114,6 @@ typedef struct {
 #define BOB_GLYPH_BIT 16
 #define BOB_GREYSCALE_BIT 32
 
-typedef uint32_t BOB_Texture_Handle;
-typedef uint32_t BOB_Material_Handle;
-typedef uint32_t BOB_Atlas_Handle;
-typedef uint32_t BOB_PixelBuffer_Handle;
-typedef uint32_t BOB_Uniform_Handle;
-typedef uint32_t BOB_Font_Handle;
-
 typedef enum {
     BOB_RED,
     BOB_RG,
@@ -119,24 +123,24 @@ typedef enum {
 
 typedef struct {
     uint32_t texture, width, height;
-    uint8_t init;
     BOB_Format format;
+    uint8_t init;
 } BOB_Texture;
 
 //Creates a new texture on the gpu
-uint8_t BOB_create_texture(uint32_t width, uint32_t height, uint8_t *data, BOB_Format format, BOB_Texture_Handle *tex);
+uint8_t BOB_create_texture(BOB_Context_Handle context, uint32_t width, uint32_t height, uint8_t *data, BOB_Format format, BOB_Texture_Handle *tex);
 void BOB_texture_free(BOB_Texture_Handle *tex);
 BOB_Texture *BOB_get_tex_ref(BOB_Texture_Handle tex);
 
 typedef struct {
     size_t buf_sz;
     uint32_t pbo; //pbo this renderer uses
-    uint32_t pixel_tex; //The texture the pbo is rendered to
+    BOB_Texture_Handle pixel_tex; //The texture the pbo is rendered to
     uint8_t init;
 } BOB_PixelBuffer;
 
 //Creates a pixel buffer to hold the pixels representing a texture of size width * height
-uint8_t BOB_pixelbuffer_init(size_t width, size_t height, BOB_Format format, BOB_PixelBuffer_Handle *pb);
+uint8_t BOB_pixelbuffer_init(BOB_Context_Handle context, size_t width, size_t height, BOB_Format format, BOB_PixelBuffer_Handle *pb);
 //Frees the data used by a pixel buffer
 void BOB_pixelbuffer_free(BOB_PixelBuffer_Handle *pb);
 //Draws a frame straight to a texture by uploading it to a pixel buffer
@@ -151,15 +155,15 @@ typedef struct {
     uint32_t row_height; //Height of the tallest texture on the current row
     BOB_Format format; //Pixel format of the texture
     uint8_t init;
-} BOB_TextureAtlas;
+} BOB_Atlas;
 
 //Initialises a blank texture atlas
-uint8_t BOB_atlas_init(uint32_t width, uint32_t height, BOB_Format format, BOB_Atlas_Handle *a);
+uint8_t BOB_atlas_init(BOB_Context_Handle context, uint32_t width, uint32_t height, BOB_Format format, BOB_Atlas_Handle *a);
 //Returns the UV rect where the texture was placed
 uint8_t BOB_atlas_pack(BOB_Atlas_Handle a, uint8_t* pixels, size_t w, size_t h, BOB_Quad *out_quad);
 //Frees a texture atlas
 void BOB_atlas_free(BOB_Atlas_Handle *a);
-BOB_TextureAtlas *BOB_get_atlas_ref(BOB_Atlas_Handle a);
+BOB_Atlas *BOB_get_atlas_ref(BOB_Atlas_Handle a);
 
 typedef enum {
     BOB_VERTEX_SHADER,
@@ -232,7 +236,7 @@ typedef struct {
     uint8_t init;
 } BOB_Material;
 
-uint8_t BOB_create_material(BOB_Shader_Data *data, size_t num_shaders, BOB_Uniform *uniforms, size_t num_uniforms, BOB_Material_Handle *mat);
+uint8_t BOB_create_material(BOB_Context_Handle context, BOB_Shader_Data *data, size_t num_shaders, BOB_Uniform *uniforms, size_t num_uniforms, BOB_Material_Handle *mat);
 void BOB_material_free(BOB_Material_Handle *mat);
 BOB_Material *BOB_get_mat_ref(BOB_Material_Handle mat);
 
@@ -274,9 +278,9 @@ typedef struct {
 } BOBi_Clip_Stack;
 
 typedef struct {
-    BOB_Arena vertex_arena;
-    BOB_Arena vertex_arena_2;
-    BOB_Arena draw_call_arena; //Could repurpose this for indices as well
+    BOBi_Arena vertex_arena;
+    BOBi_Arena vertex_arena_2;
+    BOBi_Arena draw_call_arena; //Could repurpose this for indices as well
     size_t num_vertices;
     size_t num_indices;
     size_t num_draw_calls;
@@ -286,11 +290,14 @@ typedef struct {
     // BOB_Render_Layer layer; //Layers of rendering
     BOBi_Clip_Stack *stack; //Stores the current clipping rect and the history
     BOB_Mat4 projection; //projection matrix for this renderer
+    RenderBatch batch; //Vertex/Index/Draw call memory of the renderer
+
+    BOB_Material_Handle default_mat; //Default material this renderer uses
+    BOB_Context_Handle context; //The BOB_Context within which this renderer operates
+
     uint32_t vao; //vao this renderer uses
     uint32_t vbo; //vbo this renderer uses
     uint32_t ebo; //ebo this renderer uses
-    BOB_Material_Handle default_mat; //Default material this renderer uses
-    RenderBatch batch;
 
     uint32_t screen_height;
     uint32_t screen_width;
@@ -304,7 +311,7 @@ void BOB_start_clip(BOB_Renderer *r, BOB_Quad rect, BOB_Clip_Dir dir);
 void BOB_end_clip(BOB_Renderer *r);
 
 //Initialises the pixel renderer
-uint8_t BOB_renderer_init(size_t width, size_t height, BOB_Renderer *out);
+uint8_t BOB_renderer_init(BOB_Context_Handle context, size_t width, size_t height, BOB_Renderer *out);
 //Frees a pixel renderer
 void BOB_renderer_free(BOB_Renderer *r);
 //Sets up the variables for renderering to the pbo from the BOB_Renderer
@@ -414,8 +421,8 @@ typedef enum {
     BOB_BMF_TEXT,
 } BOB_BMF_Format;
 
-uint8_t BOB_create_custom_font(BOB_Font_Handle *font, size_t num_glyphs, size_t num_kernings, size_t line_height, size_t base);
-uint8_t BOB_load_bmf_font(const char *font_path, BOB_Font_Handle *font, BOB_BMF_Format format);
+uint8_t BOB_create_custom_font(BOB_Context_Handle context, BOB_Font_Handle *font, size_t num_glyphs, size_t num_kernings, size_t line_height, size_t base);
+uint8_t BOB_load_bmf_font(BOB_Context_Handle context, const char *font_path, BOB_Font_Handle *font, BOB_BMF_Format format);
 uint8_t BOB_add_font_page(BOB_Font_Handle font, uint32_t page_width, uint32_t page_height, uint8_t *page_data, BOB_Format page_format);
 uint8_t BOB_draw_codepoint(BOB_Renderer *r, BOB_Font_Handle font, uint32_t codepoint, BOB_Vector2 *pos, BOB_Vector4 colour, uint16_t layer);
 uint8_t BOB_draw_char_string(BOB_Renderer *r, BOB_Font_Handle font, char *str, size_t str_len, BOB_Vector2 *start, BOB_Vector4 colour, uint16_t layer);

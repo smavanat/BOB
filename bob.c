@@ -8,11 +8,31 @@
 #include <stdlib.h>
 #include <string.h>
 
+//Return the value of the element at the top of the stack without popping it
+#define BOB_peek_clip_rect(stack) (((stack)->size > 0) ? (stack)->elems[(stack)->size-1] : (BOBi_Clip_Rect){0})
+#define BOBi_MSB 0x80000000
+
+typedef struct {
+    BOB_Context *contexts;
+    size_t context_count;
+    size_t context_capcity;
+    size_t next_context_slot;
+} BOBi_Internal_State;
+
+BOBi_Internal_State bob_state = {0};
+
 // ================================ BOB ARENA IMPLEMENTATION =================================
 
 #define MIN_ALIGNMENT alignof(max_align_t)
 
-uint8_t BOB_init_arena(BOB_Arena *arena, size_t capacity) {
+size_t BOBi_align_up(size_t value, size_t alignment) {
+    //Assert that alignments are powers of 2
+    assert(alignment != 0);
+    assert((alignment & (alignment - 1)) == 0);
+    return (value + alignment - 1) & ~(alignment - 1);
+}
+
+uint8_t BOB_init_arena(BOBi_Arena *arena, size_t capacity) {
     arena->capacity = capacity;
     arena->offset = 0;
     arena->memory = malloc(capacity);
@@ -20,18 +40,18 @@ uint8_t BOB_init_arena(BOB_Arena *arena, size_t capacity) {
     return arena->memory != NULL;
 }
 
-void BOB_destroy_arena(BOB_Arena *arena) {
+void BOB_destroy_arena(BOBi_Arena *arena) {
     if(arena->memory) free(arena->memory);
-    *arena = (BOB_Arena){0};
+    *arena = (BOBi_Arena){0};
 }
 
-void *BOB_arena_alloc(BOB_Arena *arena, size_t size, size_t alignment) {
+void *BOB_arena_alloc(BOBi_Arena *arena, size_t size, size_t alignment) {
     //Assert that alignments are powers of 2:
     assert(alignment != 0);
     assert((alignment & (alignment - 1)) == 0);
 
     uintptr_t current = (uintptr_t)arena->memory + arena->offset;
-    uintptr_t offset = (current + (alignment - 1)) & ~(alignment - 1);
+    uintptr_t offset = BOBi_align_up(current, alignment);
     offset -= (uintptr_t)(arena->memory);
 
     if(offset + size > arena->capacity) return NULL; //Out of memory
@@ -42,34 +62,84 @@ void *BOB_arena_alloc(BOB_Arena *arena, size_t size, size_t alignment) {
     return ptr;
 }
 
-void BOB_arena_clear(BOB_Arena *arena) {
+void BOB_arena_clear(BOBi_Arena *arena) {
     arena->offset = 0;
 }
 
-typedef struct {
-    BOB_TextureAtlas atlas_table[BOB_MAX_ATLAS_CAPACITY];
-    BOB_PixelBuffer pixelbuffer_table[BOB_MAX_PIXELBUFFER_CAPACITY];
-    BOB_Texture texture_table[BOB_MAX_TEX_CAPACITY];
-    BOB_Material material_table[BOB_MAX_MATERIAL_CAPACITY];
-    BOB_Font font_table[BOB_MAX_FONT_CAPACITY];
+struct BOBi_Context_t {
+    // void *context_memory;
+    BOBi_Arena context_memory; //Memory arena that this context uses. Each table is just a pointer into this arena
+
+    BOB_Atlas *atlas_table;
+    BOB_PixelBuffer *pixelbuffer_table;
+    BOB_Texture *texture_table;
+    BOB_Material *material_table;
+    BOB_Font *font_table;
+
     size_t num_atlases;
     size_t num_textures;
     size_t num_pixelbuffers;
     size_t num_materials;
     size_t num_fonts;
+
+    size_t atlas_capacity;
+    size_t texture_capacity;
+    size_t pixelbuffer_capacity;
+    size_t material_capacity;
+    size_t font_capacity;
+
     uint32_t next_atlas_slot;
     uint32_t next_tex_slot;
     uint32_t next_pixelbuf_slot;
     uint32_t next_mat_slot;
     uint32_t next_font_slot;
+
     BOB_Texture_Handle default_tex;
-} BOBi_Data;
 
-BOBi_Data intrn_data = {0};
+    BOB_Context_Type type;
+};
 
-//Return the value of the element at the top of the stack without popping it
-#define BOB_peek_clip_rect(stack) (((stack)->size > 0) ? (stack)->elems[(stack)->size-1] : (BOBi_Clip_Rect){0})
-#define BOBi_MSB 0x80000000
+uint8_t BOBi_get_context_from_handle(uint64_t handle, BOB_Context **out) {
+    if(handle & BOBi_MSB) return 0; //Do not work with invalid handles
+
+    uint32_t index = (handle & 0xFFFFFFFF00000000) >> 32;
+    if(bob_state.contexts[index].context_memory.memory == NULL) return 0; //Invalid context
+    *out = &bob_state.contexts[index];
+    return 1;
+}
+
+uint8_t BOBi_get_index_from_handle(uint64_t handle, uint32_t *out) {
+    if(handle & BOBi_MSB) return 0; //Do not work with invalid handles
+    *out = handle & (~0xFFFFFFFF80000000);
+    return 1;
+}
+
+uint8_t BOBi_get_handle_data(uint64_t handle, BOB_Context **context, uint32_t *index) {
+    if(handle & BOBi_MSB) return 0; //Do not work with invalid handles
+
+    uint32_t context_index = (handle & 0xFFFFFFFF00000000) >> 32;
+    if(bob_state.contexts[context_index].context_memory.memory == NULL) return 0; //Invalid context
+    *context = &bob_state.contexts[context_index];
+
+    *index = handle & (~0xFFFFFFFF80000000);
+    return 1;
+}
+
+uint8_t BOBi_get_context(BOB_Context_Handle handle, BOB_Context **out) {
+    if(handle & BOBi_MSB) {
+        printf("Invalid context handle\n");
+        return 0;
+    }
+
+    BOB_Context *context = &bob_state.contexts[handle];
+    if(context->context_memory.memory == NULL) {
+        printf("Invalid context handle\n");
+        return 0;
+    }
+
+    *out = context;
+    return 1;
+}
 
 typedef enum {
     BOBi_DRAW_QUAD,
@@ -110,9 +180,14 @@ void BOBi_update_uniform(BOB_Uniform uniform) {
         case BOB_UNIFORM_VEC4:
             glUniform4fv(uniform.location, 1, (uniform.is_reference) ? &(*(BOB_Vector4 *)uniform.ptr).x : &uniform.vec4.x);
             break;
-        case BOB_UNIFORM_TEXTURE:
-            glUniform1i(uniform.location, (uniform.is_reference) ? *(BOB_Texture_Handle *)uniform.ptr : intrn_data.texture_table[uniform.tex_index].texture);
+        case BOB_UNIFORM_TEXTURE: {
+            BOB_Texture_Handle handle = (uniform.is_reference) ? *(BOB_Texture_Handle *)uniform.ptr : uniform.tex_index;
+            BOB_Context *context;
+            uint32_t index;
+            if(BOBi_get_handle_data(handle, &context, &index)) return;
+            glUniform1i(uniform.location, context->texture_table[index].texture);
             break;
+        }
         case BOB_UNIFORM_MAT4:
             glUniformMatrix4fv(uniform.location, 1, GL_FALSE, (uniform.is_reference) ? (float *)(*(BOB_Mat4 *)uniform.ptr).m : (float *)uniform.mat4.m);
             break;
@@ -410,7 +485,7 @@ size_t BOBi_clip_edge(BOB_Vector2 *poly_points, size_t poly_size, BOBi_Clip_Edge
         }
         //When both points are outside, no points are added
     }
-    BOB_MEMCPY(poly_points, new_points, new_poly_size * sizeof(BOB_Vector2));
+    memcpy(poly_points, new_points, new_poly_size * sizeof(BOB_Vector2));
     return new_poly_size;
 }
 
@@ -666,19 +741,19 @@ void BOBi_rotate_polygon(BOB_Vector2 *poly_points, size_t poly_size, float rotat
     }
 }
 
-void BOBi_texture_free(BOB_Texture_Handle tex) {
-    glDeleteTextures(1, &intrn_data.texture_table[tex].texture);
-    intrn_data.texture_table[tex] = (BOB_Texture){0}; //Clear the data
+void BOBi_texture_free(BOB_Context *context, uint32_t index) {
+    glDeleteTextures(1, &context->texture_table[index].texture);
+    context->texture_table[index] = (BOB_Texture){0}; //Clear the data
 }
-void BOBi_pixelbuffer_free(BOB_PixelBuffer_Handle pb) {
-    glDeleteBuffers(1, &intrn_data.pixelbuffer_table[pb].pbo);
-    BOB_texture_free(&intrn_data.pixelbuffer_table[pb].pixel_tex);
-    intrn_data.pixelbuffer_table[pb] = (BOB_PixelBuffer){0}; //Clear the data
+void BOBi_pixelbuffer_free(BOB_Context *context, uint32_t index) {
+    glDeleteBuffers(1, &context->pixelbuffer_table[index].pbo);
+    BOB_texture_free(&context->pixelbuffer_table[index].pixel_tex);
+    context->pixelbuffer_table[index] = (BOB_PixelBuffer){0}; //Clear the data
 }
-void BOBi_material_free(BOB_Material_Handle mat) {
-    glDeleteProgram(intrn_data.material_table[mat].shader);
-    BOB_FREE(intrn_data.material_table[mat].uniforms);
-    intrn_data.material_table[mat] = (BOB_Material){0}; //Clear the data
+void BOBi_material_free(BOB_Context *context, uint32_t index) {
+    glDeleteProgram(context->material_table[index].shader);
+    free(context->material_table[index].uniforms);
+    context->material_table[index] = (BOB_Material){0}; //Clear the data
 }
 
 #define BOBi_HASHMAP_DUMMY UINT64_MAX
@@ -709,15 +784,16 @@ uint64_t BOBi_next_prime(uint64_t n) {
 
 }
 
-BOBi_Hashmap BOBi_hashmap_init(size_t init_capacity) {
-    BOBi_Hashmap ret = {0};
-    ret.capacity = BOBi_next_prime(init_capacity);
-    ret.keys = BOB_MALLOC(sizeof(uint64_t) * ret.capacity);
-    BOB_MEMSET(ret.keys, 0xFF, sizeof(uint64_t) * ret.capacity);
-    ret.values = BOB_MALLOC(sizeof(uint32_t) * ret.capacity);
-    BOB_MEMSET(ret.values, 0xFF, sizeof(uint32_t) * ret.capacity);
+uint8_t BOBi_hashmap_init(size_t init_capacity, BOBi_Hashmap *out) {
+    out->capacity = BOBi_next_prime(init_capacity);
+    out->keys = malloc(sizeof(uint64_t) * out->capacity);
+    if(out->keys == NULL) return 0;
+    memset(out->keys, 0xFF, sizeof(uint64_t) * out->capacity);
+    out->values = malloc(sizeof(uint32_t) * out->capacity);
+    if(out->values == NULL) return 0;
+    memset(out->values, 0xFF, sizeof(uint32_t) * out->capacity);
 
-    return ret;
+    return 1;
 }
 
 //Primary hash funtion.
@@ -781,10 +857,10 @@ void BOBi_hashmap_resize(BOBi_Hashmap *h, size_t newCap) {
     h->size = 0; //Reset the size to 0 as it will be naturally incremented in add()
 
     //Create the new arrays with the new capacity
-    h->keys = BOB_MALLOC(sizeof(uint64_t) * newCap);
-    BOB_MEMSET(h->keys, 0xFF, sizeof(uint64_t) * newCap);
-    h->values = BOB_MALLOC(sizeof(uint32_t) * newCap);
-    BOB_MEMSET(h->values, 0xFF, sizeof(uint32_t) * newCap);
+    h->keys = malloc(sizeof(uint64_t) * newCap);
+    memset(h->keys, 0xFF, sizeof(uint64_t) * newCap);
+    h->values = malloc(sizeof(uint32_t) * newCap);
+    memset(h->values, 0xFF, sizeof(uint32_t) * newCap);
 
     //Rehash and reinsert all entries from the old table into the new one
     for(size_t i = 0; i < oldCap; i++) {
@@ -792,8 +868,8 @@ void BOBi_hashmap_resize(BOBi_Hashmap *h, size_t newCap) {
             BOBi_hashmap_add(h, oldKeys[i], oldVals[i]);
         }
     }
-    BOB_FREE(oldKeys);
-    BOB_FREE(oldVals);
+    free(oldKeys);
+    free(oldVals);
 }
 
 //Gets a value from a int_hashmap
@@ -835,24 +911,56 @@ uint32_t BOBi_hashmap_add(BOBi_Hashmap *h, uint64_t key, uint32_t value) {
 }
 
 void BOBi_hashmap_free(BOBi_Hashmap *h) {
-    if(h->keys) BOB_FREE(h->keys);
+    if(h->keys) free(h->keys);
     h->keys = NULL;
-    if(h->values) BOB_FREE(h->values);
+    if(h->values) free(h->values);
     h->values = NULL;
 }
 
-void BOBi_font_free(BOB_Font_Handle index) {
-    if(intrn_data.font_table[index].glyphs) BOB_FREE(intrn_data.font_table[index].glyphs);
-    if(intrn_data.font_table[index].kernings) BOB_FREE(intrn_data.font_table[index].kernings);
-    if(intrn_data.font_table[index].glyph_map) {
-        BOBi_hashmap_free(intrn_data.font_table[index].glyph_map);
-        BOB_FREE(intrn_data.font_table[index].glyph_map);
+void BOBi_font_free(BOB_Context *context, uint32_t index) {
+    if(context->font_table[index].glyphs) free(context->font_table[index].glyphs);
+    if(context->font_table[index].kernings) free(context->font_table[index].kernings);
+    if(context->font_table[index].glyph_map) {
+        BOBi_hashmap_free(context->font_table[index].glyph_map);
+        free(context->font_table[index].glyph_map);
     }
-    if(intrn_data.font_table[index].kerning_map) {
-        BOBi_hashmap_free(intrn_data.font_table[index].kerning_map);
-        BOB_FREE(intrn_data.font_table[index].kerning_map);
+    if(context->font_table[index].kerning_map) {
+        BOBi_hashmap_free(context->font_table[index].kerning_map);
+        free(context->font_table[index].kerning_map);
     }
-    intrn_data.font_table[index] = (BOB_Font){0}; //Clear the data
+    context->font_table[index] = (BOB_Font){0}; //Clear the data
+}
+
+void BOBi_destroy_context(uint32_t index) {
+    BOB_Context *context = &bob_state.contexts[index];
+
+    //Free all of the object memory
+    for(size_t i = 0; i < context->texture_capacity; i++) {
+        if(context->texture_table[i].init)
+            BOBi_texture_free(context, i);
+    }
+    for(size_t i = 0; i < context->material_capacity; i++) {
+        if(context->material_table[i].init)
+            BOBi_material_free(context, i);
+    }
+    for(size_t i = 0; i < context->pixelbuffer_capacity; i++) {
+        if(context->pixelbuffer_table[i].init)
+            BOBi_pixelbuffer_free(context, i);
+    }
+    for(size_t i = 0; i < context->font_capacity; i++) {
+        if(context->font_table[i].init)
+            BOBi_font_free(context, i);
+    }
+    BOB_destroy_arena(&context->context_memory);
+
+    *context = (BOB_Context){0}; //Clear all of the data
+}
+
+void BOB_destroy_context(BOB_Context_Handle *context) {
+    if(*(context) & BOBi_MSB) return; //DO not work with already invalid handles
+    BOBi_destroy_context(*context);
+    if(*(context) < bob_state.next_context_slot) bob_state.next_context_slot = *(context);
+    *(context) |= *(context) & (~BOBi_MSB); //Set the MSB to indicate this is an invalid handle
 }
 
 // ==================================== MISCELLANEOUS FUNCTIONS ========================================
@@ -955,35 +1063,124 @@ uint8_t BOB_init(GLADloadproc proc) {
     glDepthFunc(GL_LEQUAL);
     glClearDepth(1.0);
 
-    if(!BOB_create_texture(1, 1, (uint8_t[4]){255, 255, 255, 255}, BOB_RGBA, &intrn_data.default_tex)) return 0;
-    intrn_data.next_atlas_slot = UINT32_MAX;
-    intrn_data.next_tex_slot = UINT32_MAX;
-    intrn_data.next_pixelbuf_slot = UINT32_MAX;
-    intrn_data.next_mat_slot = UINT32_MAX;
-    intrn_data.next_font_slot = UINT32_MAX;
+    bob_state.contexts = malloc(sizeof(BOB_Context) * 8);
+    memset(bob_state.contexts, 0, sizeof(BOB_Context) * 8);
+    bob_state.context_count = 0;
+    bob_state.next_context_slot = UINT32_MAX;
+    bob_state.context_capcity = 8;
 
     return 1;
 }
 
 void BOB_terminate() {
-    for(size_t i = 0; i < BOB_MAX_TEX_CAPACITY; i++) {
-        BOBi_texture_free(i);
+    for(size_t i = 0; i < bob_state.context_capcity; i++) {
+        if(bob_state.contexts[i].context_memory.memory != NULL) {
+            BOBi_destroy_context(i);
+        }
     }
-    for(size_t i = 0; i < BOB_MAX_MATERIAL_CAPACITY; i++) {
-        BOBi_material_free(i);
-    }
-    for(size_t i = 0; i < BOB_MAX_PIXELBUFFER_CAPACITY; i++) {
-        BOBi_pixelbuffer_free(i);
-    }
-    for(size_t i = 0; i < BOB_MAX_FONT_CAPACITY; i++) {
-        BOBi_font_free(i);
-    }
+
+    free(bob_state.contexts);
+    bob_state = (BOBi_Internal_State){0};
 }
+
+uint8_t BOB_create_context(BOB_Context_Type type, size_t atlas_capacity, size_t pixelbuf_capacity,
+                           size_t tex_capacity, size_t mat_capacity, size_t font_capacity, BOB_Context_Handle *context) {
+    if(bob_state.context_count >= bob_state.context_capcity) {
+        size_t new_cap = (bob_state.context_capcity == 0) ? 8 : bob_state.context_capcity * 2;
+        bob_state.contexts = realloc(bob_state.contexts, new_cap * sizeof(BOB_Context));
+        bob_state.context_capcity = new_cap;
+    }
+
+    uint32_t index;
+    if(bob_state.next_context_slot == UINT32_MAX) {
+        index = bob_state.context_count;
+    }
+    else {
+        index = bob_state.next_context_slot;
+
+        //Linearly searching to find the next empty slot. Yes I know that this is slow
+        for (bob_state.next_context_slot = index + 1; bob_state.next_context_slot < bob_state.context_count; bob_state.next_context_slot++) {
+            //Use the allocation status of the context's memory region as an initialisation tell
+            //Relies on setting pointer to NULL on context destruction and zeroing memory on creating the BOB instance
+            if (bob_state.contexts[bob_state.next_context_slot].context_memory.memory == NULL)
+                break;
+        }
+
+        if (bob_state.next_context_slot >= bob_state.context_count)
+            bob_state.next_context_slot = UINT32_MAX;
+    }
+
+    BOB_Context *intrn_context = &bob_state.contexts[index];
+
+    //Calculating the size of the memory regions each buffer will end up using
+    size_t atlas_sz = atlas_capacity * sizeof(BOB_Atlas);
+    size_t pixelbuf_sz = pixelbuf_capacity * sizeof(BOB_PixelBuffer);
+    size_t tex_sz = tex_capacity * sizeof(BOB_Texture);
+    size_t mat_sz = mat_capacity * sizeof(BOB_Material);
+    size_t font_sz = font_capacity * sizeof(BOB_Font);
+
+    //Figuring out how much aligned memory we will need
+    char *p = (char *)0;
+    p = (char *)BOBi_align_up((uintptr_t)p, alignof(BOB_Atlas));
+    p += atlas_sz;
+    p = (char *)BOBi_align_up((uintptr_t)p, alignof(BOB_PixelBuffer));
+    p += pixelbuf_sz;
+    p = (char *)BOBi_align_up((uintptr_t)p, alignof(BOB_Texture));
+    p += tex_sz;
+    p = (char *)BOBi_align_up((uintptr_t)p, alignof(BOB_Material));
+    p += mat_sz;
+    p = (char *)BOBi_align_up((uintptr_t)p, alignof(BOB_Font));
+    p += font_sz;
+
+    size_t total = (size_t)p;
+
+    //Allocating the memory used for the object buffers and checking the allocation
+    if(!BOB_init_arena(&intrn_context->context_memory, total)) return 0;
+    memset(intrn_context->context_memory.memory, 0, total);
+
+    //Assigning the start pointers from the general memory buffer
+    intrn_context->atlas_table = BOB_arena_alloc(&intrn_context->context_memory, atlas_sz, alignof(BOB_Atlas));
+    intrn_context->pixelbuffer_table = BOB_arena_alloc(&intrn_context->context_memory, pixelbuf_sz, alignof(BOB_PixelBuffer));
+    intrn_context->texture_table = BOB_arena_alloc(&intrn_context->context_memory, tex_sz, alignof(BOB_Texture));
+    intrn_context->material_table = BOB_arena_alloc(&intrn_context->context_memory, mat_sz, alignof(BOB_Material));
+    intrn_context->font_table = BOB_arena_alloc(&intrn_context->context_memory, font_sz, alignof(BOB_Font));
+
+    //Assiging the capacity values
+    intrn_context->atlas_capacity = atlas_capacity;
+    intrn_context->pixelbuffer_capacity = pixelbuf_capacity;
+    intrn_context->texture_capacity = tex_capacity;
+    intrn_context->material_capacity = mat_capacity;
+    intrn_context->font_capacity = font_capacity;
+
+    //Setting the sizes to be 0
+    intrn_context->num_atlases = 0;
+    intrn_context->num_pixelbuffers = 0;
+    intrn_context->num_textures = 0;
+    intrn_context->num_materials = 0;
+    intrn_context->num_fonts = 0;
+
+    //Setting the next free slot to point to the first one
+    intrn_context->next_atlas_slot = UINT32_MAX;
+    intrn_context->next_pixelbuf_slot = UINT32_MAX;
+    intrn_context->next_tex_slot = UINT32_MAX;
+    intrn_context->next_mat_slot = UINT32_MAX;
+    intrn_context->next_font_slot = UINT32_MAX;
+
+    //Create the default texture used
+    if(!BOB_create_texture(index, 1, 1, (uint8_t[4]){255, 255, 255, 255}, BOB_RGBA, &intrn_context->default_tex)) return 0;
+    intrn_context->type = type;
+
+    *context = index;
+    return 1;
+}
+
 
 //========================================================== RENDERER FUNCTIONS ===========================================
 
 //Initialises the pixel renderer
-uint8_t BOB_renderer_init(size_t width, size_t height, BOB_Renderer *out) {
+uint8_t BOB_renderer_init(BOB_Context_Handle context, size_t width, size_t height, BOB_Renderer *out) {
+    if(context & BOBi_MSB) return 0;
+
     BOB_Renderer r = {0};
     r.screen_height = height;
     r.screen_width = width;
@@ -1012,15 +1209,16 @@ uint8_t BOB_renderer_init(size_t width, size_t height, BOB_Renderer *out) {
 
     //Setting the projection matrix
     BOB_ortho(0.0f, r.screen_width, r.screen_height, 0.0f, -BOB_MAX_LAYER, 0.0f, &r.projection);
-    if(!BOB_create_material((BOB_Shader_Data[2]){(BOB_Shader_Data){vertex_shader, BOB_VERTEX_SHADER},
+    if(!BOB_create_material(context, (BOB_Shader_Data[2]){(BOB_Shader_Data){vertex_shader, BOB_VERTEX_SHADER},
                             (BOB_Shader_Data){fragment_shader, BOB_FRAGMENT_SHADER}}, 2,
                             (BOB_Uniform[2]){BOB_uniform_mat4("uProjection", r.projection), BOB_uniform_signed_int("screenTexture", 0)}, 2, &r.default_mat)) return 0;
 
     //Initialise the stack of clip rects
-    r.stack = BOB_MALLOC(sizeof(BOBi_Clip_Stack));
-    r.stack->elems = BOB_MALLOC(sizeof(BOBi_Clip_Rect) * INIT_STACK_CAPACITY);
+    r.stack = malloc(sizeof(BOBi_Clip_Stack));
+    r.stack->elems = malloc(sizeof(BOBi_Clip_Rect) * INIT_STACK_CAPACITY);
     r.stack->capacity = INIT_STACK_CAPACITY;
     r.stack->size = 0;
+    r.context = context;
 
     BOB_init_arena(&r.batch.vertex_arena, BOB_MAX_VERTEX_CAPACITY * sizeof(BOB_Render_Vertex));
     BOB_init_arena(&r.batch.vertex_arena_2, BOB_MAX_VERTEX_CAPACITY * sizeof(BOB_Render_Vertex));
@@ -1035,9 +1233,9 @@ void BOB_renderer_free(BOB_Renderer *r) {
     glDeleteBuffers(1, &r->vbo);
     glDeleteVertexArrays(1, &r->vao);
 
-    BOB_FREE(r->stack->elems);
+    free(r->stack->elems);
     r->stack->elems = NULL;
-    BOB_FREE(r->stack);
+    free(r->stack);
     r->stack = NULL;
 
     BOB_destroy_arena(&r->batch.vertex_arena);
@@ -1161,12 +1359,19 @@ void BOB_renderer_end(BOB_Renderer *r) {
     glBindBuffer(GL_ARRAY_BUFFER, r->vbo);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, r->ebo);
 
+    //TODO: THIS SHOULD THROW A MASSIVE ERROR
+    BOB_Context *context = &bob_state.contexts[r->context];
+    if(context->context_memory.memory == NULL) return;
+
     for(size_t i = 0; i < r->batch.num_draw_calls; i++) {
         BOBi_Draw_Call call = BOBi_get_arena_elem(r->batch.draw_call_arena, i, BOBi_Draw_Call);
-        glUseProgram(intrn_data.material_table[call.mat].shader);
+        uint32_t mat_index, tex_index;
+        if(!BOBi_get_index_from_handle(call.mat, &mat_index)) return;
+        if(!BOBi_get_index_from_handle(call.tex, &tex_index)) return;
+        glUseProgram(context->material_table[mat_index].shader);
         //Setting the uniforms
-        for(size_t i = 0; i < intrn_data.material_table[call.mat].uniform_count; i++) {
-            BOBi_update_uniform(intrn_data.material_table[call.mat].uniforms[i]);
+        for(size_t j = 0; j < context->material_table[mat_index].uniform_count; j++) {
+            BOBi_update_uniform(context->material_table[mat_index].uniforms[j]);
         }
 
         glBufferSubData(GL_ARRAY_BUFFER, 0, call.num_vertices * sizeof(BOB_Render_Vertex), call.vertices); //Copies the data from renderer's triangle data into the vbo
@@ -1174,7 +1379,7 @@ void BOB_renderer_end(BOB_Renderer *r) {
 
         //Bind the atlas texture
         glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, intrn_data.texture_table[call.tex].texture);
+        glBindTexture(GL_TEXTURE_2D, context->texture_table[tex_index].texture);
 
         glDrawElements(GL_TRIANGLES, call.num_indices, GL_UNSIGNED_INT, 0); //Make the draw call
     }
@@ -1206,33 +1411,36 @@ void BOB_renderer_update_dimensions(BOB_Renderer *r, uint32_t width, uint32_t he
 //================================================== TEXTURE FUNCTIONS ================================================
 
 //Creates a new texture on the gpu
-uint8_t BOB_create_texture(uint32_t width, uint32_t height, uint8_t *data, BOB_Format format, BOB_Texture_Handle *tex) {
-    if(intrn_data.num_textures >= BOB_MAX_TEX_CAPACITY) {
+uint8_t BOB_create_texture(BOB_Context_Handle context, uint32_t width, uint32_t height, uint8_t *data, BOB_Format format, BOB_Texture_Handle *tex) {
+    BOB_Context *intrn_context;
+    if(!BOBi_get_context(context, &intrn_context)) return 0;
+
+    if(intrn_context->num_textures >= intrn_context->texture_capacity) {
         printf("ERROR: Exceeded Texture Capacity");
         *tex |= BOBi_MSB;
         return 0;
     }
 
     uint32_t index;
-    if (intrn_data.next_tex_slot == UINT32_MAX) {
-        index = intrn_data.num_textures;
+    if (intrn_context->next_tex_slot == UINT32_MAX) {
+        index = intrn_context->num_textures;
     }
     else {
-        index = intrn_data.next_tex_slot;
+        index = intrn_context->next_tex_slot;
 
         //Linearly searching to find the next empty slot. Yes I know that this is slow
-        for (intrn_data.next_tex_slot = index + 1; intrn_data.next_tex_slot < intrn_data.num_textures; intrn_data.next_tex_slot++) {
-            if (!intrn_data.texture_table[intrn_data.next_tex_slot].init)
+        for (intrn_context->next_tex_slot = index + 1; intrn_context->next_tex_slot < intrn_context->num_textures; intrn_context->next_tex_slot++) {
+            if (!intrn_context->texture_table[intrn_context->next_tex_slot].init)
                 break;
         }
 
-        if (intrn_data.next_tex_slot >= intrn_data.num_textures)
-            intrn_data.next_tex_slot = UINT32_MAX;
+        if (intrn_context->next_tex_slot >= intrn_context->num_textures)
+            intrn_context->next_tex_slot = UINT32_MAX;
     }
 
-    intrn_data.texture_table[index].init = 1; //Setting the value to be initialised
-    glGenTextures(1, &intrn_data.texture_table[index].texture);
-    glBindTexture(GL_TEXTURE_2D, intrn_data.texture_table[index].texture);
+    intrn_context->texture_table[index].init = 1; //Setting the value to be initialised
+    glGenTextures(1, &intrn_context->texture_table[index].texture);
+    glBindTexture(GL_TEXTURE_2D, intrn_context->texture_table[index].texture);
     // set the texture wrapping/filtering options (on the currently bound texture object)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
@@ -1243,35 +1451,47 @@ uint8_t BOB_create_texture(uint32_t width, uint32_t height, uint8_t *data, BOB_F
     glTexImage2D(GL_TEXTURE_2D, 0, BOBi_convert_format(format), width, height, 0, BOBi_convert_format(format), GL_UNSIGNED_BYTE, data);
     glBindTexture(GL_TEXTURE_2D, 0);
 
-    intrn_data.texture_table[index].width = width;
-    intrn_data.texture_table[index].height = height;
-    intrn_data.texture_table[index].format = format;
+    intrn_context->texture_table[index].width = width;
+    intrn_context->texture_table[index].height = height;
+    intrn_context->texture_table[index].format = format;
 
-    intrn_data.num_textures++;
-    *tex = index;
+    intrn_context->num_textures++;
+    *tex = ((uint64_t)context << 32) | index;
     return 1;
 }
 
 void BOB_texture_free(BOB_Texture_Handle *tex) {
     if(*(tex) & BOBi_MSB) return; //Do not work with already invalid handles
-    *(tex) |= BOBi_MSB; //Setting the MSB to indicate this is an invalid handle
-    uint32_t index = *(tex) & (~BOBi_MSB);
-    if(index < intrn_data.next_tex_slot) intrn_data.next_tex_slot = index;
 
-    BOBi_texture_free(index);
+    BOB_Context *context;
+    uint32_t index;
+    if(!BOBi_get_handle_data(*tex, &context, &index)) return;
+    if(index < context->next_tex_slot) context->next_tex_slot = index;
+    *(tex) |= BOBi_MSB; //Setting the MSB to indicate this is an invalid handle
+
+    BOBi_texture_free(context, index);
 }
 
 BOB_Texture *BOB_get_tex_ref(BOB_Texture_Handle tex) {
     if(tex & BOBi_MSB) return NULL; //Do not work with already invalid handles
-    uint32_t index = tex & (~BOBi_MSB);
 
-    return &intrn_data.texture_table[index];
+    BOB_Context *context;
+    uint32_t index;
+    if(!BOBi_get_handle_data(tex, &context, &index)) return NULL;
+
+    return &context->texture_table[index];
 }
 
 //====================================== MATERIAL FUNCTIONS ======================================
 
 uint8_t get_uniform(BOB_Material_Handle mat, char *name, BOB_Uniform_Handle *uniform) {
-    BOB_Material m = intrn_data.material_table[mat];
+    if(*uniform & BOBi_MSB) return 0;
+
+    BOB_Context *context;
+    uint32_t index;
+    if(!BOBi_get_handle_data(mat, &context, &index)) return 0;
+
+    BOB_Material m = context->material_table[index];
     for(size_t i = 0; i < m.uniform_count; i++) {
         if(!strcmp(name, m.uniforms[i].name)){
             *uniform = i;
@@ -1283,30 +1503,31 @@ uint8_t get_uniform(BOB_Material_Handle mat, char *name, BOB_Uniform_Handle *uni
     return 0;
 }
 
-uint8_t BOB_create_material(BOB_Shader_Data *data, size_t num_shaders, BOB_Uniform *uniforms, size_t num_uniforms, BOB_Material_Handle *mat) {
-    if(intrn_data.num_materials >= BOB_MAX_MATERIAL_CAPACITY) {
+uint8_t BOB_create_material(BOB_Context_Handle context, BOB_Shader_Data *data, size_t num_shaders, BOB_Uniform *uniforms, size_t num_uniforms, BOB_Material_Handle *mat) {
+    BOB_Context *intrn_context;
+    if(!BOBi_get_context(context, &intrn_context)) return 0;
+
+    if(intrn_context->num_materials >= intrn_context->material_capacity) {
         printf("ERROR: Exceeded Material Capacity\n");
         *mat |= BOBi_MSB;
         return 0;
     }
 
     uint32_t index;
-    if (intrn_data.next_mat_slot == UINT32_MAX) {
-        index = intrn_data.num_materials;
+    if (intrn_context->next_mat_slot == UINT32_MAX) {
+        index = intrn_context->num_materials;
     }
     else {
-        index = intrn_data.next_mat_slot;
+        index = intrn_context->next_mat_slot;
 
-        for (intrn_data.next_mat_slot = index + 1; intrn_data.next_mat_slot < intrn_data.num_materials; intrn_data.next_mat_slot++) {
-            if (!intrn_data.material_table[intrn_data.next_mat_slot].init)
+        for (intrn_context->next_mat_slot = index + 1; intrn_context->next_mat_slot < intrn_context->num_materials; intrn_context->next_mat_slot++) {
+            if (!intrn_context->material_table[intrn_context->next_mat_slot].init)
                 break;
         }
 
-        if (intrn_data.next_mat_slot >= intrn_data.num_materials)
-            intrn_data.next_mat_slot = UINT32_MAX;
+        if (intrn_context->next_mat_slot >= intrn_context->num_materials)
+            intrn_context->next_mat_slot = UINT32_MAX;
     }
-
-    intrn_data.material_table[index].init = 1; //Setting the value to be initialised
 
     uint32_t shader_buf[num_shaders]; //Array to store the ids of the loaded shader sub-programs
     uint32_t s = glCreateProgram();
@@ -1340,162 +1561,247 @@ uint8_t BOB_create_material(BOB_Shader_Data *data, size_t num_shaders, BOB_Unifo
         glDeleteShader(shader_buf[i]);
     }
 
-    intrn_data.material_table[index] = (BOB_Material){.uniform_count = num_uniforms, .shader = s};
+    intrn_context->material_table[index] = (BOB_Material){.uniform_count = num_uniforms, .shader = s, .init = 1};
 
     //Setting the uniforms
-    BOB_Uniform *temp = BOB_MALLOC(sizeof(BOB_Uniform) * num_uniforms);
-    BOB_MEMCPY(temp, uniforms, num_uniforms * sizeof(BOB_Uniform));
+    //TODO: Make an arena for this:
+    BOB_Uniform *temp = malloc(sizeof(BOB_Uniform) * num_uniforms);
+    memcpy(temp, uniforms, num_uniforms * sizeof(BOB_Uniform));
     for(size_t i = 0; i < num_uniforms; i++) {
         temp[i].location = glGetUniformLocation(s, temp[i].name);
     }
-    intrn_data.material_table[index].uniforms = temp;
+    intrn_context->material_table[index].uniforms = temp;
 
-    intrn_data.num_materials++;
-    *mat = index;
+    intrn_context->num_materials++;
+    *mat = ((uint64_t)context << 32) | index;
     return 1;
 }
 
 void BOB_material_free(BOB_Material_Handle *mat) {
     if(*(mat) & BOBi_MSB) return; //Do not work with already invalid handles
+    BOB_Context *context;
+    uint32_t index;
+    BOBi_get_handle_data(*mat, &context, &index);
+    if(index < context->next_mat_slot) context->next_mat_slot = index;
     *(mat) |= BOBi_MSB; //Setting the MSB to indicate this is an invalid handle
-    uint32_t index = *(mat) & (~BOBi_MSB);
-    if(index < intrn_data.next_mat_slot) intrn_data.next_mat_slot = index;
 
-    BOBi_material_free(index);
+    BOBi_material_free(context, index);
 }
 
 BOB_Material *BOB_get_mat_ref(BOB_Material_Handle mat) {
     if(mat & BOBi_MSB) return NULL; //Do not work with already invalid handles
-    uint32_t index = mat & (~BOBi_MSB);
+    BOB_Context *context;
+    uint32_t index;
+    if(!BOBi_get_handle_data(mat, &context, &index)) return NULL;
 
-    return &intrn_data.material_table[index];
+    return &context->material_table[index];
 }
 
 uint8_t BOB_set_material_float(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, float value) {
     if(mat & BOBi_MSB || uniform & BOBi_MSB) return 0; //Do not work with already invalid handles
-    if(intrn_data.material_table[mat].uniforms[uniform].type == BOB_UNIFORM_FLOAT) {
-        intrn_data.material_table[mat].uniforms[uniform].f = value;
-        intrn_data.material_table[mat].uniforms[uniform].is_reference = 0;
+
+    BOB_Context *context;
+    uint32_t index;
+    if(!BOBi_get_handle_data(mat, &context, &index)) return 0;
+
+    if(context->material_table[index].uniforms[uniform].type == BOB_UNIFORM_FLOAT) {
+        context->material_table[index].uniforms[uniform].f = value;
+        context->material_table[index].uniforms[uniform].is_reference = 0;
     }
     return 1;
 }
 uint8_t BOB_set_material_unsigned_int(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, uint32_t value) {
     if(mat & BOBi_MSB || uniform & BOBi_MSB) return 0; //Do not work with already invalid handles
-    if(intrn_data.material_table[mat].uniforms[uniform].type == BOB_UNIFORM_UNSIGNED_INT) {
-        intrn_data.material_table[mat].uniforms[uniform].u32 = value;
-        intrn_data.material_table[mat].uniforms[uniform].is_reference = 0;
+
+    BOB_Context *context;
+    uint32_t index;
+    if(!BOBi_get_handle_data(mat, &context, &index)) return 0;
+
+    if(context->material_table[index].uniforms[uniform].type == BOB_UNIFORM_UNSIGNED_INT) {
+        context->material_table[index].uniforms[uniform].u32 = value;
+        context->material_table[index].uniforms[uniform].is_reference = 0;
     }
     return 1;
 }
 uint8_t BOB_set_material_signed_int(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, int32_t value) {
     if(mat & BOBi_MSB || uniform & BOBi_MSB) return 0; //Do not work with already invalid handles
-    if(intrn_data.material_table[mat].uniforms[uniform].type == BOB_UNIFORM_SIGNED_INT) {
-        intrn_data.material_table[mat].uniforms[uniform].i32 = value;
-        intrn_data.material_table[mat].uniforms[uniform].is_reference = 0;
+
+    BOB_Context *context;
+    uint32_t index;
+    if(!BOBi_get_handle_data(mat, &context, &index)) return 0;
+
+    if(context->material_table[index].uniforms[uniform].type == BOB_UNIFORM_SIGNED_INT) {
+        context->material_table[index].uniforms[uniform].i32 = value;
+        context->material_table[index].uniforms[uniform].is_reference = 0;
     }
     return 1;
 }
 uint8_t BOB_set_material_vector2(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, BOB_Vector2 value) {
     if(mat & BOBi_MSB || uniform & BOBi_MSB) return 0; //Do not work with already invalid handles
-    if(intrn_data.material_table[mat].uniforms[uniform].type == BOB_UNIFORM_VEC2) {
-        intrn_data.material_table[mat].uniforms[uniform].vec2 = value;
-        intrn_data.material_table[mat].uniforms[uniform].is_reference = 0;
+
+    BOB_Context *context;
+    uint32_t index;
+    if(!BOBi_get_handle_data(mat, &context, &index)) return 0;
+
+    if(context->material_table[index].uniforms[uniform].type == BOB_UNIFORM_VEC2) {
+        context->material_table[index].uniforms[uniform].vec2 = value;
+        context->material_table[index].uniforms[uniform].is_reference = 0;
     }
     return 1;
 }
 uint8_t BOB_set_material_vector3(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, BOB_Vector3 value) {
     if(mat & BOBi_MSB || uniform & BOBi_MSB) return 0; //Do not work with already invalid handles
-    if(intrn_data.material_table[mat].uniforms[uniform].type == BOB_UNIFORM_VEC3) {
-        intrn_data.material_table[mat].uniforms[uniform].vec3 = value;
-        intrn_data.material_table[mat].uniforms[uniform].is_reference = 0;
+
+    BOB_Context *context;
+    uint32_t index;
+    if(!BOBi_get_handle_data(mat, &context, &index)) return 0;
+
+    if(context->material_table[index].uniforms[uniform].type == BOB_UNIFORM_VEC3) {
+        context->material_table[index].uniforms[uniform].vec3 = value;
+        context->material_table[index].uniforms[uniform].is_reference = 0;
     }
     return 1;
 }
 uint8_t BOB_set_material_vector4(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, BOB_Vector4 value) {
     if(mat & BOBi_MSB || uniform & BOBi_MSB) return 0; //Do not work with already invalid handles
-    if(intrn_data.material_table[mat].uniforms[uniform].type == BOB_UNIFORM_VEC4) {
-        intrn_data.material_table[mat].uniforms[uniform].vec4 = value;
-        intrn_data.material_table[mat].uniforms[uniform].is_reference = 0;
+
+    BOB_Context *context;
+    uint32_t index;
+    if(!BOBi_get_handle_data(mat, &context, &index)) return 0;
+
+    if(context->material_table[index].uniforms[uniform].type == BOB_UNIFORM_VEC4) {
+        context->material_table[index].uniforms[uniform].vec4 = value;
+        context->material_table[index].uniforms[uniform].is_reference = 0;
     }
     return 1;
 }
 uint8_t BOB_set_material_texture(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, BOB_Texture_Handle value) {
     if(mat & BOBi_MSB || uniform & BOBi_MSB) return 0; //Do not work with already invalid handles
-    if(intrn_data.material_table[mat].uniforms[uniform].type == BOB_UNIFORM_TEXTURE) {
-        intrn_data.material_table[mat].uniforms[uniform].tex_index = value;
-        intrn_data.material_table[mat].uniforms[uniform].is_reference = 0;
+
+    BOB_Context *context;
+    uint32_t index;
+    if(!BOBi_get_handle_data(mat, &context, &index)) return 0;
+
+    if(context->material_table[index].uniforms[uniform].type == BOB_UNIFORM_TEXTURE) {
+        context->material_table[index].uniforms[uniform].tex_index = value;
+        context->material_table[index].uniforms[uniform].is_reference = 0;
     }
     return 1;
 }
 uint8_t BOB_set_material_mat4(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, BOB_Mat4 value) {
     if(mat & BOBi_MSB || uniform & BOBi_MSB) return 0; //Do not work with already invalid handles
-    if(intrn_data.material_table[mat].uniforms[uniform].type == BOB_UNIFORM_MAT4) {
-        intrn_data.material_table[mat].uniforms[uniform].mat4 = value;
-        intrn_data.material_table[mat].uniforms[uniform].is_reference = 0;
+
+    BOB_Context *context;
+    uint32_t index;
+    if(!BOBi_get_handle_data(mat, &context, &index)) return 0;
+
+    if(context->material_table[index].uniforms[uniform].type == BOB_UNIFORM_MAT4) {
+        context->material_table[index].uniforms[uniform].mat4 = value;
+        context->material_table[index].uniforms[uniform].is_reference = 0;
     }
     return 1;
 }
 uint8_t BOB_set_material_float_ref(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, float *value) {
     if(mat & BOBi_MSB || uniform & BOBi_MSB) return 0; //Do not work with already invalid handles
-    if(intrn_data.material_table[mat].uniforms[uniform].type == BOB_UNIFORM_FLOAT) {
-        intrn_data.material_table[mat].uniforms[uniform].ptr = value;
-        intrn_data.material_table[mat].uniforms[uniform].is_reference = 1;
+
+    BOB_Context *context;
+    uint32_t index;
+    if(!BOBi_get_handle_data(mat, &context, &index)) return 0;
+
+    if(context->material_table[index].uniforms[uniform].type == BOB_UNIFORM_FLOAT) {
+        context->material_table[index].uniforms[uniform].ptr = value;
+        context->material_table[index].uniforms[uniform].is_reference = 1;
     }
     return 1;
 }
 uint8_t BOB_set_material_unsigned_int_ref(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, uint32_t *value) {
     if(mat & BOBi_MSB || uniform & BOBi_MSB) return 0; //Do not work with already invalid handles
-    if(intrn_data.material_table[mat].uniforms[uniform].type == BOB_UNIFORM_UNSIGNED_INT) {
-        intrn_data.material_table[mat].uniforms[uniform].ptr = value;
-        intrn_data.material_table[mat].uniforms[uniform].is_reference = 1;
+
+    BOB_Context *context;
+    uint32_t index;
+    if(!BOBi_get_handle_data(mat, &context, &index)) return 0;
+
+    if(context->material_table[index].uniforms[uniform].type == BOB_UNIFORM_UNSIGNED_INT) {
+        context->material_table[index].uniforms[uniform].ptr = value;
+        context->material_table[index].uniforms[uniform].is_reference = 1;
     }
     return 1;
 }
 uint8_t BOB_set_material_signed_int_ref(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, int32_t *value) {
     if(mat & BOBi_MSB || uniform & BOBi_MSB) return 0; //Do not work with already invalid handles
-    if(intrn_data.material_table[mat].uniforms[uniform].type == BOB_UNIFORM_SIGNED_INT) {
-        intrn_data.material_table[mat].uniforms[uniform].ptr = value;
-        intrn_data.material_table[mat].uniforms[uniform].is_reference = 1;
+
+    BOB_Context *context;
+    uint32_t index;
+    if(!BOBi_get_handle_data(mat, &context, &index)) return 0;
+
+    if(context->material_table[index].uniforms[uniform].type == BOB_UNIFORM_SIGNED_INT) {
+        context->material_table[index].uniforms[uniform].ptr = value;
+        context->material_table[index].uniforms[uniform].is_reference = 1;
     }
     return 1;
 }
 uint8_t BOB_set_material_vector2_ref(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, BOB_Vector2 *value) {
     if(mat & BOBi_MSB || uniform & BOBi_MSB) return 0; //Do not work with already invalid handles
-    if(intrn_data.material_table[mat].uniforms[uniform].type == BOB_UNIFORM_VEC2) {
-        intrn_data.material_table[mat].uniforms[uniform].ptr = value;
-        intrn_data.material_table[mat].uniforms[uniform].is_reference = 1;
+
+    BOB_Context *context;
+    uint32_t index;
+    if(!BOBi_get_handle_data(mat, &context, &index)) return 0;
+
+    if(context->material_table[index].uniforms[uniform].type == BOB_UNIFORM_VEC2) {
+        context->material_table[index].uniforms[uniform].ptr = value;
+        context->material_table[index].uniforms[uniform].is_reference = 1;
     }
     return 1;
 }
 uint8_t BOB_set_material_vector3_ref(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, BOB_Vector3 *value) {
     if(mat & BOBi_MSB || uniform & BOBi_MSB) return 0; //Do not work with already invalid handles
-    if(intrn_data.material_table[mat].uniforms[uniform].type == BOB_UNIFORM_VEC3) {
-        intrn_data.material_table[mat].uniforms[uniform].ptr = value;
-        intrn_data.material_table[mat].uniforms[uniform].is_reference = 1;
+
+    BOB_Context *context;
+    uint32_t index;
+    if(!BOBi_get_handle_data(mat, &context, &index)) return 0;
+
+    if(context->material_table[index].uniforms[uniform].type == BOB_UNIFORM_VEC3) {
+        context->material_table[index].uniforms[uniform].ptr = value;
+        context->material_table[index].uniforms[uniform].is_reference = 1;
     }
     return 1;
 }
 uint8_t BOB_set_material_vector4_ref(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, BOB_Vector4 *value) {
     if(mat & BOBi_MSB || uniform & BOBi_MSB) return 0; //Do not work with already invalid handles
-    if(intrn_data.material_table[mat].uniforms[uniform].type == BOB_UNIFORM_VEC4) {
-        intrn_data.material_table[mat].uniforms[uniform].ptr = value;
-        intrn_data.material_table[mat].uniforms[uniform].is_reference = 1;
+
+    BOB_Context *context;
+    uint32_t index;
+    if(!BOBi_get_handle_data(mat, &context, &index)) return 0;
+
+    if(context->material_table[index].uniforms[uniform].type == BOB_UNIFORM_VEC4) {
+        context->material_table[index].uniforms[uniform].ptr = value;
+        context->material_table[index].uniforms[uniform].is_reference = 1;
     }
     return 1;
 }
 uint8_t BOB_set_material_texture_ref(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, BOB_Texture_Handle *value) {
     if(mat & BOBi_MSB || uniform & BOBi_MSB) return 0; //Do not work with already invalid handles
-    if(intrn_data.material_table[mat].uniforms[uniform].type == BOB_UNIFORM_TEXTURE) {
-        intrn_data.material_table[mat].uniforms[uniform].ptr = value;
-        intrn_data.material_table[mat].uniforms[uniform].is_reference = 1;
+
+    BOB_Context *context;
+    uint32_t index;
+    if(!BOBi_get_handle_data(mat, &context, &index)) return 0;
+
+    if(context->material_table[index].uniforms[uniform].type == BOB_UNIFORM_TEXTURE) {
+        context->material_table[index].uniforms[uniform].ptr = value;
+        context->material_table[index].uniforms[uniform].is_reference = 1;
     }
     return 1;
 }
 uint8_t BOB_set_material_mat4_ref(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, BOB_Mat4 *value) {
     if(mat & BOBi_MSB || uniform & BOBi_MSB) return 0; //Do not work with already invalid handles
-    if(intrn_data.material_table[mat].uniforms[uniform].type == BOB_UNIFORM_MAT4) {
-        intrn_data.material_table[mat].uniforms[uniform].ptr = value;
-        intrn_data.material_table[mat].uniforms[uniform].is_reference = 1;
+
+    BOB_Context *context;
+    uint32_t index;
+    if(!BOBi_get_handle_data(mat, &context, &index)) return 0;
+
+    if(context->material_table[index].uniforms[uniform].type == BOB_UNIFORM_MAT4) {
+        context->material_table[index].uniforms[uniform].ptr = value;
+        context->material_table[index].uniforms[uniform].is_reference = 1;
     }
     return 1;
 }
@@ -1503,92 +1809,106 @@ uint8_t BOB_set_material_mat4_ref(BOB_Material_Handle mat, BOB_Uniform_Handle un
 //================================================== TEXTURE ATLAS FUNCTIONS ========================================
 
 //Initialises a texture atlas
-uint8_t BOB_atlas_init(uint32_t width, uint32_t height, BOB_Format format, BOB_Atlas_Handle *a) {
-    if(intrn_data.num_atlases >= BOB_MAX_ATLAS_CAPACITY) {
+uint8_t BOB_atlas_init(BOB_Context_Handle context, uint32_t width, uint32_t height, BOB_Format format, BOB_Atlas_Handle *a) {
+    BOB_Context *intrn_context;
+    if(!BOBi_get_context(context, &intrn_context)) return 0;
+
+    if(intrn_context->num_atlases >= intrn_context->atlas_capacity) {
         printf("ERROR: Exceeded Atlas Capacity");
         *a |= BOBi_MSB;
         return 0;
     }
 
     uint32_t index;
-    if (intrn_data.next_atlas_slot == UINT32_MAX) {
-        index = intrn_data.num_atlases;
+    if (intrn_context->next_atlas_slot == UINT32_MAX) {
+        index = intrn_context->num_atlases;
     }
     else {
-        index = intrn_data.next_atlas_slot;
+        index = intrn_context->next_atlas_slot;
 
         //Linearly searching to find the next empty slot. Yes I know that this is slow
-        for (intrn_data.next_atlas_slot = index + 1; intrn_data.next_atlas_slot < intrn_data.num_atlases; intrn_data.next_atlas_slot++) {
-            if (!intrn_data.atlas_table[intrn_data.next_atlas_slot].init)
+        for (intrn_context->next_atlas_slot = index + 1; intrn_context->next_atlas_slot < intrn_context->num_atlases; intrn_context->next_atlas_slot++) {
+            if (!intrn_context->atlas_table[intrn_context->next_atlas_slot].init)
                 break;
         }
 
-        if (intrn_data.next_atlas_slot >= intrn_data.num_atlases)
-            intrn_data.next_atlas_slot = UINT32_MAX;
+        if (intrn_context->next_atlas_slot >= intrn_context->num_atlases)
+            intrn_context->next_atlas_slot = UINT32_MAX;
     }
 
-    intrn_data.atlas_table[index].init = 1; //Setting the value to be initialised
-    intrn_data.atlas_table[index].format = format;
-    if(!BOB_create_texture(width, height, NULL, format, &intrn_data.atlas_table[index].texture)) {
-        intrn_data.atlas_table[index] = (BOB_TextureAtlas){0};
+    intrn_context->atlas_table[index].init = 1; //Setting the value to be initialised
+    intrn_context->atlas_table[index].format = format;
+    if(!BOB_create_texture(context, width, height, NULL, format, &intrn_context->atlas_table[index].texture)) {
+        intrn_context->atlas_table[index] = (BOB_Atlas){0};
         *a |= BOBi_MSB;
         return 0;
     }
 
-    intrn_data.num_atlases++;
-    *a = index;
+    intrn_context->num_atlases++;
+    *a = ((uint64_t)context << 32) | index;
     return 1;
 }
 
 void BOB_atlas_free(BOB_Atlas_Handle *a) {
     if(*a & BOBi_MSB) return; //Do not work with already invalid handles
-    *(a) |= BOBi_MSB; //Setting the MSB to indicate this is an invalid handle
-    uint32_t index = *(a) & (~BOBi_MSB);
-    if(index < intrn_data.next_atlas_slot) intrn_data.next_atlas_slot = index;
 
-    BOB_texture_free(&intrn_data.atlas_table[index].texture);
-    intrn_data.atlas_table[index] = (BOB_TextureAtlas){0}; //Clear the data
+    BOB_Context *context;
+    uint32_t index;
+    if(!BOBi_get_handle_data(*a, &context, &index)) return;
+
+    if(index < context->next_atlas_slot) context->next_atlas_slot = index;
+    *(a) |= BOBi_MSB; //Setting the MSB to indicate this is an invalid handle
+
+    BOB_texture_free(&context->atlas_table[index].texture);
+    context->atlas_table[index] = (BOB_Atlas){0}; //Clear the data
 }
 
-BOB_TextureAtlas *BOB_get_atlas_ref(BOB_Atlas_Handle a) {
+BOB_Atlas *BOB_get_atlas_ref(BOB_Atlas_Handle a) {
     if(a & BOBi_MSB) return NULL; //Do not work with already invalid handles
-    uint32_t index = a & (~BOBi_MSB);
 
-    return &intrn_data.atlas_table[index];
+    BOB_Context *context;
+    uint32_t index;
+    if(!BOBi_get_handle_data(a, &context, &index)) return NULL;
+
+    return &context->atlas_table[index];
 }
 
 //Returns the UV rect where the texture was placed
 //pixel_size must be either 3 or 4. If it does not match the pixel size of the atlas,
 //an empty quad will returned as the pixel formats are different
 uint8_t BOB_atlas_pack(BOB_Atlas_Handle a, uint8_t* pixels, size_t w, size_t h, BOB_Quad *out_quad) {
-    if((a & BOBi_MSB) || (intrn_data.atlas_table[a].texture & BOBi_MSB)) return 0; //Do not work with already invalid handles
-    BOB_Texture tex = intrn_data.texture_table[intrn_data.atlas_table[a].texture];
-    if(intrn_data.atlas_table[a].cursor_y + h > tex.height) return 0; //Early exit if we can't fit the texture in
+    BOB_Context *context;
+    uint32_t index;
+    if(!BOBi_get_handle_data(a, &context, &index)) return 0;
+
+    if((a & BOBi_MSB) || (context->atlas_table[index].texture & BOBi_MSB)) return 0; //Do not work with already invalid handles
+    BOB_Texture tex = context->texture_table[context->atlas_table[index].texture];
+    if(context->atlas_table[index].cursor_y + h > tex.height) return 0; //Early exit if we can't fit the texture in
 
     //Move to next row if this texture doesn't fit
-    if(intrn_data.atlas_table[a].cursor_x + w > tex.width) {
-       intrn_data.atlas_table[a].cursor_y += intrn_data.atlas_table[a].row_height;
-       intrn_data.atlas_table[a].cursor_x = 0;
-       intrn_data.atlas_table[a].row_height = 0;
+    if(context->atlas_table[index].cursor_x + w > tex.width) {
+       context->atlas_table[index].cursor_y += context->atlas_table[index].row_height;
+       context->atlas_table[index].cursor_x = 0;
+       context->atlas_table[index].row_height = 0;
     }
 
     uint32_t tex_index = tex.texture;
-    GLenum gl_format = BOBi_convert_format(intrn_data.atlas_table[a].format);
+    GLenum gl_format = BOBi_convert_format(context->atlas_table[index].format);
 
     //Upload the subregion
     glBindTexture(GL_TEXTURE_2D, tex_index);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, intrn_data.atlas_table[a].cursor_x, intrn_data.atlas_table[a].cursor_y, w, h, gl_format, GL_UNSIGNED_BYTE, pixels);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, context->atlas_table[index].cursor_x, context->atlas_table[index].cursor_y, w, h, gl_format, GL_UNSIGNED_BYTE, pixels);
 
     //Compute normalised UVs
     BOB_Quad uv = {
-        (float)intrn_data.atlas_table[a].cursor_x / tex.width,
-        (float)intrn_data.atlas_table[a].cursor_y / tex.height,
+        (float)context->atlas_table[index].cursor_x / tex.width,
+        (float)context->atlas_table[index].cursor_y / tex.height,
         (float) w / tex.width,
         (float) h / tex.height
     };
 
-    intrn_data.atlas_table[a].cursor_x += w;
-    if(h > intrn_data.atlas_table[a].row_height) intrn_data.atlas_table[a].row_height = h;
+    context->atlas_table[index].cursor_x += w;
+    if(h > context->atlas_table[index].row_height) context->atlas_table[index].row_height = h;
 
     *out_quad = uv;
     return 1;
@@ -1599,35 +1919,38 @@ uint8_t BOB_atlas_pack(BOB_Atlas_Handle a, uint8_t* pixels, size_t w, size_t h, 
 //Creates a pixel buffer to hold the pixels representing
 //a texture of size width * height
 //Pixel size should be either 3 or 4 (rgb/rgba)
-uint8_t BOB_pixelbuffer_init(size_t width, size_t height, BOB_Format format, BOB_PixelBuffer_Handle *pb) {
-    if(intrn_data.num_pixelbuffers >= BOB_MAX_PIXELBUFFER_CAPACITY) {
+uint8_t BOB_pixelbuffer_init(BOB_Context_Handle context, size_t width, size_t height, BOB_Format format, BOB_PixelBuffer_Handle *pb) {
+    BOB_Context *intrn_context;
+    if(!BOBi_get_context(context, &intrn_context)) return 0;
+
+    if(intrn_context->num_pixelbuffers >= BOB_MAX_PIXELBUFFER_CAPACITY) {
         printf("ERROR: Exceeded PixelBuffer Capacity");
         *pb |= BOBi_MSB;
         return 0;
     }
 
     uint32_t index;
-    if (intrn_data.next_pixelbuf_slot == UINT32_MAX) {
-        index = intrn_data.num_pixelbuffers;
+    if (intrn_context->next_pixelbuf_slot == UINT32_MAX) {
+        index = intrn_context->num_pixelbuffers;
     }
     else {
-        index = intrn_data.next_pixelbuf_slot;
+        index = intrn_context->next_pixelbuf_slot;
 
         //Linearly searching to find the next empty slot. Yes I know that this is slow
-        for (intrn_data.next_pixelbuf_slot = index + 1; intrn_data.next_pixelbuf_slot < intrn_data.num_pixelbuffers; intrn_data.next_pixelbuf_slot++) {
-            if (!intrn_data.pixelbuffer_table[intrn_data.next_pixelbuf_slot].init)
+        for (intrn_context->next_pixelbuf_slot = index + 1; intrn_context->next_pixelbuf_slot < intrn_context->num_pixelbuffers; intrn_context->next_pixelbuf_slot++) {
+            if (!intrn_context->pixelbuffer_table[intrn_context->next_pixelbuf_slot].init)
                 break;
         }
 
-        if (intrn_data.next_pixelbuf_slot >= intrn_data.num_pixelbuffers)
-            intrn_data.next_pixelbuf_slot = UINT32_MAX;
+        if (intrn_context->next_pixelbuf_slot >= intrn_context->num_pixelbuffers)
+            intrn_context->next_pixelbuf_slot = UINT32_MAX;
     }
 
-    intrn_data.pixelbuffer_table[index].init = 1; //Setting the value to be initialised
+    intrn_context->pixelbuffer_table[index].init = 1; //Setting the value to be initialised
 
     //Setting up the texture for the pixel simulations:
-    if(!BOB_create_texture(width, height, NULL, format, &intrn_data.pixelbuffer_table[index].pixel_tex)) {
-        intrn_data.pixelbuffer_table[index] = (BOB_PixelBuffer){0};
+    if(!BOB_create_texture(context, width, height, NULL, format, &intrn_context->pixelbuffer_table[index].pixel_tex)) {
+        intrn_context->pixelbuffer_table[index] = (BOB_PixelBuffer){0};
         return 0;
     }
 
@@ -1640,48 +1963,62 @@ uint8_t BOB_pixelbuffer_init(size_t width, size_t height, BOB_Format format, BOB
         case BOB_RGBA: pixel_size = 4; break;
     }
 
-    intrn_data.pixelbuffer_table[index].buf_sz = width * height * pixel_size;
+    intrn_context->pixelbuffer_table[index].buf_sz = width * height * pixel_size;
 
     //Setting up the pbo for the pixel simulations
-    glGenBuffers(1, &intrn_data.pixelbuffer_table[index].pbo);
-    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, intrn_data.pixelbuffer_table[index].pbo);
-    glBufferData(GL_PIXEL_UNPACK_BUFFER, intrn_data.pixelbuffer_table[index].buf_sz, NULL, GL_STREAM_DRAW);
+    glGenBuffers(1, &intrn_context->pixelbuffer_table[index].pbo);
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, intrn_context->pixelbuffer_table[index].pbo);
+    glBufferData(GL_PIXEL_UNPACK_BUFFER, intrn_context->pixelbuffer_table[index].buf_sz, NULL, GL_STREAM_DRAW);
     uint8_t *ptr = glMapBuffer(GL_PIXEL_UNPACK_BUFFER, GL_WRITE_ONLY);
     if(ptr) {
-        BOB_MEMSET(ptr, 0x00, intrn_data.pixelbuffer_table[index].buf_sz); //Setting all of the pixels to be colourless initially
+        memset(ptr, 0x00, intrn_context->pixelbuffer_table[index].buf_sz); //Setting all of the pixels to be colourless initially
         glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
     }
     glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
 
-    intrn_data.num_pixelbuffers++;
-    *pb = index;
+    intrn_context->num_pixelbuffers++;
+    *pb = ((uint64_t)context << 32) | index;
     return 1;
 }
 //Frees the data used by a pixel buffer
 void BOB_pixelbuffer_free(BOB_PixelBuffer_Handle *pb) {
     if(*(pb) & BOBi_MSB) return; //Do not work with already invalid handles
-    *(pb) |= BOBi_MSB; //Setting the MSB to indicate this is an invalid handle
-    uint32_t index = *(pb) & (~BOBi_MSB);
-    if(index < intrn_data.next_pixelbuf_slot) intrn_data.next_pixelbuf_slot = index;
 
-    BOBi_pixelbuffer_free(index);
+    BOB_Context *context;
+    uint32_t index;
+    if(!BOBi_get_handle_data(*pb, &context, &index)) return;
+
+    if(index < context->next_pixelbuf_slot) context->next_pixelbuf_slot = index;
+    *(pb) |= BOBi_MSB; //Setting the MSB to indicate this is an invalid handle
+
+    BOBi_pixelbuffer_free(context, index);
 }
 
 BOB_PixelBuffer *BOB_get_pixelbuf_ref(BOB_PixelBuffer_Handle pb) {
     if(pb & BOBi_MSB) return NULL; //Do not work with already invalid handles
-    uint32_t index = pb & (~BOBi_MSB);
 
-    return &intrn_data.pixelbuffer_table[index];
+    BOB_Context *context;
+    uint32_t index;
+    if(!BOBi_get_handle_data(pb, &context, &index)) return NULL;
+
+    return &context->pixelbuffer_table[index];
 }
 
 //Draws the entire frame directly on the screen by copying its entire contents into the renderer's pixel buffer
 uint8_t BOB_pixelbuffer_updload_data(BOB_PixelBuffer_Handle pb, uint8_t *data) {
     if(pb & BOBi_MSB) return 0; //Do not work with already invalid handles
-    BOB_Texture tex = intrn_data.texture_table[intrn_data.pixelbuffer_table[pb].pixel_tex];
 
-    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, intrn_data.pixelbuffer_table[pb].pbo);
+    BOB_Context *context;
+    uint32_t index;
+    if(!BOBi_get_handle_data(pb, &context, &index)) return 0;
+
+    uint32_t tex_index;
+    if(!BOBi_get_index_from_handle(context->pixelbuffer_table[pb].pixel_tex, &tex_index)) return 0;
+    BOB_Texture tex = context->texture_table[tex_index];
+
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, context->pixelbuffer_table[pb].pbo);
     void* ptr = glMapBuffer(GL_PIXEL_UNPACK_BUFFER, GL_WRITE_ONLY);
-    BOB_MEMCPY(ptr, data, intrn_data.pixelbuffer_table[pb].buf_sz);
+    memcpy(ptr, data, context->pixelbuffer_table[pb].buf_sz);
     glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
 
     glBindTexture(GL_TEXTURE_2D, tex.texture);
@@ -1693,9 +2030,14 @@ uint8_t BOB_pixelbuffer_updload_data(BOB_PixelBuffer_Handle pb, uint8_t *data) {
 //Gets the pixel data from a PixelBuffer
 uint8_t BOB_pixelbuffer_get_data(BOB_PixelBuffer_Handle pb, uint8_t *dest) {
     if(pb & BOBi_MSB) return 0; //Do not work with already invalid handles
-    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, intrn_data.pixelbuffer_table[pb].pbo);
+
+    BOB_Context *context;
+    uint32_t index;
+    if(!BOBi_get_handle_data(pb, &context, &index)) return 0;
+
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, context->pixelbuffer_table[index].pbo);
     void* ptr = glMapBuffer(GL_PIXEL_UNPACK_BUFFER, GL_READ_ONLY);
-    BOB_MEMCPY(dest, ptr, intrn_data.pixelbuffer_table[pb].buf_sz);
+    memcpy(dest, ptr, context->pixelbuffer_table[index].buf_sz);
     glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
     glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
     return 1;
@@ -1709,7 +2051,11 @@ uint8_t BOB_draw_texture(BOB_Renderer *r, BOB_Texture_Handle texture, BOB_Quad s
 
 //Draws an atlas quad
 uint8_t BOB_draw_atlas_quad(BOB_Renderer *r, BOB_Quad screen_quad, BOB_Quad tex_sub_rect, BOB_Vector4 colour, BOB_Atlas_Handle atlas, uint16_t layer, float rotation) {
-    return BOB_draw_atlas_quad_channel(r, screen_quad, tex_sub_rect, colour, intrn_data.atlas_table[atlas].texture, layer, rotation, r->default_mat, 0);
+    if(atlas & BOBi_MSB) return 0; //Do not work with already invalid handles
+    BOB_Context *context;
+    uint32_t index;
+    if(!BOBi_get_handle_data(atlas, &context, &index)) return 0;
+    return BOB_draw_atlas_quad_channel(r, screen_quad, tex_sub_rect, colour, context->atlas_table[index].texture, layer, rotation, r->default_mat, 0);
 }
 
 uint8_t BOB_draw_pixel_buffer(BOB_Renderer *r, BOB_PixelBuffer_Handle pb, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, uint16_t layer, float rotation) {
@@ -1752,7 +2098,11 @@ uint8_t BOB_draw_texture_mat(BOB_Renderer *r, BOB_Texture_Handle texture, BOB_Qu
 
 //Draws a quad with a specified material
 uint8_t BOB_draw_atlas_quad_mat(BOB_Renderer *r, BOB_Quad screen_quad, BOB_Quad tex_sub_rect, BOB_Vector4 colour, BOB_Atlas_Handle atlas, uint16_t layer, float rotation, BOB_Material_Handle mat) {
-    return BOB_draw_texture_channel(r, intrn_data.atlas_table[atlas].texture, screen_quad, tex_sub_rect, colour, layer, rotation, mat, 0);
+    if(atlas & BOBi_MSB) return 0; //Do not work with already invalid handles
+    BOB_Context *context;
+    uint32_t index;
+    if(!BOBi_get_handle_data(atlas, &context, &index)) return 0;
+    return BOB_draw_atlas_quad_channel(r, screen_quad, tex_sub_rect, colour, context->atlas_table[index].texture, layer, rotation, mat, 0);
 }
 
 //Draws a pixel buffer with a specified material
@@ -1763,6 +2113,8 @@ uint8_t BOB_draw_pixel_buffer_mat(BOB_Renderer *r, BOB_PixelBuffer_Handle pb, BO
 //Draws a filled circle with a specified material
 uint8_t BOB_draw_circle_mat(BOB_Renderer *r, BOB_Vector2 centre, float radius, BOB_Vector4 colour, uint16_t layer, BOB_Material_Handle mat) {
     if(mat & BOBi_MSB) return 0; //Do not work with already invalid handles
+    BOB_Context *context;
+    if(!BOBi_get_context(r->context, &context)) return 0;
 
     float angle_step = 2.0f * M_PI / BOB_CIRCLE_LINE_SEGMENTS;
     BOB_Vector2 vertices[BOB_CIRCLE_LINE_SEGMENTS];
@@ -1780,7 +2132,7 @@ uint8_t BOB_draw_circle_mat(BOB_Renderer *r, BOB_Vector2 centre, float radius, B
 
     BOB_Vector2 points2[BOBi_MAX_POLY_SIZE];
     BOB_Vector3 points3[BOBi_MAX_POLY_SIZE];
-    BOB_MEMCPY(points2, vertices, vertex_count * sizeof(BOB_Vector2));
+    memcpy(points2, vertices, vertex_count * sizeof(BOB_Vector2));
 
     size_t clipped_size = BOBi_clip_polygon(r, points2, vertex_count);
     if(clipped_size < 3) return 1; //Early exit
@@ -1795,13 +2147,16 @@ uint8_t BOB_draw_circle_mat(BOB_Renderer *r, BOB_Vector2 centre, float radius, B
         indices[index_count++] = ((i+1) % clipped_size);
     }
 
-    BOBi_create_draw_call(r, points3, clipped_size, NULL, clipped_size * 3, colour, intrn_data.default_tex, mat, 0, BOBi_DRAW_CIRCLE);
+    BOBi_create_draw_call(r, points3, clipped_size, NULL, clipped_size * 3, colour, context->default_tex, mat, 0, BOBi_DRAW_CIRCLE);
     return 1;
 }
 
 //Draws a filled quad with a specified material
 uint8_t BOB_draw_quad_mat(BOB_Renderer *r, BOB_Quad quad, BOB_Vector4 colour, uint16_t layer, float rotation, BOB_Material_Handle mat) {
     if(mat & BOBi_MSB) return 0; //Do not work with already invalid handles
+    BOB_Context *context;
+    if(!BOBi_get_context(r->context, &context)) return 0;
+
     if(!BOBi_clip_quad(r, &quad)) return 1; //Early exit
 
     BOB_Vector2 rotated_coords[4];
@@ -1816,18 +2171,20 @@ uint8_t BOB_draw_quad_mat(BOB_Renderer *r, BOB_Quad quad, BOB_Vector4 colour, ui
     };
 
     // BOBi_draw_mesh(r, strip, 4, NULL, (uint32_t[6]){0,1,3,1,2,3}, 6, colour, intrn_data.default_tex, mat, 0);
-    BOBi_create_draw_call(r, strip, 4, NULL, 6, colour, intrn_data.default_tex, mat, 0, BOBi_DRAW_QUAD);
+    BOBi_create_draw_call(r, strip, 4, NULL, 6, colour, context->default_tex, mat, 0, BOBi_DRAW_QUAD);
     return 1;
 }
 
 //Draws a filled triangle with a specified material
 uint8_t BOB_draw_polygon_mat(BOB_Renderer *r, BOB_Vector2* poly_points, size_t poly_size, BOB_Vector4 colour, uint16_t layer, float rotation, BOB_Material_Handle mat) {
     if(mat & BOBi_MSB) return 0; //Do not work with already invalid handles
+    BOB_Context *context;
+    if(!BOBi_get_context(r->context, &context)) return 0;
 
     BOBi_rotate_polygon(poly_points, poly_size, rotation);
 
     BOB_Vector2 points[BOBi_MAX_POLY_SIZE];
-    BOB_MEMCPY(points, poly_points, poly_size * sizeof(BOB_Vector2));
+    memcpy(points, poly_points, poly_size * sizeof(BOB_Vector2));
 
     size_t clipped_size = BOBi_clip_polygon(r, points, poly_size);
     if(clipped_size < 3) return 1; //Early exit
@@ -1836,7 +2193,7 @@ uint8_t BOB_draw_polygon_mat(BOB_Renderer *r, BOB_Vector2* poly_points, size_t p
     for(size_t i = 0; i < clipped_size; i++) {
         vertices[i] = (BOB_Vector3){points[i].x, points[i].y, layer};
     }
-    BOBi_create_draw_call(r, vertices, clipped_size, NULL, (clipped_size - 2) * 3, colour, intrn_data.default_tex, mat, 0, BOBi_DRAW_POLY);
+    BOBi_create_draw_call(r, vertices, clipped_size, NULL, (clipped_size - 2) * 3, colour, context->default_tex, mat, 0, BOBi_DRAW_POLY);
     return 1;
 }
 //Draws an unfilled circle with a specified material
@@ -1887,7 +2244,7 @@ uint8_t BOB_draw_unfilled_polygon_mat(BOB_Renderer *r, BOB_Vector2 *poly_points,
     if(mat & BOBi_MSB) return 0; //Do not work with already invalid handles
 
     BOB_Vector2 points[BOBi_MAX_POLY_SIZE];
-    BOB_MEMCPY(points, poly_points, poly_size * sizeof(BOB_Vector2));
+    memcpy(points, poly_points, poly_size * sizeof(BOB_Vector2));
 
     size_t clipped_size = BOBi_clip_polygon(r, points, poly_size);
     if(clipped_size < 2) return 1; //Early exit
@@ -1903,6 +2260,8 @@ uint8_t BOB_draw_unfilled_polygon_mat(BOB_Renderer *r, BOB_Vector2 *poly_points,
 //Draws a line between two points with a specified material
 uint8_t BOB_draw_line_mat(BOB_Renderer *r, BOB_Vector2 start_pos, BOB_Vector2 end_pos, float thickness, BOB_Vector4 colour, uint16_t layer, BOB_Material_Handle mat) {
     if(mat & BOBi_MSB) return 0; //Do not work with already invalid handles
+    BOB_Context *context;
+    if(!BOBi_get_context(r->context, &context)) return 0;
 
     if(!BOBi_clip_line(r, &start_pos, &end_pos)) return 1; //Early exit
 
@@ -1921,7 +2280,7 @@ uint8_t BOB_draw_line_mat(BOB_Renderer *r, BOB_Vector2 start_pos, BOB_Vector2 en
             {start_pos.x + radius.x, start_pos.y + radius.y, layer},
         };
 
-        BOBi_create_draw_call(r, strip, 4, NULL, 6, colour, intrn_data.default_tex, mat, 0, BOBi_DRAW_QUAD);
+        BOBi_create_draw_call(r, strip, 4, NULL, 6, colour, context->default_tex, mat, 0, BOBi_DRAW_QUAD);
     }
 
     return 1;
@@ -1930,6 +2289,10 @@ uint8_t BOB_draw_line_mat(BOB_Renderer *r, BOB_Vector2 start_pos, BOB_Vector2 en
 //Draws a dynamically allocated texture with a specified material
 uint8_t BOB_draw_texture_channel(BOB_Renderer *r, BOB_Texture_Handle texture, BOB_Quad screen_quad, BOB_Quad tex_sub_rect, BOB_Vector4 colour, uint16_t layer, float rotation, BOB_Material_Handle mat, uint8_t channel) {
     if((texture & BOBi_MSB) || (mat & BOBi_MSB)) return 0; //Do not work with already invalid handles
+    BOB_Context *context;
+    uint32_t index;
+    if(!BOBi_get_handle_data(texture, &context, &index)) return 0;
+
     if(!BOBi_clip_quad(r, &screen_quad)) return 1; //Early exit
 
     BOB_Vector2 rotated_coords[4];
@@ -1944,8 +2307,8 @@ uint8_t BOB_draw_texture_channel(BOB_Renderer *r, BOB_Texture_Handle texture, BO
         {rotated_coords[3].x, rotated_coords[3].y, layer}
     };
 
-    float width = intrn_data.texture_table[texture].width;
-    float height = intrn_data.texture_table[texture].height;
+    float width = context->texture_table[index].width;
+    float height = context->texture_table[index].height;
 
     BOB_Vector2 uv[4] = {
         {tex_sub_rect.x / width, tex_sub_rect.y / height},
@@ -1962,22 +2325,29 @@ uint8_t BOB_draw_texture_channel(BOB_Renderer *r, BOB_Texture_Handle texture, BO
 //Draws a quad with a specified material
 uint8_t BOB_draw_atlas_quad_channel(BOB_Renderer *r, BOB_Quad screen_quad, BOB_Quad tex_sub_rect, BOB_Vector4 colour, BOB_Atlas_Handle atlas, uint16_t layer, float rotation, BOB_Material_Handle mat, uint8_t channel) {
     if((atlas & BOBi_MSB) || (mat & BOBi_MSB)) return 0; //Do not work with already invalid handles
-    return BOB_draw_texture_channel(r, intrn_data.atlas_table[atlas].texture, screen_quad, tex_sub_rect, colour, layer, rotation, mat, channel);
+    BOB_Context *context;
+    uint32_t index;
+    if(!BOBi_get_handle_data(atlas, &context, &index)) return 0;
+    return BOB_draw_texture_channel(r, context->atlas_table[index].texture, screen_quad, tex_sub_rect, colour, layer, rotation, mat, channel);
 }
 
 //Draws a pixel buffer with a specified material
 uint8_t BOB_draw_pixel_buffer_channel(BOB_Renderer *r, BOB_PixelBuffer_Handle pb, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, uint16_t layer, float rotation, BOB_Material_Handle mat, uint8_t channel) {
     if((pb & BOBi_MSB) || (mat & BOBi_MSB)) return 0; //Do not work with already invalid handles
-    if(!BOBi_clip_quad(r, &dimensions)) return 1; //Early exit
-    BOB_Texture tex = intrn_data.texture_table[intrn_data.pixelbuffer_table[pb].pixel_tex];
+    BOB_Context *context;
+    uint32_t index;
+    if(!BOBi_get_handle_data(pb, &context, &index)) return 0;
 
-    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, intrn_data.pixelbuffer_table[pb].pbo);
+    if(!BOBi_clip_quad(r, &dimensions)) return 1; //Early exit
+    BOB_Texture tex = context->texture_table[context->pixelbuffer_table[index].pixel_tex];
+
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, context->pixelbuffer_table[index].pbo);
     glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
     glBindTexture(GL_TEXTURE_2D, tex.texture);
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, tex.width, tex.height, GL_RGB, GL_UNSIGNED_BYTE, 0);
     glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
 
-    return BOB_draw_texture_channel(r, intrn_data.pixelbuffer_table[pb].pixel_tex, dimensions, uv_dimensions, colour, layer, rotation, mat, channel);
+    return BOB_draw_texture_channel(r, context->pixelbuffer_table[index].pixel_tex, dimensions, uv_dimensions, colour, layer, rotation, mat, channel);
 }
 
 //=================================== CLIPPING FUNCTIONS =====================================
@@ -1989,11 +2359,7 @@ void BOB_start_clip(BOB_Renderer *r, BOB_Quad rect, BOB_Clip_Dir dir) {
     BOBi_Clip_Stack *stack = r->stack;
     if(stack->size >= stack->capacity) {
         size_t newCap = (stack->capacity == 0) ? 4 : stack->capacity * 2;
-        BOBi_Clip_Rect* temp = BOB_MALLOC(sizeof(BOBi_Clip_Rect) * newCap);
-        BOB_MEMCPY(temp, stack->elems, sizeof(BOBi_Clip_Rect) * stack->capacity);
-        BOB_FREE(stack->elems);
-
-        stack->elems = temp;
+        stack->elems = realloc(stack->elems, newCap);
         stack->capacity = newCap;
     }
 
@@ -2079,7 +2445,7 @@ int BOBi_read_to_end(char const *path, uint8_t **buf, uint8_t add_null) {
     fsz = (size_t)offEnd;
 
     //Allocate a buffer to hold the whole file
-    *buf = BOB_MALLOC(fsz + (int)add_null);
+    *buf = malloc(fsz + (int)add_null);
     if(NULL == *buf) {
         return -1;
     }
@@ -2117,13 +2483,10 @@ typedef struct {
 BOBi_Parse_Error_Data error_data = {0};
 
 void BOBi_append_glyph(BOB_Font *font, BOB_Glyph g) {
-    if(font->glyphs == NULL) font->glyphs = BOB_MALLOC(sizeof(BOB_Glyph) * font->glyph_capacity);
+    if(font->glyphs == NULL) font->glyphs = malloc(sizeof(BOB_Glyph) * font->glyph_capacity);
     if(font->glyph_count >= font->glyph_capacity) {
         size_t new_cap = (font->glyph_capacity > 0) ? font->glyph_capacity * 2 : 16;
-        BOB_Glyph *temp = BOB_MALLOC(sizeof(BOB_Glyph) * new_cap);
-        BOB_MEMCPY(temp, font->glyphs, sizeof(BOB_Glyph) * font->glyph_capacity);
-        free(font->glyphs);
-        font->glyphs = temp;
+        font->glyphs = realloc(font->glyphs, new_cap);
         font->glyph_capacity = new_cap;
     }
 
@@ -2131,13 +2494,10 @@ void BOBi_append_glyph(BOB_Font *font, BOB_Glyph g) {
     font->glyphs[font->glyph_count++] = g;
 }
 void BOBi_append_kerning(BOB_Font *font, BOB_Kerning k) {
-    if(font->kernings == NULL) font->kernings = BOB_MALLOC(sizeof(BOB_Kerning) * font->kerning_capacity);
+    if(font->kernings == NULL) font->kernings = malloc(sizeof(BOB_Kerning) * font->kerning_capacity);
     if(font->kerning_count >= font->kerning_capacity) {
         size_t new_cap = (font->kerning_capacity > 0) ? font->kerning_capacity * 2 : 16;
-        BOB_Kerning *temp = BOB_MALLOC(sizeof(BOB_Kerning) * new_cap);
-        BOB_MEMCPY(temp, font->kernings, sizeof(BOB_Kerning) * font->kerning_capacity);
-        free(font->kernings);
-        font->kernings = temp;
+        font->kernings = realloc(font->kernings, new_cap);
         font->kerning_capacity = new_cap;
     }
 
@@ -2267,7 +2627,7 @@ uint8_t BOBi_parse_line(char *line, BOB_Font *font) {
     else if(!strcmp("chars", tag)) {
         if(BOBi_parse_count(rest, &font->glyph_capacity)) {
             font->glyph_map = malloc(sizeof(BOBi_Hashmap));
-            *font->glyph_map = BOBi_hashmap_init(font->glyph_capacity);
+            if(!BOBi_hashmap_init(font->glyph_capacity, font->glyph_map)) return 0;
             return 1;
         }
         return 0;
@@ -2283,7 +2643,7 @@ uint8_t BOBi_parse_line(char *line, BOB_Font *font) {
     else if(!strcmp("kernings", tag)) {
         if(BOBi_parse_count(rest, &font->kerning_capacity)) {
             font->kerning_map = malloc(sizeof(BOBi_Hashmap));
-            *font->kerning_map = BOBi_hashmap_init(font->kerning_capacity);
+            if(!BOBi_hashmap_init(font->kerning_capacity, font->kerning_map)) return 0;
             return 1;
         }
         return 0;
@@ -2324,7 +2684,7 @@ uint8_t BOBi_parse_common_block(BOB_Font *font, uint8_t *data, size_t data_sz) {
     }
 
     BOBi_BMF_Common_Block block;
-    BOB_MEMCPY(&block, data, sizeof(BOBi_BMF_Common_Block));
+    memcpy(&block, data, sizeof(BOBi_BMF_Common_Block));
     font->line_height = block.line_height;
     font->base = block.base;
     return 1;
@@ -2353,11 +2713,11 @@ uint8_t BOBi_parse_chars_block(BOB_Font *font, uint8_t *data, size_t data_sz) {
     size_t num_chars = data_sz / sizeof(BOBi_BMF_Chars_Block);
     font->glyph_capacity = num_chars;
     font->glyph_map = malloc(sizeof(BOBi_Hashmap));
-    *font->glyph_map = BOBi_hashmap_init(font->glyph_capacity);
+    if(!BOBi_hashmap_init(font->glyph_capacity, font->glyph_map)) return 0;
 
     for(size_t i = 0; i < num_chars; i++) {
         BOBi_BMF_Chars_Block block;
-        BOB_MEMCPY(&block, data, sizeof(BOBi_BMF_Chars_Block));
+        memcpy(&block, data, sizeof(BOBi_BMF_Chars_Block));
         BOBi_append_glyph(font, (BOB_Glyph){block.id, (BOB_Quad){block.x, block.y, block.width, block.height}, block.x_offset, block.y_offset, block.x_advance, block.page, block.channel});
 
         data += sizeof(BOBi_BMF_Chars_Block);
@@ -2382,11 +2742,11 @@ uint8_t BOBi_parse_kernings_block(BOB_Font *font, uint8_t *data, size_t data_sz)
     size_t num_kernings = data_sz / sizeof(BOBi_BMF_Kernings_Block);
     font->kerning_capacity = num_kernings;
     font->kerning_map = malloc(sizeof(BOBi_Hashmap));
-    *font->kerning_map = BOBi_hashmap_init(font->kerning_capacity);
+    if(!BOBi_hashmap_init(font->kerning_capacity, font->kerning_map)) return 0;
 
     for(size_t i = 0; i < num_kernings; i++) {
         BOBi_BMF_Kernings_Block block;
-        BOB_MEMCPY(&block, data, sizeof(BOBi_BMF_Kernings_Block));
+        memcpy(&block, data, sizeof(BOBi_BMF_Kernings_Block));
         BOBi_append_kerning(font, (BOB_Kerning){block.first, block.second, block.amount});
 
         data += sizeof(BOBi_BMF_Kernings_Block);
@@ -2407,7 +2767,7 @@ uint8_t BOBi_parse_binary(BOB_Font *font, uint8_t *data, size_t data_sz) {
     while(ptr + 5 <= end) {
         uint8_t block_type = *ptr++;
         uint32_t block_sz;
-        BOB_MEMCPY(&block_sz, ptr, sizeof(block_sz));
+        memcpy(&block_sz, ptr, sizeof(block_sz));
         ptr += 4;
 
         if (ptr + block_sz > end) {
@@ -2438,31 +2798,34 @@ uint8_t BOBi_parse_binary(BOB_Font *font, uint8_t *data, size_t data_sz) {
     return 1;
 }
 
-uint8_t BOB_load_bmf_font(const char *font_path, BOB_Font_Handle *font, BOB_BMF_Format format) {
-    if(intrn_data.num_fonts >= BOB_MAX_FONT_CAPACITY) {
+uint8_t BOB_load_bmf_font(BOB_Context_Handle context, const char *font_path, BOB_Font_Handle *font, BOB_BMF_Format format) {
+    BOB_Context *intrn_context;
+    if(!BOBi_get_context(context, &intrn_context)) return 0;
+
+    if(intrn_context->num_fonts >= intrn_context->font_capacity) {
         printf("ERROR: Exceeded Font Capacity");
         *font |= BOBi_MSB;
         return 0;
     }
 
     uint32_t index;
-    if (intrn_data.next_font_slot == UINT32_MAX) {
-        index = intrn_data.num_fonts;
+    if (intrn_context->next_font_slot == UINT32_MAX) {
+        index = intrn_context->num_fonts;
     }
     else {
-        index = intrn_data.next_font_slot;
+        index = intrn_context->next_font_slot;
 
         //Linearly searching to find the next empty slot. Yes I know that this is slow
-        for (intrn_data.next_font_slot = index + 1; intrn_data.next_font_slot < intrn_data.num_fonts; intrn_data.next_font_slot++) {
-            if (!intrn_data.font_table[intrn_data.next_font_slot].init)
+        for (intrn_context->next_font_slot = index + 1; intrn_context->next_font_slot < intrn_context->num_fonts; intrn_context->next_font_slot++) {
+            if (!intrn_context->font_table[intrn_context->next_font_slot].init)
                 break;
         }
 
-        if (intrn_data.next_font_slot >= intrn_data.num_fonts)
-            intrn_data.next_font_slot = UINT32_MAX;
+        if (intrn_context->next_font_slot >= intrn_context->num_fonts)
+            intrn_context->next_font_slot = UINT32_MAX;
     }
 
-    intrn_data.font_table[index].init = 1; //Setting the value to be initialised
+    intrn_context->font_table[index].init = 1; //Setting the value to be initialised
 
     uint8_t *buf;
     int size = BOBi_read_to_end(font_path, &buf, 1);
@@ -2471,82 +2834,93 @@ uint8_t BOB_load_bmf_font(const char *font_path, BOB_Font_Handle *font, BOB_BMF_
         return 0;
     }
 
-    uint8_t res = (format == BOB_BMF_TEXT) ? BOBi_parse_text(&intrn_data.font_table[index], buf, size) : BOBi_parse_binary(&intrn_data.font_table[index], buf, size);
+    uint8_t res = (format == BOB_BMF_TEXT) ? BOBi_parse_text(&intrn_context->font_table[index], buf, size) : BOBi_parse_binary(&intrn_context->font_table[index], buf, size);
     free(buf);
     if(!res) {
         *font |= BOBi_MSB;
-        intrn_data.font_table[index] = (BOB_Font){0}; //Clear all of the initially assigned font data
+        intrn_context->font_table[index] = (BOB_Font){0}; //Clear all of the initially assigned font data
         return 0;
     }
 
-    intrn_data.num_fonts++;
-    *font = index;
+    intrn_context->num_fonts++;
+    *font = ((uint64_t)context << 32) | index;
     return 1;
 }
 
-uint8_t BOB_create_custom_font(BOB_Font_Handle *font, size_t num_glyphs, size_t num_kernings, size_t line_height, size_t base) {
-    if(intrn_data.num_fonts >= BOB_MAX_FONT_CAPACITY) {
+uint8_t BOB_create_custom_font(BOB_Context_Handle context, BOB_Font_Handle *font, size_t num_glyphs, size_t num_kernings, size_t line_height, size_t base) {
+    BOB_Context *intrn_context;
+    if(!BOBi_get_context(context, &intrn_context)) return 0;
+
+    if(intrn_context->num_fonts >= intrn_context->font_capacity) {
         printf("ERROR: Exceeded Font Capacity");
         *font |= BOBi_MSB;
         return 0;
     }
 
     uint32_t index;
-    if (intrn_data.next_font_slot == UINT32_MAX) {
-        index = intrn_data.num_fonts;
+    if (intrn_context->next_font_slot == UINT32_MAX) {
+        index = intrn_context->num_fonts;
     }
     else {
-        index = intrn_data.next_font_slot;
+        index = intrn_context->next_font_slot;
 
         //Linearly searching to find the next empty slot. Yes I know that this is slow
-        for (intrn_data.next_font_slot = index + 1; intrn_data.next_font_slot < intrn_data.num_fonts; intrn_data.next_font_slot++) {
-            if (!intrn_data.font_table[intrn_data.next_font_slot].init)
+        for (intrn_context->next_font_slot = index + 1; intrn_context->next_font_slot < intrn_context->num_fonts; intrn_context->next_font_slot++) {
+            if (!intrn_context->font_table[intrn_context->next_font_slot].init)
                 break;
         }
 
-        if (intrn_data.next_font_slot >= intrn_data.num_fonts)
-            intrn_data.next_font_slot = UINT32_MAX;
+        if (intrn_context->next_font_slot >= intrn_context->num_fonts)
+            intrn_context->next_font_slot = UINT32_MAX;
     }
 
-    intrn_data.font_table[index].init = 1; //Setting the value to be initialised
-    intrn_data.font_table[index].base = base;
-    intrn_data.font_table[index].line_height = line_height;
-    intrn_data.font_table[index].glyph_capacity = num_glyphs;
-    intrn_data.font_table[index].glyph_count = 0;
-    intrn_data.font_table[index].kerning_capacity = num_kernings;
-    intrn_data.font_table[index].kerning_count = 0;
-    intrn_data.font_table[index].page_count = 0;
+    intrn_context->font_table[index].init = 1; //Setting the value to be initialised
+    intrn_context->font_table[index].base = base;
+    intrn_context->font_table[index].line_height = line_height;
+    intrn_context->font_table[index].glyph_capacity = num_glyphs;
+    intrn_context->font_table[index].glyph_count = 0;
+    intrn_context->font_table[index].kerning_capacity = num_kernings;
+    intrn_context->font_table[index].kerning_count = 0;
+    intrn_context->font_table[index].page_count = 0;
     if(num_glyphs) {
-        intrn_data.font_table[index].glyphs = malloc(sizeof(BOB_Glyph) * num_glyphs);
-        intrn_data.font_table[index].glyph_map = malloc(sizeof(BOBi_Hashmap));
-        *intrn_data.font_table[index].glyph_map = BOBi_hashmap_init(intrn_data.font_table[index].glyph_capacity);
+        intrn_context->font_table[index].glyphs = malloc(sizeof(BOB_Glyph) * num_glyphs);
+        if(!BOBi_hashmap_init(intrn_context->font_table[index].glyph_capacity, intrn_context->font_table[index].glyph_map)) return 0;
     }
     if(num_kernings) {
-        intrn_data.font_table[index].kernings = malloc(sizeof(BOB_Kerning) * num_kernings);
-        intrn_data.font_table[index].kerning_map = malloc(sizeof(BOBi_Hashmap));
-        *intrn_data.font_table[index].kerning_map = BOBi_hashmap_init(intrn_data.font_table[index].kerning_capacity);
+        intrn_context->font_table[index].kernings = malloc(sizeof(BOB_Kerning) * num_kernings);
+        intrn_context->font_table[index].kerning_map = malloc(sizeof(BOBi_Hashmap));
+        if(!BOBi_hashmap_init(intrn_context->font_table[index].kerning_capacity, intrn_context->font_table[index].kerning_map)) return 0;
     }
 
-    *font = index;
-
+    intrn_context->num_fonts++;
+    *font = ((uint64_t)context << 32) | index;
     return 1;
 }
 
 uint8_t BOB_add_font_page(BOB_Font_Handle font, uint32_t page_width, uint32_t page_height, uint8_t *page_data, BOB_Format page_format) {
     if(font & BOBi_MSB) return 0; //Do not do anything with invalid handles
+    BOB_Context *context;
+    uint32_t index;
+    if(!BOBi_get_handle_data(font, &context, &index)) return 0;
+    uint32_t handle = (font & 0xFFFFFFFF00000000) >> 32;
 
-     return BOB_create_texture(page_width, page_height, page_data, page_format, &intrn_data.font_table[font].pages[intrn_data.font_table[font].page_count++]);
+     return BOB_create_texture(handle, page_width, page_height, page_data, page_format, &context->font_table[index].pages[context->font_table[index].page_count++]);
 }
 
 uint8_t BOB_draw_codepoint(BOB_Renderer *r, BOB_Font_Handle font, uint32_t codepoint, BOB_Vector2 *pos, BOB_Vector4 colour, uint16_t layer) {
-    BOB_Font f = intrn_data.font_table[font];
-    uint32_t index = BOBi_hashmap_get(f.glyph_map, codepoint);
-    if(index == UINT32_MAX) return 0; //Codepoint doesn't exist
+    if(font & BOBi_MSB) return 0; //Do not do anything with invalid handles
+    BOB_Context *context;
+    uint32_t index;
+    if(!BOBi_get_handle_data(font, &context, &index)) return 0;
 
-    BOB_Glyph g = f.glyphs[index];
+    BOB_Font f = context->font_table[index];
+    uint32_t hash_index = BOBi_hashmap_get(f.glyph_map, codepoint);
+    if(hash_index == UINT32_MAX) return 0; //Codepoint doesn't exist
+
+    BOB_Glyph g = f.glyphs[hash_index];
     //Setting the flags we pass to the shader
     uint8_t chnl_flags = g.channel | BOB_GLYPH_BIT;
-    if(intrn_data.texture_table[f.pages[g.page]].format == BOB_RED) chnl_flags |= BOB_GREYSCALE_BIT;
+    if(context->texture_table[f.pages[g.page]].format == BOB_RED) chnl_flags |= BOB_GREYSCALE_BIT;
 
     BOB_draw_texture_channel(r, f.pages[g.page], (BOB_Quad){pos->x + g.x_offset, pos->y + g.y_offset, g.sub_rect.w, g.sub_rect.h}, g.sub_rect, colour, layer, 0.0f, r->default_mat, chnl_flags);
     pos->x += g.x_advance;
@@ -2558,7 +2932,12 @@ static uint32_t BOBi_read_char(void *str, size_t index) { return (uint32_t)((cha
 static uint32_t BOBi_read_codepoint(void *str, size_t index) { return ((uint32_t *)str)[index]; }
 
 static uint8_t BOBi_draw_string(BOB_Renderer *r, BOB_Font_Handle font, void *str, size_t str_len, BOBi_Codepoint_Reader reader, BOB_Vector2 *start, BOB_Vector4 colour, uint16_t layer) {
-    BOB_Font f = intrn_data.font_table[font];
+    if(font & BOBi_MSB) return 0; //Do not do anything with invalid handles
+    BOB_Context *context;
+    uint32_t index;
+    if(!BOBi_get_handle_data(font, &context, &index)) return 0;
+
+    BOB_Font f = context->font_table[index];
     float start_x = start->x;
     uint32_t prev = 0;
 
@@ -2603,20 +2982,30 @@ uint8_t BOB_draw_codepoint_string(BOB_Renderer *r, BOB_Font_Handle font, uint32_
 
 uint8_t BOB_append_glyph(BOB_Font_Handle font, BOB_Glyph glyph) {
     if((font) & BOBi_MSB) return 0; //Do not work with already invalid handles
+    BOB_Context *context;
+    uint32_t index;
+    if(!BOBi_get_handle_data(font, &context, &index)) return 0;
 
-    BOBi_append_glyph(&intrn_data.font_table[font], glyph);
+    BOBi_append_glyph(&context->font_table[index], glyph);
     return 1;
 }
 uint8_t BOB_append_kerning(BOB_Font_Handle font, BOB_Kerning kerning) {
     if((font) & BOBi_MSB) return 0; //Do not work with already invalid handles
+    BOB_Context *context;
+    uint32_t index;
+    if(!BOBi_get_handle_data(font, &context, &index)) return 0;
 
-    BOBi_append_kerning(&intrn_data.font_table[font], kerning);
+    BOBi_append_kerning(&context->font_table[index], kerning);
     return 1;
 }
 
 static uint8_t BOBi_measure_string(void *str, size_t str_len, BOBi_Codepoint_Reader reader, BOB_Font_Handle font, BOB_Vector2 *out) {
     if((font) & BOBi_MSB) return 0; //Do not work with already invalid handles
-    BOB_Font f = intrn_data.font_table[font];
+    BOB_Context *context;
+    uint32_t index;
+    if(!BOBi_get_handle_data(font, &context, &index)) return 0;
+
+    BOB_Font f = context->font_table[index];
     float max_w = 0;
     float h = f.line_height;
     float cur_w = 0;
@@ -2672,13 +3061,17 @@ void BOB_print_parsing_error(void) {
 
 uint8_t BOB_font_free(BOB_Font_Handle *font) {
     if((*font) & BOBi_MSB) return 0; //Do not work with already invalid handles
-    BOB_Font f = intrn_data.font_table[*font];
+    BOB_Context *context;
+    uint32_t index;
+    if(!BOBi_get_handle_data(*font, &context, &index)) return 0;
+
+    BOB_Font f = context->font_table[index];
 
     for(size_t i = 0; i < f.page_count; i++) {
         BOB_texture_free(&f.pages[i]);
     }
 
-    BOBi_font_free(*font);
+    BOBi_font_free(context, *font);
 
     *font |= BOBi_MSB;
     return 1;
