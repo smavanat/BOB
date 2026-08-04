@@ -4,18 +4,44 @@
 #include <stddef.h>
 
 #define BOB_INCLUDE_GLAD
+#define BOB_INCLUDE_VULKAN
 
 #ifdef BOB_INCLUDE_GLAD
 #include <glad/glad.h>
 #endif // BOB_INCLUDE_GLAD
+
+#ifdef BOB_INCLUDE_VULKAN
+#include <vulkan/vulkan.h>
+#include <vulkan/vulkan_core.h>
+#endif // BOB_INCLUDE_VULKAN
 
 #ifndef BOB_ASSERT
 #include <assert.h>
 #define BOB_ASSERT assert
 #endif //BOB_ASSERT
 
+//NOTE: FUNCTIONS WITH OPENGL CODE:
+//BOBi_update_uniform
+//BOBi_convert_format
+//BOBi_create_shader
+//BOBi_texture_free
+//BOBi_pixelbuffer_free
+//BOBi_material_free
+//BOB_clear_colour
+//BOB_init
+//BOB_renderer_init
+//BOB_renderer_free
+//BOB_render_end
+//BOB_renderer_update_dimensions
+//BOB_create_texture
+//BOB_create_material
+//BOB_atlas_pack
+//BOB_pixelbuffer_init
+//BOB_pixelbuffer_upload_data
+//BOB_pixelbuffer_get_data
+//BOB_draw_pixelbuffer_channel
+
 //TODO: Vulkan support
-//      Draw call sorting (quicksort) internally rather than relying on the depth buffer -> Should actually do this since dealing with the depth buffer is a giant pain (Maybe??? Don't think this is good idea)
 //      Do proper error reporting and document what each error code means somewhere
 //      Allow the user to define render passes -> Custom framebuffers
 //      Maybe allow custom vertex layout?
@@ -69,7 +95,9 @@ void BOB_arena_clear(BOBi_Arena *arena);
 
 typedef enum {
     BOB_VULKAN_CONTEXT,
+    #ifdef BOB_INCLUDE_GLAD
     BOB_OPENGL_CONTEXT,
+    #endif //BOB_INCLUDE_GLAD
 } BOB_Context_Type;
 
 typedef struct BOBi_Context_t BOB_Context;
@@ -286,6 +314,8 @@ typedef struct {
     size_t num_draw_calls;
 } RenderBatch;
 
+//TODO: Change renderers to also just return handles to the user and keep this struct internal
+//      Store renderers in bob_state alongside contexts
 typedef struct {
     // BOB_Render_Layer layer; //Layers of rendering
     BOBi_Clip_Stack *stack; //Stores the current clipping rect and the history
@@ -311,7 +341,7 @@ void BOB_start_clip(BOB_Renderer *r, BOB_Quad rect, BOB_Clip_Dir dir);
 void BOB_end_clip(BOB_Renderer *r);
 
 //Initialises the pixel renderer
-uint8_t BOB_renderer_init(BOB_Context_Handle context, size_t width, size_t height, BOB_Renderer *out);
+uint8_t BOB_renderer_init(BOB_Context_Handle context, size_t width, size_t height, size_t vertex_capacity, size_t index_capacity, size_t draw_call_capacity, BOB_Renderer *out);
 //Frees a pixel renderer
 void BOB_renderer_free(BOB_Renderer *r);
 //Sets up the variables for renderering to the pbo from the BOB_Renderer

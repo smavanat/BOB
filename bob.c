@@ -149,9 +149,9 @@ typedef enum {
 
 typedef struct {
     BOB_Render_Vertex *vertices; //Pointer into the vertex arena where this draw call's vertices start
-    uint32_t *indices; //Pointer into the index arena where this draw call's indices start. Only initialised after draw call has been sorted and indices created
     size_t num_vertices; //Number of vertices in the draw call
     size_t num_indices; //Number of indices in the draw call
+    size_t index_offset; //Offset from the start of the index array
     BOB_Texture_Handle tex; //Texture handle. Primary sorting key of draw calls
     BOB_Material_Handle mat; //Material handle. Secondary sorting key of draw calls
     uint32_t submission_id; //Tertiary sorting key of draw calls. Since this should be unique for each draw call associated with a renderer, this acts as a tiebreaker
@@ -1178,25 +1178,27 @@ uint8_t BOB_create_context(BOB_Context_Type type, size_t atlas_capacity, size_t 
 //========================================================== RENDERER FUNCTIONS ===========================================
 
 //Initialises the pixel renderer
-uint8_t BOB_renderer_init(BOB_Context_Handle context, size_t width, size_t height, BOB_Renderer *out) {
+uint8_t BOB_renderer_init(BOB_Context_Handle context, size_t width, size_t height, size_t vertex_capacity, size_t index_capacity, size_t draw_call_capacity, BOB_Renderer *out) {
     if(context & BOBi_MSB) return 0;
 
-    BOB_Renderer r = {0};
-    r.screen_height = height;
-    r.screen_width = width;
+    size_t vert_buf_sz = vertex_capacity * sizeof(BOB_Render_Vertex);
+    size_t index_buf_sz = index_capacity * sizeof(uint32_t);
 
-    glGenVertexArrays(1, &r.vao);
-    glBindVertexArray(r.vao);
+    out->screen_height = height;
+    out->screen_width = width;
+
+    glGenVertexArrays(1, &out->vao);
+    glBindVertexArray(out->vao);
 
     //Getting the vbo
-    glGenBuffers(1, &r.vbo);
-    glBindBuffer(GL_ARRAY_BUFFER, r.vbo);
-    glBufferData(GL_ARRAY_BUFFER, BOB_MAX_VERTEX_CAPACITY * sizeof(BOB_Render_Vertex), NULL, GL_DYNAMIC_DRAW);
+    glGenBuffers(1, &out->vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, out->vbo);
+    glBufferData(GL_ARRAY_BUFFER, vert_buf_sz, NULL, GL_DYNAMIC_DRAW);
 
     //Getting the ebo
-    glGenBuffers(1, &r.ebo);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, r.ebo);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(uint32_t) * BOB_MAX_INDEX_CAPACITY, NULL, GL_DYNAMIC_DRAW);
+    glGenBuffers(1, &out->ebo);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, out->ebo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, index_buf_sz, NULL, GL_DYNAMIC_DRAW);
 
     glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, sizeof(BOB_Render_Vertex), (void *)offsetof(BOB_Render_Vertex, colour)); //Vertex Colour
     glEnableVertexAttribArray(0);
@@ -1208,22 +1210,21 @@ uint8_t BOB_renderer_init(BOB_Context_Handle context, size_t width, size_t heigh
     glEnableVertexAttribArray(3);
 
     //Setting the projection matrix
-    BOB_ortho(0.0f, r.screen_width, r.screen_height, 0.0f, -BOB_MAX_LAYER, 0.0f, &r.projection);
+    BOB_ortho(0.0f, out->screen_width, out->screen_height, 0.0f, -BOB_MAX_LAYER, 0.0f, &out->projection);
     if(!BOB_create_material(context, (BOB_Shader_Data[2]){(BOB_Shader_Data){vertex_shader, BOB_VERTEX_SHADER},
                             (BOB_Shader_Data){fragment_shader, BOB_FRAGMENT_SHADER}}, 2,
-                            (BOB_Uniform[2]){BOB_uniform_mat4("uProjection", r.projection), BOB_uniform_signed_int("screenTexture", 0)}, 2, &r.default_mat)) return 0;
+                            (BOB_Uniform[2]){BOB_uniform_mat4("uProjection", out->projection), BOB_uniform_signed_int("screenTexture", 0)}, 2, &out->default_mat)) return 0;
 
     //Initialise the stack of clip rects
-    r.stack = malloc(sizeof(BOBi_Clip_Stack));
-    r.stack->elems = malloc(sizeof(BOBi_Clip_Rect) * INIT_STACK_CAPACITY);
-    r.stack->capacity = INIT_STACK_CAPACITY;
-    r.stack->size = 0;
-    r.context = context;
+    out->stack = malloc(sizeof(BOBi_Clip_Stack));
+    out->stack->elems = malloc(sizeof(BOBi_Clip_Rect) * INIT_STACK_CAPACITY);
+    out->stack->capacity = INIT_STACK_CAPACITY;
+    out->stack->size = 0;
+    out->context = context;
 
-    BOB_init_arena(&r.batch.vertex_arena, BOB_MAX_VERTEX_CAPACITY * sizeof(BOB_Render_Vertex));
-    BOB_init_arena(&r.batch.vertex_arena_2, BOB_MAX_VERTEX_CAPACITY * sizeof(BOB_Render_Vertex));
-    BOB_init_arena(&r.batch.draw_call_arena, BOB_MAX_DRAW_CALL_CAPACITY * sizeof(BOBi_Draw_Call));
-    *out = r;
+    BOB_init_arena(&out->batch.vertex_arena, (vert_buf_sz > index_buf_sz) ? vert_buf_sz : index_buf_sz); //Since this dual use need to take the max of the two
+    BOB_init_arena(&out->batch.vertex_arena_2, vert_buf_sz);
+    BOB_init_arena(&out->batch.draw_call_arena, draw_call_capacity * sizeof(BOBi_Draw_Call));
 
     return 1;
 }
@@ -1271,27 +1272,30 @@ void BOB_renderer_end(BOB_Renderer *r) {
     BOB_arena_clear(&r->batch.vertex_arena);
 
     //Generate the indices for each draw call
-    size_t cur_index = 0;
+    size_t cur_vertex = 0;
+    size_t index_count = 0;
+    uint32_t *indices;
     for(size_t i = 0; i < r->batch.num_draw_calls; i++) {
         BOBi_Draw_Call *call = (BOBi_Draw_Call *)r->batch.draw_call_arena.memory + i;
-        call->indices = BOB_arena_alloc(&r->batch.vertex_arena, sizeof(uint32_t) * call->num_indices, alignof(uint32_t));
+        call->index_offset = index_count;
+        indices = BOB_arena_alloc(&r->batch.vertex_arena, sizeof(uint32_t) * call->num_indices, alignof(uint32_t));
         switch(call->type) {
             case BOBi_DRAW_CIRCLE: {
-                size_t index_count = 0;
-                for(int i = 0; i < call->num_vertices; i++) {
-                    call->indices[index_count++] = cur_index;
-                    call->indices[index_count++] = cur_index + i;
-                    call->indices[index_count++] = cur_index + ((i+1) % call->num_vertices);
+                size_t circ_index = 0;
+                for(int i = 1; i < call->num_vertices; i++) {
+                    indices[circ_index++] = cur_vertex;
+                    indices[circ_index++] = cur_vertex + i;
+                    indices[circ_index++] = cur_vertex + ((i+1) % call->num_vertices);
                 }
             }
             break;
             case BOBi_DRAW_QUAD:
-                call->indices[0] = cur_index;
-                call->indices[1] = cur_index+1;
-                call->indices[2] = cur_index+3;
-                call->indices[3] = cur_index+1;
-                call->indices[4] = cur_index+2;
-                call->indices[5] = cur_index+3;
+                indices[0] = cur_vertex;
+                indices[1] = cur_vertex+1;
+                indices[2] = cur_vertex+3;
+                indices[3] = cur_vertex+1;
+                indices[4] = cur_vertex+2;
+                indices[5] = cur_vertex+3;
             break;
             case BOBi_DRAW_POLY: {
                 uint32_t triangle_indices[(BOBi_MAX_POLY_SIZE - 2) * 3]; //Ear clipping always produces n-2 triangles for a polygon with n vertices
@@ -1321,7 +1325,7 @@ void BOB_renderer_end(BOB_Renderer *r) {
                         vertex_map[old] = vertex_count;
                         compressed[vertex_count++] = call->vertices[old];
                     }
-                    call->indices[j] = cur_index + vertex_map[old];
+                    indices[j] = cur_vertex + vertex_map[old];
                 }
 
                 memcpy(call->vertices, compressed, vertex_count * sizeof(BOB_Render_Vertex));
@@ -1329,7 +1333,8 @@ void BOB_renderer_end(BOB_Renderer *r) {
             break;
         }
 
-        cur_index += call->num_vertices;
+        index_count += call->num_indices;
+        cur_vertex += call->num_vertices;
     }
 
     //Compress the draw calls:
@@ -1362,8 +1367,8 @@ void BOB_renderer_end(BOB_Renderer *r) {
     if(context->context_memory.memory == NULL) return;
 
     BOBi_Draw_Call start = BOBi_get_arena_elem(r->batch.draw_call_arena, 0, BOBi_Draw_Call);
-    glBufferSubData(GL_ARRAY_BUFFER, 0, r->batch.num_vertices * sizeof(BOB_Render_Vertex), start.vertices); //Copies the data from renderer's triangle data into the vbo
-    glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, r->batch.num_indices * sizeof(uint32_t), start.indices); //Copies the quad data into the vbo
+    glBufferSubData(GL_ARRAY_BUFFER, 0, r->batch.num_vertices * sizeof(BOB_Render_Vertex), r->batch.vertex_arena_2.memory); //Copies the data from renderer's triangle data into the vbo
+    glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, r->batch.num_indices * sizeof(uint32_t), r->batch.vertex_arena.memory); //Copies the quad data into the vbo
 
     //TODO: At the very least make a texture array so we don't keep switching textures, but would also be nice to make an SSBO for the materials
     for(size_t i = 0; i < r->batch.num_draw_calls; i++) {
@@ -1377,13 +1382,11 @@ void BOB_renderer_end(BOB_Renderer *r) {
             BOBi_update_uniform(context->material_table[mat_index].uniforms[j]);
         }
 
-        size_t ind_diff = ((uintptr_t)call.indices - (uintptr_t)start.indices) / sizeof(uint32_t);
-
         //Bind the atlas texture
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, context->texture_table[tex_index].texture);
 
-        glDrawElements(GL_TRIANGLES, call.num_indices, GL_UNSIGNED_INT, (void *)(ind_diff * sizeof(uint32_t))); //Make the draw call
+        glDrawElements(GL_TRIANGLES, call.num_indices, GL_UNSIGNED_INT, (void *)(call.index_offset * sizeof(uint32_t))); //Make the draw call
     }
 }
 
