@@ -1222,7 +1222,7 @@ uint8_t BOB_renderer_init(BOB_Context_Handle context, size_t width, size_t heigh
 
     BOB_init_arena(&r.batch.vertex_arena, BOB_MAX_VERTEX_CAPACITY * sizeof(BOB_Render_Vertex));
     BOB_init_arena(&r.batch.vertex_arena_2, BOB_MAX_VERTEX_CAPACITY * sizeof(BOB_Render_Vertex));
-    BOB_init_arena(&r.batch.draw_call_arena, BOB_MAX_VERTEX_CAPACITY * sizeof(BOBi_Draw_Call));
+    BOB_init_arena(&r.batch.draw_call_arena, BOB_MAX_DRAW_CALL_CAPACITY * sizeof(BOBi_Draw_Call));
     *out = r;
 
     return 1;
@@ -1314,13 +1314,11 @@ void BOB_renderer_end(BOB_Renderer *r) {
                 BOB_Render_Vertex compressed[BOBi_MAX_POLY_SIZE]; //Holds the compressed vertex values
                 size_t vertex_count = 0;
 
-                // printf("Indices:\n");
                 //Copying the old verticies into compressed format
                 for(size_t j = 0; j < triangle_count*3; j++) {
                     uint32_t old = triangle_indices[j];
                     if(vertex_map[old] == UINT32_MAX) {
                         vertex_map[old] = vertex_count;
-                        BOB_Render_Vertex temp = call->vertices[vertex_count];
                         compressed[vertex_count++] = call->vertices[old];
                     }
                     call->indices[j] = cur_index + vertex_map[old];
@@ -1340,7 +1338,7 @@ void BOB_renderer_end(BOB_Renderer *r) {
     BOBi_Draw_Call *curr = (BOBi_Draw_Call *)r->batch.draw_call_arena.memory + i;
     while(i < r->batch.num_draw_calls-1) {
         BOBi_Draw_Call next = BOBi_get_arena_elem(r->batch.draw_call_arena, i+1, BOBi_Draw_Call);
-        if(BOBi_compare_draw_calls(*curr, next, 0)) {
+        if(BOBi_compare_draw_calls(*curr, next, 0) != 0) {
             BOBi_get_arena_elem(r->batch.draw_call_arena, num_unique_calls, BOBi_Draw_Call) = next;
             curr = (BOBi_Draw_Call *)r->batch.draw_call_arena.memory + num_unique_calls;
             num_unique_calls++;
@@ -1363,6 +1361,11 @@ void BOB_renderer_end(BOB_Renderer *r) {
     BOB_Context *context = &bob_state.contexts[r->context];
     if(context->context_memory.memory == NULL) return;
 
+    BOBi_Draw_Call start = BOBi_get_arena_elem(r->batch.draw_call_arena, 0, BOBi_Draw_Call);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, r->batch.num_vertices * sizeof(BOB_Render_Vertex), start.vertices); //Copies the data from renderer's triangle data into the vbo
+    glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, r->batch.num_indices * sizeof(uint32_t), start.indices); //Copies the quad data into the vbo
+
+    //TODO: At the very least make a texture array so we don't keep switching textures, but would also be nice to make an SSBO for the materials
     for(size_t i = 0; i < r->batch.num_draw_calls; i++) {
         BOBi_Draw_Call call = BOBi_get_arena_elem(r->batch.draw_call_arena, i, BOBi_Draw_Call);
         uint32_t mat_index, tex_index;
@@ -1374,14 +1377,13 @@ void BOB_renderer_end(BOB_Renderer *r) {
             BOBi_update_uniform(context->material_table[mat_index].uniforms[j]);
         }
 
-        glBufferSubData(GL_ARRAY_BUFFER, 0, call.num_vertices * sizeof(BOB_Render_Vertex), call.vertices); //Copies the data from renderer's triangle data into the vbo
-        glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, call.num_indices * sizeof(uint32_t), call.indices); //Copies the quad data into the vbo
+        size_t ind_diff = ((uintptr_t)call.indices - (uintptr_t)start.indices) / sizeof(uint32_t);
 
         //Bind the atlas texture
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, context->texture_table[tex_index].texture);
 
-        glDrawElements(GL_TRIANGLES, call.num_indices, GL_UNSIGNED_INT, 0); //Make the draw call
+        glDrawElements(GL_TRIANGLES, call.num_indices, GL_UNSIGNED_INT, (void *)(ind_diff * sizeof(uint32_t))); //Make the draw call
     }
 }
 
