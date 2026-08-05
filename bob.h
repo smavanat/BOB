@@ -45,6 +45,7 @@
 //      Do proper error reporting and document what each error code means somewhere
 //      Allow the user to define render passes -> Custom framebuffers
 //      Maybe allow custom vertex layout?
+//      Debug mode with statistics
 typedef struct {
     float m[4][4];
 } BOB_Mat4;
@@ -101,11 +102,13 @@ typedef enum {
 } BOB_Context_Type;
 
 typedef struct BOBi_Context_t BOB_Context;
-uint8_t BOB_create_context(BOB_Context_Type type, size_t atlas_capacity, size_t pixelbuf_capacity,
+#ifdef BOB_INCLUDE_GLAD
+uint8_t BOB_create_opengl_context(GLADloadproc proc, size_t atlas_capacity, size_t pixelbuf_capacity,
                            size_t tex_capacity, size_t mat_capacity, size_t font_capacity, BOB_Context_Handle *context);
+#endif //BOB_INCLUDE_GLAD
 void BOB_destroy_context(BOB_Context_Handle *context);
 
-uint8_t BOB_init(GLADloadproc proc);
+uint8_t BOB_init(size_t num_contexts, size_t num_renderers);
 void BOB_terminate(void);
 
 typedef struct {
@@ -404,7 +407,7 @@ uint8_t BOB_draw_pixel_buffer_channel(BOB_Renderer *r, BOB_PixelBuffer_Handle pb
 //Determines the projection matrix
 void BOB_ortho(float left, float right, float bottom, float top, float nearZ, float farZ, BOB_Mat4 *dest);
 //Clears the collur of the screen
-void BOB_clear_colour(BOB_Vector4 colour);
+void BOB_clear_colour(BOB_Context_Handle context, BOB_Vector4 colour);
 //Converts an angle in degrees to radians
 float BOB_degrees_to_radians(float angle);
 

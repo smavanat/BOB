@@ -99,6 +99,8 @@ struct BOBi_Context_t {
     BOB_Context_Type type;
 };
 
+#define BOBi_get_arena_elem(arena, index, type) ((type *)(arena).memory)[(index)]
+
 uint8_t BOBi_get_context_from_handle(uint64_t handle, BOB_Context **out) {
     if(handle & BOBi_MSB) return 0; //Do not work with invalid handles
 
@@ -141,6 +143,97 @@ uint8_t BOBi_get_context(BOB_Context_Handle handle, BOB_Context **out) {
     return 1;
 }
 
+uint8_t BOBi_create_context(BOB_Context_Type type, size_t atlas_capacity, size_t pixelbuf_capacity,
+                           size_t tex_capacity, size_t mat_capacity, size_t font_capacity, BOB_Context_Handle *context) {
+    if(bob_state.context_count >= bob_state.context_capcity) {
+        printf("ERROR: Exceeded context capacity\n");
+        return 0;
+    }
+
+    uint32_t index;
+    if(bob_state.next_context_slot == UINT32_MAX) {
+        index = bob_state.context_count;
+    }
+    else {
+        index = bob_state.next_context_slot;
+
+        //Linearly searching to find the next empty slot. Yes I know that this is slow
+        for (bob_state.next_context_slot = index + 1; bob_state.next_context_slot < bob_state.context_count; bob_state.next_context_slot++) {
+            //Use the allocation status of the context's memory region as an initialisation tell
+            //Relies on setting pointer to NULL on context destruction and zeroing memory on creating the BOB instance
+            if (bob_state.contexts[bob_state.next_context_slot].context_memory.memory == NULL)
+                break;
+        }
+
+        if (bob_state.next_context_slot >= bob_state.context_count)
+            bob_state.next_context_slot = UINT32_MAX;
+    }
+
+    BOB_Context *intrn_context = &bob_state.contexts[index];
+
+    //Calculating the size of the memory regions each buffer will end up using
+    size_t atlas_sz = atlas_capacity * sizeof(BOB_Atlas);
+    size_t pixelbuf_sz = pixelbuf_capacity * sizeof(BOB_PixelBuffer);
+    size_t tex_sz = tex_capacity * sizeof(BOB_Texture);
+    size_t mat_sz = mat_capacity * sizeof(BOB_Material);
+    size_t font_sz = font_capacity * sizeof(BOB_Font);
+
+    //Figuring out how much aligned memory we will need
+    char *p = (char *)0;
+    p = (char *)BOBi_align_up((uintptr_t)p, alignof(BOB_Atlas));
+    p += atlas_sz;
+    p = (char *)BOBi_align_up((uintptr_t)p, alignof(BOB_PixelBuffer));
+    p += pixelbuf_sz;
+    p = (char *)BOBi_align_up((uintptr_t)p, alignof(BOB_Texture));
+    p += tex_sz;
+    p = (char *)BOBi_align_up((uintptr_t)p, alignof(BOB_Material));
+    p += mat_sz;
+    p = (char *)BOBi_align_up((uintptr_t)p, alignof(BOB_Font));
+    p += font_sz;
+
+    size_t total = (size_t)p;
+
+    //Allocating the memory used for the object buffers and checking the allocation
+    if(!BOB_init_arena(&intrn_context->context_memory, total)) return 0;
+    memset(intrn_context->context_memory.memory, 0, total);
+
+    //Assigning the start pointers from the general memory buffer
+    intrn_context->atlas_table = BOB_arena_alloc(&intrn_context->context_memory, atlas_sz, alignof(BOB_Atlas));
+    intrn_context->pixelbuffer_table = BOB_arena_alloc(&intrn_context->context_memory, pixelbuf_sz, alignof(BOB_PixelBuffer));
+    intrn_context->texture_table = BOB_arena_alloc(&intrn_context->context_memory, tex_sz, alignof(BOB_Texture));
+    intrn_context->material_table = BOB_arena_alloc(&intrn_context->context_memory, mat_sz, alignof(BOB_Material));
+    intrn_context->font_table = BOB_arena_alloc(&intrn_context->context_memory, font_sz, alignof(BOB_Font));
+
+    //Assiging the capacity values
+    intrn_context->atlas_capacity = atlas_capacity;
+    intrn_context->pixelbuffer_capacity = pixelbuf_capacity;
+    intrn_context->texture_capacity = tex_capacity;
+    intrn_context->material_capacity = mat_capacity;
+    intrn_context->font_capacity = font_capacity;
+
+    //Setting the sizes to be 0
+    intrn_context->num_atlases = 0;
+    intrn_context->num_pixelbuffers = 0;
+    intrn_context->num_textures = 0;
+    intrn_context->num_materials = 0;
+    intrn_context->num_fonts = 0;
+
+    //Setting the next free slot to point to the first one
+    intrn_context->next_atlas_slot = UINT32_MAX;
+    intrn_context->next_pixelbuf_slot = UINT32_MAX;
+    intrn_context->next_tex_slot = UINT32_MAX;
+    intrn_context->next_mat_slot = UINT32_MAX;
+    intrn_context->next_font_slot = UINT32_MAX;
+
+    //Create the default texture used
+    intrn_context->type = type;
+    if(!BOB_create_texture(index, 1, 1, (uint8_t[4]){255, 255, 255, 255}, BOB_RGBA, &intrn_context->default_tex)) return 0;
+
+    *context = index;
+    return 1;
+}
+
+
 typedef enum {
     BOBi_DRAW_QUAD,
     BOBi_DRAW_CIRCLE,
@@ -158,9 +251,11 @@ typedef struct {
     BOBi_Draw_Type type; //Determines how the draw call's indicies are generated
 } BOBi_Draw_Call;
 
-//================================================= INTERNAL HELPER FUNCTIONS ===================================================
+//============================== OPENGL CODE ========================================
 
-void BOBi_update_uniform(BOB_Uniform uniform) {
+#ifdef BOB_INCLUDE_GLAD
+
+void BOBi_gl_update_uniform(BOB_Uniform uniform) {
     switch(uniform.type) {
         case BOB_UNIFORM_FLOAT:
             glUniform1f(uniform.location, (uniform.is_reference) ? *(float *)uniform.ptr : uniform.f);
@@ -194,9 +289,271 @@ void BOBi_update_uniform(BOB_Uniform uniform) {
     }
 }
 
-// ============= QUICKSORT IMPLEMENTATION ===============
-#define BOBi_get_arena_elem(arena, index, type) ((type *)(arena).memory)[(index)]
+uint32_t BOBi_gl_convert_format(BOB_Format format) {
+    switch (format) {
+        case BOB_RED: return GL_RED;
+        case BOB_RG: return GL_RG;
+        case BOB_RGB: return GL_RGB;
+        case BOB_RGBA: return GL_RGBA;
+    }
+}
 
+uint32_t BOBi_gl_create_shader(BOB_Shader_Data s) {
+    uint32_t shader;
+    int32_t shader_type;
+    switch(s.type) {
+        case BOB_VERTEX_SHADER: shader_type = GL_VERTEX_SHADER; break;
+        case BOB_FRAGMENT_SHADER: shader_type = GL_FRAGMENT_SHADER; break;
+        case BOB_TESS_CTRL_SHADER: shader_type = GL_TESS_CONTROL_SHADER; break;
+        case BOB_TESS_EVAL_SHADER: shader_type = GL_TESS_EVALUATION_SHADER; break;
+        case BOB_COMPUTE_SHADER: shader_type = GL_COMPUTE_SHADER; break;
+        case BOB_GEOMETRY_SHADER: shader_type = GL_GEOMETRY_SHADER; break;
+    }
+
+    shader = glCreateShader(shader_type);
+    glShaderSource(shader, 1, &s.shader_code, NULL);
+    glCompileShader(shader);
+
+    int result;
+    char infolog[512];
+
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &result);
+    if(!result) {
+        glGetShaderInfoLog(shader, 512, NULL, infolog);
+        printf("ERROR::SHADER::COMPILATION_FAILED\n");
+        for(int i = 0; i < 512; i++){
+            if(infolog[i] == '\0') break;
+            printf("%c", infolog[i]);
+        }
+        printf("\n");
+    }
+
+    return shader;
+}
+
+void BOBi_gl_delete_texture(uint32_t *tex) {
+    glDeleteTextures(1, tex);
+}
+
+void BOBi_gl_delete_buffer(uint32_t *buf) {
+    glDeleteBuffers(1, buf);
+}
+
+void BOBi_gl_delete_program(uint32_t program) {
+    glDeleteProgram(program);
+}
+
+void BOBi_gl_clear_color(BOB_Vector4 colour) {
+    glClearColor(colour.x, colour.y, colour.z, colour.w);
+    glClearDepth(1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT); //Need to clear the depth buffer as well
+}
+
+uint8_t BOB_create_opengl_context(GLADloadproc proc, size_t atlas_capacity, size_t pixelbuf_capacity,
+                           size_t tex_capacity, size_t mat_capacity, size_t font_capacity, BOB_Context_Handle *context) {
+    //Loading GLAD
+    if(!gladLoadGLLoader(proc)) {
+        printf("Failed to initialise GLAD");
+        return 0;
+    }
+
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LEQUAL);
+    glClearDepth(1.0);
+
+    return BOBi_create_context(BOB_OPENGL_CONTEXT, atlas_capacity, pixelbuf_capacity, tex_capacity, mat_capacity, font_capacity, context);
+}
+
+void BOBi_gl_init_gpu_renderer_mem(BOB_Renderer *r, size_t vert_buf_sz, size_t index_buf_sz) {
+    glGenVertexArrays(1, &r->vao);
+    glBindVertexArray(r->vao);
+
+    //Getting the vbo
+    glGenBuffers(1, &r->vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, r->vbo);
+    glBufferData(GL_ARRAY_BUFFER, vert_buf_sz, NULL, GL_DYNAMIC_DRAW);
+
+    //Getting the ebo
+    glGenBuffers(1, &r->ebo);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, r->ebo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, index_buf_sz, NULL, GL_DYNAMIC_DRAW);
+
+    glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, sizeof(BOB_Render_Vertex), (void *)offsetof(BOB_Render_Vertex, colour)); //Vertex Colour
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(BOB_Render_Vertex), (void *)offsetof(BOB_Render_Vertex, pos)); //Vertex Position
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(BOB_Render_Vertex), (void *)offsetof(BOB_Render_Vertex, uv)); //UV
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(3, 1, GL_UNSIGNED_BYTE, GL_FALSE, sizeof(BOB_Render_Vertex), (void *)offsetof(BOB_Render_Vertex, flags));
+    glEnableVertexAttribArray(3);
+}
+
+void BOBi_gl_draw(BOB_Context *context, BOB_Renderer *r) {
+    //Bind all of the arrays and buffers we will reuse over time
+    glBindVertexArray(r->vao);
+    glBindBuffer(GL_ARRAY_BUFFER, r->vbo);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, r->ebo);
+
+    BOBi_Draw_Call start = BOBi_get_arena_elem(r->batch.draw_call_arena, 0, BOBi_Draw_Call);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, r->batch.num_vertices * sizeof(BOB_Render_Vertex), r->batch.vertex_arena_2.memory); //Copies the data from renderer's triangle data into the vbo
+    glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, r->batch.num_indices * sizeof(uint32_t), r->batch.vertex_arena.memory); //Copies the quad data into the vbo
+
+    //TODO: At the very least make a texture array so we don't keep switching textures, but would also be nice to make an SSBO for the materials
+    for(size_t i = 0; i < r->batch.num_draw_calls; i++) {
+        BOBi_Draw_Call call = BOBi_get_arena_elem(r->batch.draw_call_arena, i, BOBi_Draw_Call);
+        uint32_t mat_index, tex_index;
+        if(!BOBi_get_index_from_handle(call.mat, &mat_index)) return;
+        if(!BOBi_get_index_from_handle(call.tex, &tex_index)) return;
+        glUseProgram(context->material_table[mat_index].shader);
+        //Setting the uniforms
+        for(size_t j = 0; j < context->material_table[mat_index].uniform_count; j++) {
+            BOBi_gl_update_uniform(context->material_table[mat_index].uniforms[j]);
+        }
+
+        //Bind the atlas texture
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, context->texture_table[tex_index].texture);
+
+        glDrawElements(GL_TRIANGLES, call.num_indices, GL_UNSIGNED_INT, (void *)(call.index_offset * sizeof(uint32_t))); //Make the draw call
+    }
+}
+
+void BOBi_gl_copy_buffer_data(uint32_t buf, void *data, size_t data_sz) {
+    glBindBuffer(GL_ARRAY_BUFFER, buf);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, data_sz, data);
+}
+
+void BOBi_gl_create_tex(uint32_t *tex, size_t width, size_t height, uint8_t *data, BOB_Format format) {
+    glGenTextures(1, tex);
+    glBindTexture(GL_TEXTURE_2D, *tex);
+    // set the texture wrapping/filtering options (on the currently bound texture object)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, BOBi_gl_convert_format(format), width, height, 0, BOBi_gl_convert_format(format), GL_UNSIGNED_BYTE, data);
+    glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+uint8_t BOBi_gl_create_material(BOB_Shader_Data *data, size_t num_shaders, BOB_Uniform *uniforms, size_t num_uniforms, BOB_Material_Handle *mat, uint32_t *shader) {
+    //TODO: Figure out how to get rid of this VLA without using malloc
+    uint32_t shader_buf[num_shaders]; //Array to store the ids of the loaded shader sub-programs
+    *shader = glCreateProgram();
+
+    //Attaching all of the shaders together
+    for(int i = 0; i < num_shaders; i++) {
+        shader_buf[i] = BOBi_gl_create_shader(data[i]);
+        glAttachShader(*shader, shader_buf[i]);
+    }
+
+    glLinkProgram(*shader);
+    int result;
+    char infolog[512];
+
+    //Print errors if any:
+    glGetProgramiv(*shader, GL_LINK_STATUS, &result);
+    if(!result) {
+        glGetProgramInfoLog(*shader, 512, NULL, infolog);
+        printf("ERROR::SHADER::LINKING_FAILED\n");
+        for(int i = 0; i < 512; i++){
+            if(infolog[i] == '\0') break;
+            printf("%c", infolog[i]);
+        }
+        printf("\n");
+        *mat |= BOBi_MSB;
+        return 0;
+    }
+
+    //Cleanup
+    for(int i = 0; i < num_shaders; i++) {
+        glDeleteShader(shader_buf[i]);
+    }
+
+    //Setting the uniforms
+    //TODO: Make an arena for this:
+    for(size_t i = 0; i < num_uniforms; i++) {
+        uniforms[i].location = glGetUniformLocation(*shader, uniforms[i].name);
+    }
+    return 1;
+}
+
+void BOBi_gl_copy_data_tex(uint32_t tex, BOB_Format format, BOB_Quad region, uint8_t *pixels) {
+    GLenum gl_format = BOBi_gl_convert_format(format);
+
+    //Upload the subregion
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, region.x, region.y, region.w, region.h, gl_format, GL_UNSIGNED_BYTE, pixels);
+}
+
+uint8_t BOBi_gl_init_pbo(uint32_t *pbo, size_t buf_sz, BOB_PixelBuffer_Handle *pb) {
+    glGenBuffers(1, pbo);
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, *pbo);
+    glBufferData(GL_PIXEL_UNPACK_BUFFER, buf_sz, NULL, GL_STREAM_DRAW);
+    uint8_t *ptr = glMapBuffer(GL_PIXEL_UNPACK_BUFFER, GL_WRITE_ONLY);
+    if(ptr == NULL) {
+        printf("Failed to map GPU to CPU memory\n");
+        *pb |= BOBi_MSB;
+        return 0;
+    }
+    memset(ptr, 0x00, buf_sz); //Setting all of the pixels to be colourless initially
+    glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+
+    return 1;
+}
+
+uint8_t BOBi_gl_copy_pbo(uint32_t pbo, size_t buf_sz, uint32_t tex, size_t width, size_t height, uint8_t *data) {
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo);
+    void* ptr = glMapBuffer(GL_PIXEL_UNPACK_BUFFER, GL_WRITE_ONLY);
+    if(ptr == NULL) {
+        printf("Failed to map GPU to CPU memory\n");
+        return 0;
+    }
+    memcpy(ptr, data, buf_sz);
+    glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE, 0);
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+
+    return 1;
+}
+
+uint8_t BOBi_gl_get_pbo_data(uint32_t pbo, size_t buf_sz, uint8_t *dest) {
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo);
+    void* ptr = glMapBuffer(GL_PIXEL_UNPACK_BUFFER, GL_READ_ONLY);
+    if(ptr == NULL) {
+        printf("Failed to map GPU to CPU memory\n");
+        return 0;
+    }
+    memcpy(dest, ptr, buf_sz);
+    glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+    return 1;
+}
+
+void BOBi_gl_upload_pbo_data(uint32_t pbo, uint32_t tex, size_t width, size_t height) {
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo);
+    glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE, 0);
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+}
+
+#endif //BOB_INCLUDE_GLAD
+
+//================================================= INTERNAL HELPER FUNCTIONS ===================================================
+
+void BOBi_update_uniform(BOB_Context_Type type, BOB_Uniform uniform) {
+    #ifdef BOB_INCLUDE_GLAD
+    if(type == BOB_OPENGL_CONTEXT) BOBi_gl_update_uniform(uniform);
+    #endif //BOB_INCLUDE_GLAD
+}
+
+// ============= QUICKSORT IMPLEMENTATION ===============
 int8_t BOBi_compare_draw_calls(BOBi_Draw_Call a, BOBi_Draw_Call b, uint8_t strict) {
     if(a.tex < b.tex) return -1;
     if(a.tex > b.tex) return 1;
@@ -367,47 +724,21 @@ uint8_t BOBi_clip_line(BOB_Renderer *r, BOB_Vector2 *start, BOB_Vector2* end) {
     }
 }
 
-uint32_t BOBi_convert_format(BOB_Format format) {
-    switch (format) {
-        case BOB_RED: return GL_RED;
-        case BOB_RG: return GL_RG;
-        case BOB_RGB: return GL_RGB;
-        case BOB_RGBA: return GL_RGBA;
-    }
+uint32_t BOBi_convert_format(BOB_Context_Type type, BOB_Format format) {
+    #ifdef BOB_INCLUDE_GLAD
+    if(type == BOB_OPENGL_CONTEXT) return BOBi_gl_convert_format(format);
+    #endif // BOB_INCLUDE_GLAD
+
+    return UINT32_MAX;
 }
 
 //Compiles a shader from a source file given the desired shader type
-unsigned int BOBi_create_shader(BOB_Shader_Data s) {
-    uint32_t shader;
-    int32_t shader_type;
-    switch(s.type) {
-        case BOB_VERTEX_SHADER: shader_type = GL_VERTEX_SHADER; break;
-        case BOB_FRAGMENT_SHADER: shader_type = GL_FRAGMENT_SHADER; break;
-        case BOB_TESS_CTRL_SHADER: shader_type = GL_TESS_CONTROL_SHADER; break;
-        case BOB_TESS_EVAL_SHADER: shader_type = GL_TESS_EVALUATION_SHADER; break;
-        case BOB_COMPUTE_SHADER: shader_type = GL_COMPUTE_SHADER; break;
-        case BOB_GEOMETRY_SHADER: shader_type = GL_GEOMETRY_SHADER; break;
-    }
+uint32_t BOBi_create_shader(BOB_Context_Type type, BOB_Shader_Data s) {
+    #ifdef BOB_INCLUDE_GLAD
+    if(type == BOB_OPENGL_CONTEXT) return BOBi_gl_create_shader(s);
+    #endif //BOB_INCLUDE_GLAD
 
-    shader = glCreateShader(shader_type);
-    glShaderSource(shader, 1, &s.shader_code, NULL);
-    glCompileShader(shader);
-
-    int result;
-    char infolog[512];
-
-    glGetShaderiv(shader, GL_COMPILE_STATUS, &result);
-    if(!result) {
-        glGetShaderInfoLog(shader, 512, NULL, infolog);
-        printf("ERROR::SHADER::COMPILATION_FAILED\n");
-        for(int i = 0; i < 512; i++){
-            if(infolog[i] == '\0') break;
-            printf("%c", infolog[i]);
-        }
-        printf("\n");
-    }
-
-    return shader;
+    return 0;
 }
 
 #define BOBi_MAX_POLY_SIZE 256
@@ -742,16 +1073,22 @@ void BOBi_rotate_polygon(BOB_Vector2 *poly_points, size_t poly_size, float rotat
 }
 
 void BOBi_texture_free(BOB_Context *context, uint32_t index) {
-    glDeleteTextures(1, &context->texture_table[index].texture);
+    #ifdef BOB_INCLUDE_GLAD
+    if(context->type == BOB_OPENGL_CONTEXT) BOBi_gl_delete_texture(&context->texture_table[index].texture);
+    #endif //BOB_INCLUDE_GLAD
     context->texture_table[index] = (BOB_Texture){0}; //Clear the data
 }
 void BOBi_pixelbuffer_free(BOB_Context *context, uint32_t index) {
-    glDeleteBuffers(1, &context->pixelbuffer_table[index].pbo);
+    #ifdef BOB_INCLUDE_GLAD
+    if(context->type == BOB_OPENGL_CONTEXT) BOBi_gl_delete_buffer(&context->pixelbuffer_table[index].pbo);
+    #endif //BOB_INCLUDE_GLAD
     BOB_texture_free(&context->pixelbuffer_table[index].pixel_tex);
     context->pixelbuffer_table[index] = (BOB_PixelBuffer){0}; //Clear the data
 }
 void BOBi_material_free(BOB_Context *context, uint32_t index) {
-    glDeleteProgram(context->material_table[index].shader);
+    #ifdef BOB_INCLUDE_GLAD
+    if(context->type == BOB_OPENGL_CONTEXT) BOBi_gl_delete_program(context->material_table[index].shader);
+    #endif //BOB_INCLUDE_GLAD
     free(context->material_table[index].uniforms);
     context->material_table[index] = (BOB_Material){0}; //Clear the data
 }
@@ -986,10 +1323,12 @@ void BOB_ortho(float left, float right, float bottom, float top, float nearZ, fl
     dest->m[3][3] = 1.0;
 }
 
-void BOB_clear_colour(BOB_Vector4 colour) {
-    glClearColor(colour.x, colour.y, colour.z, colour.w);
-    glClearDepth(1.0f);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT); //Need to clear the depth buffer as well
+void BOB_clear_colour(BOB_Context_Handle handle, BOB_Vector4 colour) {
+    BOB_Context *context;
+    BOBi_get_context_from_handle(handle, &context);
+    #ifdef BOB_INCLUDE_GLAD
+    if(context->type == BOB_OPENGL_CONTEXT) BOBi_gl_clear_color(colour);
+    #endif // BOB_INCLUDE_GLAD
 }
 
 //Converts an angle in degrees to radians
@@ -1050,24 +1389,12 @@ const char *fragment_shader = "#version 330 core\n"
 
 // ============================================= BOB STATE MANAGEMENT ============================================================
 
-uint8_t BOB_init(GLADloadproc proc) {
-    //Loading GLAD
-    if(!gladLoadGLLoader(proc)) {
-        printf("Failed to initialise GLAD");
-        return 0;
-    }
-
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glEnable(GL_DEPTH_TEST);
-    glDepthFunc(GL_LEQUAL);
-    glClearDepth(1.0);
-
-    bob_state.contexts = malloc(sizeof(BOB_Context) * 8);
-    memset(bob_state.contexts, 0, sizeof(BOB_Context) * 8);
+uint8_t BOB_init(size_t num_contexts, size_t num_renderers) {
+    bob_state.contexts = malloc(sizeof(BOB_Context) * num_contexts);
+    memset(bob_state.contexts, 0, sizeof(BOB_Context) * num_contexts);
     bob_state.context_count = 0;
     bob_state.next_context_slot = UINT32_MAX;
-    bob_state.context_capcity = 8;
+    bob_state.context_capcity = num_contexts;
 
     return 1;
 }
@@ -1083,97 +1410,6 @@ void BOB_terminate() {
     bob_state = (BOBi_Internal_State){0};
 }
 
-uint8_t BOB_create_context(BOB_Context_Type type, size_t atlas_capacity, size_t pixelbuf_capacity,
-                           size_t tex_capacity, size_t mat_capacity, size_t font_capacity, BOB_Context_Handle *context) {
-    if(bob_state.context_count >= bob_state.context_capcity) {
-        size_t new_cap = (bob_state.context_capcity == 0) ? 8 : bob_state.context_capcity * 2;
-        bob_state.contexts = realloc(bob_state.contexts, new_cap * sizeof(BOB_Context));
-        bob_state.context_capcity = new_cap;
-    }
-
-    uint32_t index;
-    if(bob_state.next_context_slot == UINT32_MAX) {
-        index = bob_state.context_count;
-    }
-    else {
-        index = bob_state.next_context_slot;
-
-        //Linearly searching to find the next empty slot. Yes I know that this is slow
-        for (bob_state.next_context_slot = index + 1; bob_state.next_context_slot < bob_state.context_count; bob_state.next_context_slot++) {
-            //Use the allocation status of the context's memory region as an initialisation tell
-            //Relies on setting pointer to NULL on context destruction and zeroing memory on creating the BOB instance
-            if (bob_state.contexts[bob_state.next_context_slot].context_memory.memory == NULL)
-                break;
-        }
-
-        if (bob_state.next_context_slot >= bob_state.context_count)
-            bob_state.next_context_slot = UINT32_MAX;
-    }
-
-    BOB_Context *intrn_context = &bob_state.contexts[index];
-
-    //Calculating the size of the memory regions each buffer will end up using
-    size_t atlas_sz = atlas_capacity * sizeof(BOB_Atlas);
-    size_t pixelbuf_sz = pixelbuf_capacity * sizeof(BOB_PixelBuffer);
-    size_t tex_sz = tex_capacity * sizeof(BOB_Texture);
-    size_t mat_sz = mat_capacity * sizeof(BOB_Material);
-    size_t font_sz = font_capacity * sizeof(BOB_Font);
-
-    //Figuring out how much aligned memory we will need
-    char *p = (char *)0;
-    p = (char *)BOBi_align_up((uintptr_t)p, alignof(BOB_Atlas));
-    p += atlas_sz;
-    p = (char *)BOBi_align_up((uintptr_t)p, alignof(BOB_PixelBuffer));
-    p += pixelbuf_sz;
-    p = (char *)BOBi_align_up((uintptr_t)p, alignof(BOB_Texture));
-    p += tex_sz;
-    p = (char *)BOBi_align_up((uintptr_t)p, alignof(BOB_Material));
-    p += mat_sz;
-    p = (char *)BOBi_align_up((uintptr_t)p, alignof(BOB_Font));
-    p += font_sz;
-
-    size_t total = (size_t)p;
-
-    //Allocating the memory used for the object buffers and checking the allocation
-    if(!BOB_init_arena(&intrn_context->context_memory, total)) return 0;
-    memset(intrn_context->context_memory.memory, 0, total);
-
-    //Assigning the start pointers from the general memory buffer
-    intrn_context->atlas_table = BOB_arena_alloc(&intrn_context->context_memory, atlas_sz, alignof(BOB_Atlas));
-    intrn_context->pixelbuffer_table = BOB_arena_alloc(&intrn_context->context_memory, pixelbuf_sz, alignof(BOB_PixelBuffer));
-    intrn_context->texture_table = BOB_arena_alloc(&intrn_context->context_memory, tex_sz, alignof(BOB_Texture));
-    intrn_context->material_table = BOB_arena_alloc(&intrn_context->context_memory, mat_sz, alignof(BOB_Material));
-    intrn_context->font_table = BOB_arena_alloc(&intrn_context->context_memory, font_sz, alignof(BOB_Font));
-
-    //Assiging the capacity values
-    intrn_context->atlas_capacity = atlas_capacity;
-    intrn_context->pixelbuffer_capacity = pixelbuf_capacity;
-    intrn_context->texture_capacity = tex_capacity;
-    intrn_context->material_capacity = mat_capacity;
-    intrn_context->font_capacity = font_capacity;
-
-    //Setting the sizes to be 0
-    intrn_context->num_atlases = 0;
-    intrn_context->num_pixelbuffers = 0;
-    intrn_context->num_textures = 0;
-    intrn_context->num_materials = 0;
-    intrn_context->num_fonts = 0;
-
-    //Setting the next free slot to point to the first one
-    intrn_context->next_atlas_slot = UINT32_MAX;
-    intrn_context->next_pixelbuf_slot = UINT32_MAX;
-    intrn_context->next_tex_slot = UINT32_MAX;
-    intrn_context->next_mat_slot = UINT32_MAX;
-    intrn_context->next_font_slot = UINT32_MAX;
-
-    //Create the default texture used
-    if(!BOB_create_texture(index, 1, 1, (uint8_t[4]){255, 255, 255, 255}, BOB_RGBA, &intrn_context->default_tex)) return 0;
-    intrn_context->type = type;
-
-    *context = index;
-    return 1;
-}
-
 
 //========================================================== RENDERER FUNCTIONS ===========================================
 
@@ -1181,33 +1417,18 @@ uint8_t BOB_create_context(BOB_Context_Type type, size_t atlas_capacity, size_t 
 uint8_t BOB_renderer_init(BOB_Context_Handle context, size_t width, size_t height, size_t vertex_capacity, size_t index_capacity, size_t draw_call_capacity, BOB_Renderer *out) {
     if(context & BOBi_MSB) return 0;
 
+    BOB_Context *intrn_context;
+    if(!BOBi_get_context_from_handle(context, &intrn_context)) return 0;
+
     size_t vert_buf_sz = vertex_capacity * sizeof(BOB_Render_Vertex);
     size_t index_buf_sz = index_capacity * sizeof(uint32_t);
 
     out->screen_height = height;
     out->screen_width = width;
 
-    glGenVertexArrays(1, &out->vao);
-    glBindVertexArray(out->vao);
-
-    //Getting the vbo
-    glGenBuffers(1, &out->vbo);
-    glBindBuffer(GL_ARRAY_BUFFER, out->vbo);
-    glBufferData(GL_ARRAY_BUFFER, vert_buf_sz, NULL, GL_DYNAMIC_DRAW);
-
-    //Getting the ebo
-    glGenBuffers(1, &out->ebo);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, out->ebo);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, index_buf_sz, NULL, GL_DYNAMIC_DRAW);
-
-    glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, sizeof(BOB_Render_Vertex), (void *)offsetof(BOB_Render_Vertex, colour)); //Vertex Colour
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(BOB_Render_Vertex), (void *)offsetof(BOB_Render_Vertex, pos)); //Vertex Position
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(BOB_Render_Vertex), (void *)offsetof(BOB_Render_Vertex, uv)); //UV
-    glEnableVertexAttribArray(2);
-    glVertexAttribPointer(3, 1, GL_UNSIGNED_BYTE, GL_FALSE, sizeof(BOB_Render_Vertex), (void *)offsetof(BOB_Render_Vertex, flags));
-    glEnableVertexAttribArray(3);
+    #ifdef BOB_INCLUDE_GLAD
+    if(intrn_context->type == BOB_OPENGL_CONTEXT) BOBi_gl_init_gpu_renderer_mem(out, vert_buf_sz, index_buf_sz);
+    #endif //BOB_INCLUDE_GLAD
 
     //Setting the projection matrix
     BOB_ortho(0.0f, out->screen_width, out->screen_height, 0.0f, -BOB_MAX_LAYER, 0.0f, &out->projection);
@@ -1231,8 +1452,15 @@ uint8_t BOB_renderer_init(BOB_Context_Handle context, size_t width, size_t heigh
 
 //Frees a pixel renderer
 void BOB_renderer_free(BOB_Renderer *r) {
-    glDeleteBuffers(1, &r->vbo);
-    glDeleteVertexArrays(1, &r->vao);
+    BOB_Context *intrn_context;
+    if(BOBi_get_context(r->context, &intrn_context)) return;
+
+    #ifdef BOB_INCLUDE_GLAD
+    if(intrn_context->type == BOB_OPENGL_CONTEXT) {
+        glDeleteBuffers(1, &r->vbo);
+        glDeleteVertexArrays(1, &r->vao);
+    }
+    #endif
 
     free(r->stack->elems);
     r->stack->elems = NULL;
@@ -1357,37 +1585,13 @@ void BOB_renderer_end(BOB_Renderer *r) {
 
     r->batch.num_draw_calls = num_unique_calls;
 
-    //Bind all of the arrays and buffers we will reuse over time
-    glBindVertexArray(r->vao);
-    glBindBuffer(GL_ARRAY_BUFFER, r->vbo);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, r->ebo);
-
     //TODO: THIS SHOULD THROW A MASSIVE ERROR
     BOB_Context *context = &bob_state.contexts[r->context];
     if(context->context_memory.memory == NULL) return;
 
-    BOBi_Draw_Call start = BOBi_get_arena_elem(r->batch.draw_call_arena, 0, BOBi_Draw_Call);
-    glBufferSubData(GL_ARRAY_BUFFER, 0, r->batch.num_vertices * sizeof(BOB_Render_Vertex), r->batch.vertex_arena_2.memory); //Copies the data from renderer's triangle data into the vbo
-    glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, r->batch.num_indices * sizeof(uint32_t), r->batch.vertex_arena.memory); //Copies the quad data into the vbo
-
-    //TODO: At the very least make a texture array so we don't keep switching textures, but would also be nice to make an SSBO for the materials
-    for(size_t i = 0; i < r->batch.num_draw_calls; i++) {
-        BOBi_Draw_Call call = BOBi_get_arena_elem(r->batch.draw_call_arena, i, BOBi_Draw_Call);
-        uint32_t mat_index, tex_index;
-        if(!BOBi_get_index_from_handle(call.mat, &mat_index)) return;
-        if(!BOBi_get_index_from_handle(call.tex, &tex_index)) return;
-        glUseProgram(context->material_table[mat_index].shader);
-        //Setting the uniforms
-        for(size_t j = 0; j < context->material_table[mat_index].uniform_count; j++) {
-            BOBi_update_uniform(context->material_table[mat_index].uniforms[j]);
-        }
-
-        //Bind the atlas texture
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, context->texture_table[tex_index].texture);
-
-        glDrawElements(GL_TRIANGLES, call.num_indices, GL_UNSIGNED_INT, (void *)(call.index_offset * sizeof(uint32_t))); //Make the draw call
-    }
+    #ifdef BOB_INCLUDE_GLAD
+    if(context->type == BOB_OPENGL_CONTEXT) BOBi_gl_draw(context, r);
+    #endif //BOB_INCLUDE_GLAD
 }
 
 //Updates the dimensions of the screen that the renderer renders to.
@@ -1409,8 +1613,12 @@ void BOB_renderer_update_dimensions(BOB_Renderer *r, uint32_t width, uint32_t he
         width, 0.0f,         1.0f, 0.0f
     };
 
-    glBindBuffer(GL_ARRAY_BUFFER, r->vbo);
-    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(quadVertices), quadVertices);
+    BOB_Context *context;
+    if(!BOBi_get_context(r->context, &context)) return;
+
+    #ifdef BOB_INCLUDE_GLAD
+    if(context->type == BOB_OPENGL_CONTEXT) BOBi_gl_copy_buffer_data(r->vbo, quadVertices, sizeof(quadVertices));
+    #endif
 }
 
 //================================================== TEXTURE FUNCTIONS ================================================
@@ -1444,21 +1652,13 @@ uint8_t BOB_create_texture(BOB_Context_Handle context, uint32_t width, uint32_t 
     }
 
     intrn_context->texture_table[index].init = 1; //Setting the value to be initialised
-    glGenTextures(1, &intrn_context->texture_table[index].texture);
-    glBindTexture(GL_TEXTURE_2D, intrn_context->texture_table[index].texture);
-    // set the texture wrapping/filtering options (on the currently bound texture object)
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexImage2D(GL_TEXTURE_2D, 0, BOBi_convert_format(format), width, height, 0, BOBi_convert_format(format), GL_UNSIGNED_BYTE, data);
-    glBindTexture(GL_TEXTURE_2D, 0);
-
     intrn_context->texture_table[index].width = width;
     intrn_context->texture_table[index].height = height;
     intrn_context->texture_table[index].format = format;
+
+    #ifdef BOB_INCLUDE_GLAD
+    if(intrn_context->type == BOB_OPENGL_CONTEXT) BOBi_gl_create_tex(&intrn_context->texture_table[index].texture, width, height, data, format);
+    #endif //BOB_INCLUDE_GLAD
 
     intrn_context->num_textures++;
     *tex = ((uint64_t)context << 32) | index;
@@ -1534,47 +1734,16 @@ uint8_t BOB_create_material(BOB_Context_Handle context, BOB_Shader_Data *data, s
             intrn_context->next_mat_slot = UINT32_MAX;
     }
 
-    uint32_t shader_buf[num_shaders]; //Array to store the ids of the loaded shader sub-programs
-    uint32_t s = glCreateProgram();
-
-    //Attaching all of the shaders together
-    for(int i = 0; i < num_shaders; i++) {
-        shader_buf[i] = BOBi_create_shader(data[i]);
-        glAttachShader(s, shader_buf[i]);
-    }
-
-    glLinkProgram(s);
-    int result;
-    char infolog[512];
-
-    //Print errors if any:
-    glGetProgramiv(s, GL_LINK_STATUS, &result);
-    if(!result) {
-        glGetProgramInfoLog(s, 512, NULL, infolog);
-        printf("ERROR::SHADER::LINKING_FAILED\n");
-        for(int i = 0; i < 512; i++){
-            if(infolog[i] == '\0') break;
-            printf("%c", infolog[i]);
-        }
-        printf("\n");
-        *mat |= BOBi_MSB;
-        return 0;
-    }
-
-    //Cleanup
-    for(int i = 0; i < num_shaders; i++) {
-        glDeleteShader(shader_buf[i]);
-    }
+    uint32_t s;
+    BOB_Uniform *temp = malloc(sizeof(BOB_Uniform) * num_uniforms);
+    memcpy(temp, uniforms, num_uniforms * sizeof(BOB_Uniform));
+    #ifdef BOB_INCLUDE_GLAD
+    if(intrn_context->type == BOB_OPENGL_CONTEXT)
+        if(!BOBi_gl_create_material(data, num_shaders, temp, num_uniforms, mat, &s)) return 0;
+    #endif //BOB_INCLUDE_GLAD
 
     intrn_context->material_table[index] = (BOB_Material){.uniform_count = num_uniforms, .shader = s, .init = 1};
 
-    //Setting the uniforms
-    //TODO: Make an arena for this:
-    BOB_Uniform *temp = malloc(sizeof(BOB_Uniform) * num_uniforms);
-    memcpy(temp, uniforms, num_uniforms * sizeof(BOB_Uniform));
-    for(size_t i = 0; i < num_uniforms; i++) {
-        temp[i].location = glGetUniformLocation(s, temp[i].name);
-    }
     intrn_context->material_table[index].uniforms = temp;
 
     intrn_context->num_materials++;
@@ -1897,12 +2066,17 @@ uint8_t BOB_atlas_pack(BOB_Atlas_Handle a, uint8_t* pixels, size_t w, size_t h, 
        context->atlas_table[index].row_height = 0;
     }
 
-    uint32_t tex_index = tex.texture;
-    GLenum gl_format = BOBi_convert_format(context->atlas_table[index].format);
+    BOB_Quad unnormalised = {
+        (float)context->atlas_table[index].cursor_x / tex.width,
+        (float)context->atlas_table[index].cursor_y / tex.height,
+        (float) w,
+        (float) h
+    };
 
-    //Upload the subregion
-    glBindTexture(GL_TEXTURE_2D, tex_index);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, context->atlas_table[index].cursor_x, context->atlas_table[index].cursor_y, w, h, gl_format, GL_UNSIGNED_BYTE, pixels);
+    uint32_t tex_index = tex.texture;
+    #ifdef BOB_INCLUDE_GLAD
+    if(context->type == BOB_OPENGL_CONTEXT) BOBi_gl_copy_data_tex(tex_index, context->atlas_table[index].format, unnormalised, pixels);
+    #endif //BOB_INCLUDE_GLAD
 
     //Compute normalised UVs
     BOB_Quad uv = {
@@ -1951,7 +2125,6 @@ uint8_t BOB_pixelbuffer_init(BOB_Context_Handle context, size_t width, size_t he
             intrn_context->next_pixelbuf_slot = UINT32_MAX;
     }
 
-    intrn_context->pixelbuffer_table[index].init = 1; //Setting the value to be initialised
 
     //Setting up the texture for the pixel simulations:
     if(!BOB_create_texture(context, width, height, NULL, format, &intrn_context->pixelbuffer_table[index].pixel_tex)) {
@@ -1971,15 +2144,12 @@ uint8_t BOB_pixelbuffer_init(BOB_Context_Handle context, size_t width, size_t he
     intrn_context->pixelbuffer_table[index].buf_sz = width * height * pixel_size;
 
     //Setting up the pbo for the pixel simulations
-    glGenBuffers(1, &intrn_context->pixelbuffer_table[index].pbo);
-    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, intrn_context->pixelbuffer_table[index].pbo);
-    glBufferData(GL_PIXEL_UNPACK_BUFFER, intrn_context->pixelbuffer_table[index].buf_sz, NULL, GL_STREAM_DRAW);
-    uint8_t *ptr = glMapBuffer(GL_PIXEL_UNPACK_BUFFER, GL_WRITE_ONLY);
-    if(ptr) {
-        memset(ptr, 0x00, intrn_context->pixelbuffer_table[index].buf_sz); //Setting all of the pixels to be colourless initially
-        glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
-    }
-    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+    #ifdef BOB_INCLUDE_GLAD
+    if(intrn_context->type == BOB_OPENGL_CONTEXT)
+        if(!BOBi_gl_init_pbo(&intrn_context->pixelbuffer_table[index].pbo, intrn_context->pixelbuffer_table[index].buf_sz, pb)) return 0;
+    #endif
+
+    intrn_context->pixelbuffer_table[index].init = 1; //Setting the value to be initialised
 
     intrn_context->num_pixelbuffers++;
     *pb = ((uint64_t)context << 32) | index;
@@ -2021,14 +2191,10 @@ uint8_t BOB_pixelbuffer_updload_data(BOB_PixelBuffer_Handle pb, uint8_t *data) {
     if(!BOBi_get_index_from_handle(context->pixelbuffer_table[pb].pixel_tex, &tex_index)) return 0;
     BOB_Texture tex = context->texture_table[tex_index];
 
-    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, context->pixelbuffer_table[pb].pbo);
-    void* ptr = glMapBuffer(GL_PIXEL_UNPACK_BUFFER, GL_WRITE_ONLY);
-    memcpy(ptr, data, context->pixelbuffer_table[pb].buf_sz);
-    glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
-
-    glBindTexture(GL_TEXTURE_2D, tex.texture);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, tex.width, tex.height, GL_RGB, GL_UNSIGNED_BYTE, 0);
-    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+    #ifdef BOB_INCLUDE_GLAD
+    if(context->type == BOB_OPENGL_CONTEXT)
+        if(!BOBi_gl_copy_pbo(context->pixelbuffer_table[index].pbo, context->pixelbuffer_table[index].buf_sz, tex.texture, tex.width, tex.height, data)) return 0;
+    #endif
     return 1;
 }
 
@@ -2040,11 +2206,11 @@ uint8_t BOB_pixelbuffer_get_data(BOB_PixelBuffer_Handle pb, uint8_t *dest) {
     uint32_t index;
     if(!BOBi_get_handle_data(pb, &context, &index)) return 0;
 
-    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, context->pixelbuffer_table[index].pbo);
-    void* ptr = glMapBuffer(GL_PIXEL_UNPACK_BUFFER, GL_READ_ONLY);
-    memcpy(dest, ptr, context->pixelbuffer_table[index].buf_sz);
-    glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
-    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+    #ifdef BOB_INCLUDE_GLAD
+    if(context->type == BOB_OPENGL_CONTEXT)
+        if(!BOBi_gl_get_pbo_data(context->pixelbuffer_table[index].pbo, context->pixelbuffer_table[index].buf_sz, dest)) return 0;
+    #endif
+
     return 1;
 }
 
@@ -2346,11 +2512,9 @@ uint8_t BOB_draw_pixel_buffer_channel(BOB_Renderer *r, BOB_PixelBuffer_Handle pb
     if(!BOBi_clip_quad(r, &dimensions)) return 1; //Early exit
     BOB_Texture tex = context->texture_table[context->pixelbuffer_table[index].pixel_tex];
 
-    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, context->pixelbuffer_table[index].pbo);
-    glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
-    glBindTexture(GL_TEXTURE_2D, tex.texture);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, tex.width, tex.height, GL_RGB, GL_UNSIGNED_BYTE, 0);
-    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+    #ifdef BOB_INCLUDE_GLAD
+    if(context->type == BOB_OPENGL_CONTEXT) BOBi_gl_upload_pbo_data(context->pixelbuffer_table[index].pbo, tex.texture, tex.width, tex.height);
+    #endif //BOB_INCLUDE_GLAD
 
     return BOB_draw_texture_channel(r, context->pixelbuffer_table[index].pixel_tex, dimensions, uv_dimensions, colour, layer, rotation, mat, channel);
 }
