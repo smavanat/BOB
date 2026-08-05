@@ -8,11 +8,38 @@
 
 #ifdef BOB_INCLUDE_GLAD
 #include <glad/glad.h>
+
+typedef struct {
+    uint32_t texture;
+} BOBi_OpenGL_Texture;
 #endif // BOB_INCLUDE_GLAD
 
 #ifdef BOB_INCLUDE_VULKAN
 #include <vulkan/vulkan.h>
 #include <vulkan/vulkan_core.h>
+
+#define MAX_FRAMES_IN_FLIGHT 2
+
+typedef struct {
+    VkBuffer buffer;
+    VkDeviceMemory memory;
+} BOBi_Vulkan_Buffer;
+
+typedef struct {
+    VkImage image;
+    VkImageView view;
+    VkDeviceMemory memory;
+} BOBi_Vulkan_Image;
+
+typedef struct {
+    VkSemaphore present_complete_semaphore;
+    VkFence draw_fence;
+    VkSemaphore render_finished_semaphore;
+    VkCommandBuffer command_buffer;
+    BOBi_Vulkan_Buffer uniform_buffer;
+    void *uniform_buffer_mapped;
+} BOBi_Vulkan_Frame_Resources;
+
 #endif // BOB_INCLUDE_VULKAN
 
 #ifndef BOB_ASSERT
@@ -103,12 +130,25 @@ typedef enum {
 
 typedef struct BOBi_Context_t BOB_Context;
 #ifdef BOB_INCLUDE_GLAD
-uint8_t BOB_create_opengl_context(GLADloadproc proc, size_t atlas_capacity, size_t pixelbuf_capacity,
+uint8_t BOB_create_opengl_context(size_t atlas_capacity, size_t pixelbuf_capacity,
                            size_t tex_capacity, size_t mat_capacity, size_t font_capacity, BOB_Context_Handle *context);
 #endif //BOB_INCLUDE_GLAD
+#ifdef BOB_INCLUDE_VULKAN
+uint8_t BOB_create_vulkan_context(size_t atlas_capacity, size_t pixelbuf_capacity,
+                           size_t tex_capacity, size_t mat_capacity, size_t font_capacity, size_t width, size_t height, BOB_Context_Handle *context);
+#endif //BOB_INCLUDE_VULKAN
 void BOB_destroy_context(BOB_Context_Handle *context);
 
-uint8_t BOB_init(size_t num_contexts, size_t num_renderers);
+#ifdef BOB_INCLUDE_GLAD
+#ifdef BOB_INCLUDE_VULKAN
+uint8_t BOB_init(GLADloadproc proc, const char **required_extensions, size_t num_extensions, size_t num_contexts, size_t num_renderers);
+#else
+uint8_t BOB_init(GLADloadproc proc, size_t num_contexts, size_t num_renderers);
+#endif // BOB_INCLUDE_VULKAN
+#else
+ifdef BOB_INCLUDE_VULKAN
+uint8_t BOB_init(const char **required_extensions, size_t num_extensions, size_t num_contexts, size_t num_renderers);
+#endif //BOB_INCLUDE_GLAD
 void BOB_terminate(void);
 
 typedef struct {
@@ -153,7 +193,15 @@ typedef enum {
 } BOB_Format;
 
 typedef struct {
-    uint32_t texture, width, height;
+    union {
+        #ifdef BOB_INCLUDE_VULKAN
+        BOBi_Vulkan_Image vulkan;
+        #endif
+        #ifdef BOB_INCLUDE_GLAD
+        BOBi_OpenGL_Texture opengl;
+        #endif
+    };
+    uint32_t width, height;
     BOB_Format format;
     uint8_t init;
 } BOB_Texture;
@@ -263,6 +311,9 @@ uint8_t get_uniform(BOB_Material_Handle mat, char *name, BOB_Uniform_Handle *uni
 typedef struct {
     BOB_Uniform *uniforms;
     size_t uniform_count;
+    #ifdef BOB_INCLUDE_VULKAN
+    VkSampler sampler;
+    #endif //BOB_INCLUDE_VULKAN
     uint32_t shader;
     uint8_t init;
 } BOB_Material;
@@ -328,9 +379,23 @@ typedef struct {
     BOB_Material_Handle default_mat; //Default material this renderer uses
     BOB_Context_Handle context; //The BOB_Context within which this renderer operates
 
+    #ifdef BOB_INCLUDE_VULKAN
+    BOBi_Vulkan_Buffer vertex_buffer;
+    BOBi_Vulkan_Buffer index_buffer;
+
+    //Pipeline
+    VkPipelineLayout layout;
+    VkPipeline pipeline;
+    VkDescriptorSetLayout descriptor_set_layout;
+    VkDescriptorPool descriptor_pool;
+    VkDescriptorSet descriptor_set[MAX_FRAMES_IN_FLIGHT];
+    #endif //BOB_INCLUDE_VULKAN
+
+    #ifdef BOB_INCLUDE_GLAD
     uint32_t vao; //vao this renderer uses
     uint32_t vbo; //vbo this renderer uses
     uint32_t ebo; //ebo this renderer uses
+    #endif //BOB_INCLUDE_GLAD
 
     uint32_t screen_height;
     uint32_t screen_width;
