@@ -3,8 +3,27 @@
 #include <stdint.h>
 #include <stddef.h>
 
+//TODO: Vulkan support
+//      Use macros to hide getting index and context from a handle and finding index where next object is placed
+//      Add semaphores/mutexes when getting a context from renderers/objects -> look at osn notes on readers/writers problem
+//      Do proper error reporting and document what each error code means somewhere
+//
+//      Allow the user to define render passes -> Custom framebuffers
+//      Allow the user to define their own pipeline and sampler layout
+//      Allow the user to select what kind of device you want vulkan to use
+//      Maybe allow custom vertex layout
+//      Debug mode with statistics
+
 #define BOB_INCLUDE_GLAD
 #define BOB_INCLUDE_VULKAN
+
+typedef uint64_t BOB_Texture_Handle;
+typedef uint64_t BOB_Material_Handle;
+typedef uint64_t BOB_Atlas_Handle;
+typedef uint64_t BOB_PixelBuffer_Handle;
+typedef uint64_t BOB_Uniform_Handle;
+typedef uint64_t BOB_Font_Handle;
+typedef uint32_t BOB_Context_Handle;
 
 #ifdef BOB_INCLUDE_GLAD
 #include <glad/glad.h>
@@ -36,10 +55,13 @@ typedef struct {
     VkFence draw_fence;
     VkSemaphore render_finished_semaphore;
     VkCommandBuffer command_buffer;
-    BOBi_Vulkan_Buffer uniform_buffer;
-    void *uniform_buffer_mapped;
 } BOBi_Vulkan_Frame_Resources;
 
+//Callback function to create the vulkan surface used to represent the window
+typedef uint8_t (*BOB_vk_create_surface)(VkInstance, VkSurfaceKHR *);
+
+//Can only be done in Vulkan contexts
+void BOB_create_pipeline(BOB_Context_Handle context);
 #endif // BOB_INCLUDE_VULKAN
 
 #ifndef BOB_ASSERT
@@ -47,32 +69,6 @@ typedef struct {
 #define BOB_ASSERT assert
 #endif //BOB_ASSERT
 
-//NOTE: FUNCTIONS WITH OPENGL CODE:
-//BOBi_update_uniform
-//BOBi_convert_format
-//BOBi_create_shader
-//BOBi_texture_free
-//BOBi_pixelbuffer_free
-//BOBi_material_free
-//BOB_clear_colour
-//BOB_init
-//BOB_renderer_init
-//BOB_renderer_free
-//BOB_render_end
-//BOB_renderer_update_dimensions
-//BOB_create_texture
-//BOB_create_material
-//BOB_atlas_pack
-//BOB_pixelbuffer_init
-//BOB_pixelbuffer_upload_data
-//BOB_pixelbuffer_get_data
-//BOB_draw_pixelbuffer_channel
-
-//TODO: Vulkan support
-//      Do proper error reporting and document what each error code means somewhere
-//      Allow the user to define render passes -> Custom framebuffers
-//      Maybe allow custom vertex layout?
-//      Debug mode with statistics
 typedef struct {
     float m[4][4];
 } BOB_Mat4;
@@ -85,8 +81,6 @@ typedef struct {
 #define BOB_VERTICIES_PER_TRIANGLE 3
 #define BOB_INDECIES_PER_QUAD 6
 #define BOB_INDECIES_PER_TRIANGLE 3
-#define BOB_INIT_VERTEX_CAPACITY BOB_INIT_QUADS * BOB_VERTICIES_PER_QUAD + BOB_INIT_TRIANGLES * BOB_VERTICIES_PER_TRIANGLE
-#define BOB_INIT_INDEX_CAPACITY BOB_INIT_QUADS * BOB_INDECIES_PER_QUAD + BOB_INIT_TRIANGLES * BOB_INDECIES_PER_TRIANGLE
 #define BOB_INVALID_TEX_INDEX 1248
 #define BOB_CIRCLE_LINE_SEGMENTS 64 //Number of line segments that make up the circumference of a circle
 #define BOB_MAX_VERTEX_CAPACITY 1048576
@@ -99,14 +93,8 @@ typedef struct {
 #define BOB_MAX_DRAW_CALL_CAPACITY BOB_MAX_VERTEX_CAPACITY / 3 //Since minimum number of vertices in a draw call is 3
 #define INIT_STACK_CAPACITY 64
 #define BOB_MAX_LAYER 1024
-
-typedef uint64_t BOB_Texture_Handle;
-typedef uint64_t BOB_Material_Handle;
-typedef uint64_t BOB_Atlas_Handle;
-typedef uint64_t BOB_PixelBuffer_Handle;
-typedef uint64_t BOB_Uniform_Handle;
-typedef uint64_t BOB_Font_Handle;
-typedef uint32_t BOB_Context_Handle;
+#define BOB_MAX_SHADERS 32
+#define BOB_MAX_UNIFORMS 64
 
 typedef struct BOBi_Arena_t BOBi_Arena;
 
@@ -122,10 +110,13 @@ void *BOB_arena_alloc(BOBi_Arena *arena, size_t size, size_t alignment);
 void BOB_arena_clear(BOBi_Arena *arena);
 
 typedef enum {
-    BOB_VULKAN_CONTEXT,
     #ifdef BOB_INCLUDE_GLAD
     BOB_OPENGL_CONTEXT,
     #endif //BOB_INCLUDE_GLAD
+    #ifdef BOB_INCLUDE_VULKAN
+    BOB_VULKAN_CONTEXT,
+    #endif //BOB_INCLUDE_VULKAN
+    BOB_NUM_CONTEXTS,
 } BOB_Context_Type;
 
 typedef struct BOBi_Context_t BOB_Context;
@@ -134,8 +125,8 @@ uint8_t BOB_create_opengl_context(size_t atlas_capacity, size_t pixelbuf_capacit
                            size_t tex_capacity, size_t mat_capacity, size_t font_capacity, BOB_Context_Handle *context);
 #endif //BOB_INCLUDE_GLAD
 #ifdef BOB_INCLUDE_VULKAN
-uint8_t BOB_create_vulkan_context(size_t atlas_capacity, size_t pixelbuf_capacity,
-                           size_t tex_capacity, size_t mat_capacity, size_t font_capacity, size_t width, size_t height, BOB_Context_Handle *context);
+uint8_t BOB_create_vulkan_context(BOB_Context_Type type, size_t atlas_capacity, size_t pixelbuf_capacity, size_t tex_capacity, size_t mat_capacity,
+                            size_t font_capacity, size_t width, size_t height, BOB_Context_Handle *context, BOB_vk_create_surface surface_func);
 #endif //BOB_INCLUDE_VULKAN
 void BOB_destroy_context(BOB_Context_Handle *context);
 
@@ -222,10 +213,19 @@ typedef struct {
 uint8_t BOB_pixelbuffer_init(BOB_Context_Handle context, size_t width, size_t height, BOB_Format format, BOB_PixelBuffer_Handle *pb);
 //Frees the data used by a pixel buffer
 void BOB_pixelbuffer_free(BOB_PixelBuffer_Handle *pb);
-//Draws a frame straight to a texture by uploading it to a pixel buffer
-uint8_t BOB_pixelbuffer_updload_data(BOB_PixelBuffer_Handle pb, uint8_t *data);
+//Binds the pixelbuffers gpu memory to cpu memory. This can currently only be done by one pixelbuffer at a time
+//TODO: See if we can support multiple buffers having their gpu memory bound to cpu memory
+uint8_t BOB_bind_pixelbuffer_memory(BOB_PixelBuffer_Handle pb);
+//Unbinds the pixelbuffer's gpu memory from cpu space
+void BOB_unbind_pixelbuffer_memory(BOB_PixelBuffer_Handle pb);
+//NOTE: The following three functions must be called between BOB_bind_pixelbuffer_memory and BOB_unbind_pixelbuffer_memory otherwise they will fail/cause undefined behaviour
+
+//Updates the pixel data stored in a pixelbuffer
+void BOB_pixelbuffer_send_data(BOB_PixelBuffer_Handle pb, uint8_t *data, size_t data_sz);
 //Gets the pixel data from a PixelBuffer
-uint8_t BOB_pixelbuffer_get_data(BOB_PixelBuffer_Handle pb, uint8_t *dest);
+void BOB_pixelbuffer_get_data(BOB_PixelBuffer_Handle pb, uint8_t *dest, size_t data_sz);
+//Uploads the pixel data from the pixelbuffer into its associated texture
+void BOB_pixelbuffer_updload(BOB_PixelBuffer_Handle pb);
 BOB_PixelBuffer *BOB_get_pixelbuf_ref(BOB_PixelBuffer_Handle pb);
 
 typedef struct {
@@ -256,6 +256,8 @@ typedef enum {
 //NOTE: string passed as shader_code must be null-terminated
 typedef struct {
     const char *shader_code;
+    const char *entrypoint_name;
+    size_t code_buf_sz;
     BOB_Shader_Type type;
 } BOB_Shader_Data;
 
@@ -270,6 +272,8 @@ typedef enum {
     BOB_UNIFORM_MAT4,
 } BOB_Uniform_Type;
 
+//TODO: Make this struct hidden and create a public one that
+//only holds name, value, and type, not any api specific stuff. Won't matter since we memcpy everything anyway
 typedef struct {
     const char *name;
     union {
@@ -283,9 +287,24 @@ typedef struct {
         BOB_Mat4 mat4;
         const void *ptr;
     };
+    union {
+        #ifdef BOB_INCLUDE_GLAD
+        struct {
+            int32_t location;
+        } opengl;
+        #endif //BOB_INCLUDE_GLAD
+        #ifdef BOB_INCLUDE_VULKAN
+        struct {
+            union {
+                uint32_t binding;
+                uint32_t offset;
+            };
+            VkShaderStageFlags stage; //TODO: Make these settable by the user using an API enum
+        } vulkan;
+        #endif //BOB_INCLUDE_VULKAN
+    };
 
     BOB_Uniform_Type type;
-    int32_t location;
     uint8_t is_reference;
 } BOB_Uniform;
 
@@ -308,13 +327,30 @@ typedef struct {
 
 uint8_t get_uniform(BOB_Material_Handle mat, char *name, BOB_Uniform_Handle *uniform);
 
+//TODO: Make the shader/pipeline independent of the material?
+//      Only when we add other stuff to the material like blend modes etc
+//      Because right now the material is the shader
 typedef struct {
     BOB_Uniform *uniforms;
     size_t uniform_count;
-    #ifdef BOB_INCLUDE_VULKAN
-    VkSampler sampler;
-    #endif //BOB_INCLUDE_VULKAN
-    uint32_t shader;
+    union {
+        #ifdef BOB_INCLUDE_GLAD
+        struct {
+            uint32_t shader;
+        } opengl;
+        #endif //BOB_INCLUDE_GLAD
+        #ifdef BOB_INCLUDE_VULKAN
+        struct {
+            VkPipelineLayout layout;
+            VkPipeline pipeline;
+            VkDescriptorSetLayout descriptor_set_layout;
+            VkDescriptorSet descriptor_set;
+            BOBi_Vulkan_Buffer uniform_buffer;
+            void *uniform_buffer_mapped;
+            uint32_t uniform_binding;
+        } vulkan;
+        #endif //BOB_INCLUDE_VULKAN
+    };
     uint8_t init;
 } BOB_Material;
 
@@ -384,11 +420,6 @@ typedef struct {
     BOBi_Vulkan_Buffer index_buffer;
 
     //Pipeline
-    VkPipelineLayout layout;
-    VkPipeline pipeline;
-    VkDescriptorSetLayout descriptor_set_layout;
-    VkDescriptorPool descriptor_pool;
-    VkDescriptorSet descriptor_set[MAX_FRAMES_IN_FLIGHT];
     #endif //BOB_INCLUDE_VULKAN
 
     #ifdef BOB_INCLUDE_GLAD
@@ -472,7 +503,8 @@ uint8_t BOB_draw_pixel_buffer_channel(BOB_Renderer *r, BOB_PixelBuffer_Handle pb
 //Determines the projection matrix
 void BOB_ortho(float left, float right, float bottom, float top, float nearZ, float farZ, BOB_Mat4 *dest);
 //Clears the collur of the screen
-void BOB_clear_colour(BOB_Context_Handle context, BOB_Vector4 colour);
+void BOB_begin_frame(BOB_Context_Handle context, BOB_Vector4 colour);
+void BOB_end_frame(BOB_Context_Handle context);
 //Converts an angle in degrees to radians
 float BOB_degrees_to_radians(float angle);
 

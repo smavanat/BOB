@@ -80,9 +80,12 @@ struct BOBi_Context_t {
     BOB_Material *material_table;
     BOB_Font *font_table;
 
+    void *mapped_mem_ptr; //Pointer to cpu memory mapped from gpu memory
+
     //Vulkan members
+    //TODO: Turn this into a union so that other backends can be added
     #ifdef BOB_INCLUDE_VULKAN
-    BOBi_Vulkan_Frame_Resources resources[MAX_FRAMES_IN_FLIGHT]; //Frames in flight
+    BOBi_Vulkan_Frame_Resources resources; //Frames in flight
 
     //Device management
     VkPhysicalDevice phy_device;
@@ -98,12 +101,16 @@ struct BOBi_Context_t {
     VkSurfaceFormatKHR format;
     VkExtent2D extent;
     uint32_t num_images;
+    uint32_t next_swapchain_image_index;
 
     VkCommandPool command_pool;
 
     BOBi_Vulkan_Image depth;
     uint8_t framebuffer_resized;
-    uint8_t frame_index;
+
+    //Pipeline stuff
+    VkSampler sampler;
+    VkDescriptorPool descriptor_pool;
     #endif
 
     size_t num_atlases;
@@ -173,8 +180,8 @@ uint8_t BOBi_get_context(BOB_Context_Handle handle, BOB_Context **out) {
     return 1;
 }
 
-uint8_t BOBi_create_context(BOB_Context_Type type, size_t atlas_capacity, size_t pixelbuf_capacity,
-                           size_t tex_capacity, size_t mat_capacity, size_t font_capacity, size_t width, size_t height, BOB_Context_Handle *context);
+uint8_t BOBi_create_context(BOB_Context_Type type, size_t atlas_capacity, size_t pixelbuf_capacity, size_t tex_capacity, size_t mat_capacity,
+                            size_t font_capacity, size_t width, size_t height, BOB_Context_Handle *context);
 
 typedef enum {
     BOBi_DRAW_QUAD,
@@ -254,35 +261,134 @@ int BOBi_read_to_end(char const *path, uint8_t **buf, uint8_t add_null) {
 void BOBi_gl_update_uniform(BOB_Uniform uniform) {
     switch(uniform.type) {
         case BOB_UNIFORM_FLOAT:
-            glUniform1f(uniform.location, (uniform.is_reference) ? *(float *)uniform.ptr : uniform.f);
+            glUniform1f(uniform.opengl.location, (uniform.is_reference) ? *(float *)uniform.ptr : uniform.f);
             break;
         case BOB_UNIFORM_UNSIGNED_INT:
-            glUniform1ui(uniform.location, (uniform.is_reference) ? *(uint32_t *)uniform.ptr : uniform.u32);
+            glUniform1ui(uniform.opengl.location, (uniform.is_reference) ? *(uint32_t *)uniform.ptr : uniform.u32);
             break;
         case BOB_UNIFORM_SIGNED_INT:
-            glUniform1i(uniform.location, (uniform.is_reference) ? *(int32_t *)uniform.ptr : uniform.i32);
+            glUniform1i(uniform.opengl.location, (uniform.is_reference) ? *(int32_t *)uniform.ptr : uniform.i32);
             break;
         case BOB_UNIFORM_VEC2:
-            glUniform2fv(uniform.location, 1, (uniform.is_reference) ? &(*(BOB_Vector2 *)uniform.ptr).x : &uniform.vec2.x);
+            glUniform2fv(uniform.opengl.location, 1, (uniform.is_reference) ? &(*(BOB_Vector2 *)uniform.ptr).x : &uniform.vec2.x);
             break;
         case BOB_UNIFORM_VEC3:
-            glUniform3fv(uniform.location, 1, (uniform.is_reference) ? &(*(BOB_Vector3 *)uniform.ptr).x : &uniform.vec3.x);
+            glUniform3fv(uniform.opengl.location, 1, (uniform.is_reference) ? &(*(BOB_Vector3 *)uniform.ptr).x : &uniform.vec3.x);
             break;
         case BOB_UNIFORM_VEC4:
-            glUniform4fv(uniform.location, 1, (uniform.is_reference) ? &(*(BOB_Vector4 *)uniform.ptr).x : &uniform.vec4.x);
+            glUniform4fv(uniform.opengl.location, 1, (uniform.is_reference) ? &(*(BOB_Vector4 *)uniform.ptr).x : &uniform.vec4.x);
             break;
         case BOB_UNIFORM_TEXTURE: {
             BOB_Texture_Handle handle = (uniform.is_reference) ? *(BOB_Texture_Handle *)uniform.ptr : uniform.tex_index;
             BOB_Context *context;
             uint32_t index;
             if(BOBi_get_handle_data(handle, &context, &index)) return;
-            glUniform1i(uniform.location, context->texture_table[index].opengl.texture);
+            glUniform1i(uniform.opengl.location, context->texture_table[index].opengl.texture);
             break;
         }
         case BOB_UNIFORM_MAT4:
-            glUniformMatrix4fv(uniform.location, 1, GL_FALSE, (uniform.is_reference) ? (float *)(*(BOB_Mat4 *)uniform.ptr).m : (float *)uniform.mat4.m);
+            glUniformMatrix4fv(uniform.opengl.location, 1, GL_FALSE, (uniform.is_reference) ? (float *)(*(BOB_Mat4 *)uniform.ptr).m : (float *)uniform.mat4.m);
             break;
     }
+}
+
+void BOBi_gl_delete_texture(BOB_Context *context, uint32_t tex_index) {
+    if(context->texture_table[tex_index].init)
+        glDeleteTextures(1, &context->texture_table[tex_index].opengl.texture);
+}
+
+void BOBi_gl_delete_buffer(BOB_Context *context, uint32_t buf_index) {
+    if(context->pixelbuffer_table[buf_index].init)
+        glDeleteBuffers(1, &context->pixelbuffer_table[buf_index].pbo);
+}
+
+void BOBi_gl_delete_program(BOB_Context *context, uint32_t program_index) {
+    if(context->material_table[program_index].init)
+        glDeleteProgram(context->material_table[program_index].opengl.shader);
+}
+
+uint8_t BOBi_gl_clear_color(BOB_Context *context, BOB_Vector4 colour) {
+    glClearColor(colour.x, colour.y, colour.z, colour.w);
+    glClearDepth(1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT); //Need to clear the depth buffer as well
+    return 1;
+}
+
+uint8_t BOB_create_opengl_context(size_t atlas_capacity, size_t pixelbuf_capacity,
+                           size_t tex_capacity, size_t mat_capacity, size_t font_capacity, BOB_Context_Handle *context) {
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LEQUAL);
+    glClearDepth(1.0);
+
+    return BOBi_create_context(BOB_OPENGL_CONTEXT, atlas_capacity, pixelbuf_capacity, tex_capacity, mat_capacity, font_capacity, 0, 0, context);
+}
+
+void BOBi_gl_init_gpu_renderer_mem(BOB_Context *context, BOB_Renderer *r, size_t vert_buf_sz, size_t index_buf_sz) {
+    glGenVertexArrays(1, &r->vao);
+    glBindVertexArray(r->vao);
+
+    //Getting the vbo
+    glGenBuffers(1, &r->vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, r->vbo);
+    glBufferData(GL_ARRAY_BUFFER, vert_buf_sz, NULL, GL_DYNAMIC_DRAW);
+
+    //Getting the ebo
+    glGenBuffers(1, &r->ebo);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, r->ebo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, index_buf_sz, NULL, GL_DYNAMIC_DRAW);
+
+    glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, sizeof(BOB_Render_Vertex), (void *)offsetof(BOB_Render_Vertex, colour)); //Vertex Colour
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(BOB_Render_Vertex), (void *)offsetof(BOB_Render_Vertex, pos)); //Vertex Position
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(BOB_Render_Vertex), (void *)offsetof(BOB_Render_Vertex, uv)); //UV
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(3, 1, GL_UNSIGNED_BYTE, GL_FALSE, sizeof(BOB_Render_Vertex), (void *)offsetof(BOB_Render_Vertex, flags));
+    glEnableVertexAttribArray(3);
+}
+
+void BOBi_gl_destroy_renderer_mem(BOB_Context *context, BOB_Renderer *r) {
+    glDeleteBuffers(1, &r->vbo);
+    glDeleteVertexArrays(1, &r->vao);
+}
+
+uint8_t BOBi_gl_draw(BOB_Context *context, BOB_Renderer *r) {
+    //Bind all of the arrays and buffers we will reuse over time
+    glBindVertexArray(r->vao);
+    glBindBuffer(GL_ARRAY_BUFFER, r->vbo);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, r->ebo);
+
+    BOBi_Draw_Call start = BOBi_get_arena_elem(r->batch.draw_call_arena, 0, BOBi_Draw_Call);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, r->batch.num_vertices * sizeof(BOB_Render_Vertex), r->batch.vertex_arena_2.memory); //Copies the data from renderer's triangle data into the vbo
+    glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, r->batch.num_indices * sizeof(uint32_t), r->batch.vertex_arena.memory); //Copies the quad data into the vbo
+
+    //TODO: At the very least make a texture array so we don't keep switching textures, but would also be nice to make an SSBO for the materials
+    for(size_t i = 0; i < r->batch.num_draw_calls; i++) {
+        BOBi_Draw_Call call = BOBi_get_arena_elem(r->batch.draw_call_arena, i, BOBi_Draw_Call);
+        uint32_t mat_index, tex_index;
+        if(!BOBi_get_index_from_handle(call.mat, &mat_index)) return 0;
+        if(!BOBi_get_index_from_handle(call.tex, &tex_index)) return 0;
+        glUseProgram(context->material_table[mat_index].opengl.shader);
+        //Setting the uniforms
+        for(size_t j = 0; j < context->material_table[mat_index].uniform_count; j++) {
+            BOBi_gl_update_uniform(context->material_table[mat_index].uniforms[j]);
+        }
+
+        //Bind the atlas texture
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, context->texture_table[tex_index].opengl.texture);
+
+        glDrawElements(GL_TRIANGLES, call.num_indices, GL_UNSIGNED_INT, (void *)(call.index_offset * sizeof(uint32_t))); //Make the draw call
+    }
+
+    return 1;
+}
+
+void BOBi_gl_copy_buffer_data(BOB_Context *context, BOB_Renderer *r, void *data, size_t data_sz) {
+    glBindBuffer(GL_ARRAY_BUFFER, r->vao);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, data_sz, data);
 }
 
 uint32_t BOBi_gl_convert_format(BOB_Format format) {
@@ -292,6 +398,24 @@ uint32_t BOBi_gl_convert_format(BOB_Format format) {
         case BOB_RGB: return GL_RGB;
         case BOB_RGBA: return GL_RGBA;
     }
+}
+
+uint8_t BOBi_gl_create_tex(BOB_Context *context, uint32_t tex_index, size_t width, size_t height, uint8_t *data, BOB_Format format) {
+    uint32_t *tex = &context->texture_table[tex_index].opengl.texture;
+
+    glGenTextures(1, tex);
+    glBindTexture(GL_TEXTURE_2D, *tex);
+    // set the texture wrapping/filtering options (on the currently bound texture object)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, BOBi_gl_convert_format(format), width, height, 0, BOBi_gl_convert_format(format), GL_UNSIGNED_BYTE, data);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    return 1;
 }
 
 uint32_t BOBi_gl_create_shader(BOB_Shader_Data s) {
@@ -327,134 +451,31 @@ uint32_t BOBi_gl_create_shader(BOB_Shader_Data s) {
     return shader;
 }
 
-void BOBi_gl_delete_texture(uint32_t *tex) {
-    glDeleteTextures(1, tex);
-}
-
-void BOBi_gl_delete_buffer(uint32_t *buf) {
-    glDeleteBuffers(1, buf);
-}
-
-void BOBi_gl_delete_program(uint32_t program) {
-    glDeleteProgram(program);
-}
-
-void BOBi_gl_clear_color(BOB_Vector4 colour) {
-    glClearColor(colour.x, colour.y, colour.z, colour.w);
-    glClearDepth(1.0f);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT); //Need to clear the depth buffer as well
-}
-
-uint8_t BOB_create_opengl_context(size_t atlas_capacity, size_t pixelbuf_capacity,
-                           size_t tex_capacity, size_t mat_capacity, size_t font_capacity, BOB_Context_Handle *context) {
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glEnable(GL_DEPTH_TEST);
-    glDepthFunc(GL_LEQUAL);
-    glClearDepth(1.0);
-
-    return BOBi_create_context(BOB_OPENGL_CONTEXT, atlas_capacity, pixelbuf_capacity, tex_capacity, mat_capacity, font_capacity, 0, 0, context);
-}
-
-void BOBi_gl_init_gpu_renderer_mem(BOB_Renderer *r, size_t vert_buf_sz, size_t index_buf_sz) {
-    glGenVertexArrays(1, &r->vao);
-    glBindVertexArray(r->vao);
-
-    //Getting the vbo
-    glGenBuffers(1, &r->vbo);
-    glBindBuffer(GL_ARRAY_BUFFER, r->vbo);
-    glBufferData(GL_ARRAY_BUFFER, vert_buf_sz, NULL, GL_DYNAMIC_DRAW);
-
-    //Getting the ebo
-    glGenBuffers(1, &r->ebo);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, r->ebo);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, index_buf_sz, NULL, GL_DYNAMIC_DRAW);
-
-    glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, sizeof(BOB_Render_Vertex), (void *)offsetof(BOB_Render_Vertex, colour)); //Vertex Colour
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(BOB_Render_Vertex), (void *)offsetof(BOB_Render_Vertex, pos)); //Vertex Position
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(BOB_Render_Vertex), (void *)offsetof(BOB_Render_Vertex, uv)); //UV
-    glEnableVertexAttribArray(2);
-    glVertexAttribPointer(3, 1, GL_UNSIGNED_BYTE, GL_FALSE, sizeof(BOB_Render_Vertex), (void *)offsetof(BOB_Render_Vertex, flags));
-    glEnableVertexAttribArray(3);
-}
-
-void BOBi_gl_draw(BOB_Context *context, BOB_Renderer *r) {
-    //Bind all of the arrays and buffers we will reuse over time
-    glBindVertexArray(r->vao);
-    glBindBuffer(GL_ARRAY_BUFFER, r->vbo);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, r->ebo);
-
-    BOBi_Draw_Call start = BOBi_get_arena_elem(r->batch.draw_call_arena, 0, BOBi_Draw_Call);
-    glBufferSubData(GL_ARRAY_BUFFER, 0, r->batch.num_vertices * sizeof(BOB_Render_Vertex), r->batch.vertex_arena_2.memory); //Copies the data from renderer's triangle data into the vbo
-    glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, r->batch.num_indices * sizeof(uint32_t), r->batch.vertex_arena.memory); //Copies the quad data into the vbo
-
-    //TODO: At the very least make a texture array so we don't keep switching textures, but would also be nice to make an SSBO for the materials
-    for(size_t i = 0; i < r->batch.num_draw_calls; i++) {
-        BOBi_Draw_Call call = BOBi_get_arena_elem(r->batch.draw_call_arena, i, BOBi_Draw_Call);
-        uint32_t mat_index, tex_index;
-        if(!BOBi_get_index_from_handle(call.mat, &mat_index)) return;
-        if(!BOBi_get_index_from_handle(call.tex, &tex_index)) return;
-        glUseProgram(context->material_table[mat_index].shader);
-        //Setting the uniforms
-        for(size_t j = 0; j < context->material_table[mat_index].uniform_count; j++) {
-            BOBi_gl_update_uniform(context->material_table[mat_index].uniforms[j]);
-        }
-
-        //Bind the atlas texture
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, context->texture_table[tex_index].opengl.texture);
-
-        glDrawElements(GL_TRIANGLES, call.num_indices, GL_UNSIGNED_INT, (void *)(call.index_offset * sizeof(uint32_t))); //Make the draw call
-    }
-}
-
-void BOBi_gl_copy_buffer_data(uint32_t buf, void *data, size_t data_sz) {
-    glBindBuffer(GL_ARRAY_BUFFER, buf);
-    glBufferSubData(GL_ARRAY_BUFFER, 0, data_sz, data);
-}
-
-void BOBi_gl_create_tex(uint32_t *tex, size_t width, size_t height, uint8_t *data, BOB_Format format) {
-    glGenTextures(1, tex);
-    glBindTexture(GL_TEXTURE_2D, *tex);
-    // set the texture wrapping/filtering options (on the currently bound texture object)
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexImage2D(GL_TEXTURE_2D, 0, BOBi_gl_convert_format(format), width, height, 0, BOBi_gl_convert_format(format), GL_UNSIGNED_BYTE, data);
-    glBindTexture(GL_TEXTURE_2D, 0);
-}
-
-uint8_t BOBi_gl_create_material(BOB_Shader_Data *data, size_t num_shaders, BOB_Uniform *uniforms, size_t num_uniforms, BOB_Material_Handle *mat, uint32_t *shader) {
-    //TODO: Figure out how to get rid of this VLA without using malloc
-    uint32_t shader_buf[num_shaders]; //Array to store the ids of the loaded shader sub-programs
-    *shader = glCreateProgram();
+uint8_t BOBi_gl_create_material(BOB_Context *context, uint32_t index, BOB_Shader_Data *data, size_t num_shaders) {
+    BOB_Material *intrn_mat = &context->material_table[index];
+    uint32_t shader_buf[BOB_MAX_SHADERS]; //Array to store the ids of the loaded shader sub-programs
+    intrn_mat->opengl.shader = glCreateProgram();
 
     //Attaching all of the shaders together
     for(int i = 0; i < num_shaders; i++) {
         shader_buf[i] = BOBi_gl_create_shader(data[i]);
-        glAttachShader(*shader, shader_buf[i]);
+        glAttachShader(intrn_mat->opengl.shader, shader_buf[i]);
     }
 
-    glLinkProgram(*shader);
+    glLinkProgram(intrn_mat->opengl.shader);
     int result;
     char infolog[512];
 
     //Print errors if any:
-    glGetProgramiv(*shader, GL_LINK_STATUS, &result);
+    glGetProgramiv(intrn_mat->opengl.shader, GL_LINK_STATUS, &result);
     if(!result) {
-        glGetProgramInfoLog(*shader, 512, NULL, infolog);
+        glGetProgramInfoLog(intrn_mat->opengl.shader, 512, NULL, infolog);
         printf("ERROR::SHADER::LINKING_FAILED\n");
         for(int i = 0; i < 512; i++){
             if(infolog[i] == '\0') break;
             printf("%c", infolog[i]);
         }
         printf("\n");
-        *mat |= BOBi_MSB;
         return 0;
     }
 
@@ -464,28 +485,30 @@ uint8_t BOBi_gl_create_material(BOB_Shader_Data *data, size_t num_shaders, BOB_U
     }
 
     //Setting the uniforms
-    for(size_t i = 0; i < num_uniforms; i++) {
-        uniforms[i].location = glGetUniformLocation(*shader, uniforms[i].name);
+    for(size_t i = 0; i < intrn_mat->uniform_count; i++) {
+        intrn_mat->uniforms[i].opengl.location = glGetUniformLocation(intrn_mat->opengl.shader, intrn_mat->uniforms[i].name);
     }
     return 1;
 }
 
-void BOBi_gl_copy_data_tex(uint32_t tex, BOB_Format format, BOB_Quad region, uint8_t *pixels) {
+void BOBi_gl_copy_data_tex(BOB_Context *context, uint32_t tex_index, BOB_Format format, BOB_Quad region, uint8_t *pixels) {
     GLenum gl_format = BOBi_gl_convert_format(format);
 
     //Upload the subregion
-    glBindTexture(GL_TEXTURE_2D, tex);
+    glBindTexture(GL_TEXTURE_2D, context->texture_table[tex_index].opengl.texture);
     glTexSubImage2D(GL_TEXTURE_2D, 0, region.x, region.y, region.w, region.h, gl_format, GL_UNSIGNED_BYTE, pixels);
 }
 
-uint8_t BOBi_gl_init_pbo(uint32_t *pbo, size_t buf_sz, BOB_PixelBuffer_Handle *pb) {
+uint8_t BOBi_gl_create_pbo(BOB_Context *context, uint32_t index) {
+    uint32_t *pbo = &context->pixelbuffer_table[index].pbo;
+    size_t buf_sz = context->pixelbuffer_table[index].buf_sz;
+
     glGenBuffers(1, pbo);
     glBindBuffer(GL_PIXEL_UNPACK_BUFFER, *pbo);
     glBufferData(GL_PIXEL_UNPACK_BUFFER, buf_sz, NULL, GL_STREAM_DRAW);
     uint8_t *ptr = glMapBuffer(GL_PIXEL_UNPACK_BUFFER, GL_WRITE_ONLY);
     if(ptr == NULL) {
         printf("Failed to map GPU to CPU memory\n");
-        *pb |= BOBi_MSB;
         return 0;
     }
     memset(ptr, 0x00, buf_sz); //Setting all of the pixels to be colourless initially
@@ -495,42 +518,50 @@ uint8_t BOBi_gl_init_pbo(uint32_t *pbo, size_t buf_sz, BOB_PixelBuffer_Handle *p
     return 1;
 }
 
-uint8_t BOBi_gl_copy_pbo(uint32_t pbo, size_t buf_sz, uint32_t tex, size_t width, size_t height, uint8_t *data) {
-    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo);
-    void* ptr = glMapBuffer(GL_PIXEL_UNPACK_BUFFER, GL_WRITE_ONLY);
-    if(ptr == NULL) {
+uint8_t BOBi_gl_bind_pbo_mem(BOB_Context *context, uint32_t pb_index) {
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, context->pixelbuffer_table[pb_index].pbo);
+
+    if(context->mapped_mem_ptr != NULL) {
+        printf("Memory region already mapped");
+        return 0;
+    }
+
+    context->mapped_mem_ptr= glMapBuffer(GL_PIXEL_UNPACK_BUFFER, GL_WRITE_ONLY);
+    if(context->mapped_mem_ptr == NULL) {
         printf("Failed to map GPU to CPU memory\n");
         return 0;
     }
-    memcpy(ptr, data, buf_sz);
-    glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
-    glBindTexture(GL_TEXTURE_2D, tex);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE, 0);
-    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
-
     return 1;
 }
 
-uint8_t BOBi_gl_get_pbo_data(uint32_t pbo, size_t buf_sz, uint8_t *dest) {
-    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo);
-    void* ptr = glMapBuffer(GL_PIXEL_UNPACK_BUFFER, GL_READ_ONLY);
-    if(ptr == NULL) {
-        printf("Failed to map GPU to CPU memory\n");
-        return 0;
+void BOBi_gl_unbind_pbo_mem(BOB_Context *context) {
+    if(context->mapped_mem_ptr != NULL) {
+        glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+        context->mapped_mem_ptr = NULL;
     }
-    memcpy(dest, ptr, buf_sz);
-    glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
-    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
-    return 1;
 }
 
-void BOBi_gl_upload_pbo_data(uint32_t pbo, uint32_t tex, size_t width, size_t height) {
-    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo);
-    glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
-    glBindTexture(GL_TEXTURE_2D, tex);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE, 0);
-    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+void BOBi_gl_copy_pbo(BOB_Context *context, uint8_t *data, size_t buf_sz) {
+    memcpy(context->mapped_mem_ptr, data, buf_sz);
 }
+
+void BOBi_gl_get_pbo_data(BOB_Context *context, uint8_t *dest, size_t buf_sz) {
+    memcpy(dest, context->mapped_mem_ptr, buf_sz);
+}
+
+void BOBi_gl_upload_pbo_data(BOB_Context *context, uint32_t pb_index) {
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, context->pixelbuffer_table[pb_index].pbo);
+    BOBi_gl_unbind_pbo_mem(context);
+    BOBi_gl_bind_pbo_mem(context, pb_index);
+    glBindTexture(GL_TEXTURE_2D, context->pixelbuffer_table[pb_index].pixel_tex);
+    uint32_t tex_index;
+    BOBi_get_index_from_handle(context->pixelbuffer_table[pb_index].pixel_tex, &tex_index);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, context->texture_table[tex_index].width, context->texture_table[tex_index].height, GL_RGB, GL_UNSIGNED_BYTE, 0);
+}
+
+void BOBi_gl_destroy_context(BOB_Context *context) {return;}
+uint8_t BOBi_gl_end_frame(BOB_Context *context) {return 1;}
 
 #endif //BOB_INCLUDE_GLAD
 
@@ -661,12 +692,6 @@ uint8_t BOBi_vk_find_memory_type(BOB_Context *context, uint32_t type_filter, VkM
     //Throw an error on failure
     printf("Failed to find suitable memory type\n");
     return 0;
-}
-
-void BOBi_vk_destroy_image(BOB_Context *context, BOBi_Vulkan_Image *image) {
-    if(image->view != VK_NULL_HANDLE) vkDestroyImageView(context->log_device, image->view, NULL);
-    if(image->memory != VK_NULL_HANDLE) vkFreeMemory(context->log_device, image->memory, NULL);
-    if(image->image != VK_NULL_HANDLE) vkDestroyImage(context->log_device, image->image, NULL);
 }
 
 //Creates an image and its allocated memory
@@ -942,21 +967,6 @@ uint32_t BOBi_vk_choose_swap_min_image_count(VkSurfaceCapabilitiesKHR *capabilit
     return min_image_count;
 }
 
-//Creates a shader module object from a buffer filled with SPIR-V sharder bytecode
-//The buffer must be aligned to 4 bytes
-uint8_t BOBi_vk_create_shader_module(uint8_t *buf, size_t buf_sz, VkShaderModule *shader_module, VkDevice log_device) {
-    //Alignment check
-    if(buf_sz % 4 != 0) {
-        printf("Byte data not aligned to 4 bytes\n");
-        return 0;
-    }
-    //Create the shader module
-    VkShaderModuleCreateInfo create_info = {.codeSize = buf_sz, .pCode = (uint32_t *)buf, .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .pNext = NULL};
-    VULKAN_ERROR(vkCreateShaderModule(log_device, &create_info, NULL, shader_module), "Failed to create shader module");
-
-    return 1;
-}
-
 //Transitions a swapchain image
 void BOBi_vk_transition_image_layout(VkImage image, VkImageLayout old_layout, VkImageLayout new_layout, VkAccessFlags2 src_access_mask,
                              VkAccessFlags2 dst_access_mask, VkPipelineStageFlags2 src_stage_mask, VkPipelineStageFlags2 dst_stage_mask,
@@ -1018,6 +1028,8 @@ uint8_t BOBi_vk_transition_tex_layout(VkCommandBuffer command_buf, VkImage image
 
     return 1;
 }
+
+//================================ INTIALISATION/CONTEXT CREATION FUNCTIONS =================================
 
 uint8_t BOBi_vk_init_vulkan(const char **required_extensions, size_t num_extensions) {
     VkApplicationInfo app_info = {
@@ -1089,11 +1101,6 @@ uint8_t BOBi_vk_init_vulkan(const char **required_extensions, size_t num_extensi
     VULKAN_ERROR(vkCreateInstance(&create_info, NULL, &bob_state.instance), "Failed to create a vulkan instance");
 
     return 1;
-}
-
-uint8_t BOB_create_vulkan_context(size_t atlas_capacity, size_t pixelbuf_capacity,
-                           size_t tex_capacity, size_t mat_capacity, size_t font_capacity, size_t width, size_t height, BOB_Context_Handle *context) {
-    return BOBi_create_context(BOB_VULKAN_CONTEXT, atlas_capacity, pixelbuf_capacity, tex_capacity, mat_capacity, font_capacity, width, height, context);
 }
 
 //Picks the physical device to use for this application from all available options
@@ -1203,13 +1210,6 @@ uint8_t BOBi_vk_create_logical_device(BOB_Context *context) {
     return 1;
 }
 
-//Creates the vulkan surface used to represent the window
-//TODO: FIX
-// uint8_t BOBi_vk_create_surface(BOB_Context *context, GLFWwindow *window) {
-//     VULKAN_ERROR(glfwCreateWindowSurface(bob_state.instance, window, NULL, &context->surface), "Failed to create window surface");
-//     return 1;
-// }
-
 //Create the swapchain used to render images to the screen
 uint8_t BOBi_vk_create_swapchain(BOB_Context *context, size_t width, size_t height) {
     //Get the surface capabilities
@@ -1288,50 +1288,192 @@ uint8_t BOBi_vk_create_image_views(BOB_Context *context) {
     return 1;
 }
 
-//Creates a layout for the descriptor set for the data we will be sending to our shader
-uint8_t BOBi_vk_create_descriptor_set_layout(BOB_Context *context, BOB_Renderer *r) {
-    //Setting the binding data
-    VkDescriptorSetLayoutBinding bindings[2] = {
-        {.binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_VERTEX_BIT},
-        {.binding = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT}
+//Creates a command pool
+uint8_t BOBi_vk_create_command_pool(BOB_Context *context) {
+    VkCommandPoolCreateInfo pool_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .pNext = NULL,
+        .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, .queueFamilyIndex = context->queue_family
     };
+    VULKAN_ERROR(vkCreateCommandPool(context->log_device, &pool_info, NULL, &context->command_pool), "Failed to create command pool");
+    return 1;
+}
 
-    //Create the descriptor set layout
-    VkDescriptorSetLayoutCreateInfo layout_info = {
-        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .pNext = NULL,
-        .bindingCount = 2, .pBindings = bindings
-    };
-    VULKAN_ERROR(vkCreateDescriptorSetLayout(context->log_device, &layout_info, NULL, &r->descriptor_set_layout), "Failed to create descriptor set layout");
+//Creates the resources used to do depth culling
+uint8_t BOBi_vk_create_depth_resources(BOB_Context *context) {
+    VkFormat depth_format;
+    if(!BOBi_vk_find_depth_format(context, &depth_format)) return 0;
+
+    BOBi_vk_create_image(context, context->extent.width, context->extent.height, depth_format, VK_IMAGE_TILING_OPTIMAL,
+                 VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &context->depth);
+    BOBi_vk_create_image_view(context, context->depth.image, depth_format, VK_IMAGE_ASPECT_DEPTH_BIT, &context->depth.view);
 
     return 1;
 }
 
+//Creates the descriptor pools that hold the information on the data we send to the GPU
+uint8_t BOBi_vk_create_descriptor_pool(BOB_Context *context) {
+    VkDescriptorPoolSize pool_size[2] = {
+        {.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = MAX_FRAMES_IN_FLIGHT},
+        {.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = MAX_FRAMES_IN_FLIGHT}
+    };
+
+    VkDescriptorPoolCreateInfo pool_info = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .pNext = NULL,
+        .flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, 
+        .maxSets = MAX_FRAMES_IN_FLIGHT, .poolSizeCount = 2,
+        .pPoolSizes = pool_size
+    };
+
+    VULKAN_ERROR(vkCreateDescriptorPool(context->log_device, &pool_info, NULL, &context->descriptor_pool), "Failed to create descriptor pool");
+    return 1;
+}
+
+//Creates a texture sampler for the one texture we are using to be sent to the GPU
+uint8_t BOBi_vk_create_texture_sampler(BOB_Context *context, VkSampler *sampler) {
+    VkPhysicalDeviceProperties properties;
+    vkGetPhysicalDeviceProperties(context->phy_device, &properties);
+    VkSamplerCreateInfo sampler_info = {
+        .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .pNext = NULL,
+        .magFilter = VK_FILTER_LINEAR, .minFilter = VK_FILTER_LINEAR,
+        .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
+        .mipLodBias = 0.0f, .minLod = 0.0f, .maxLod = 0.0f,
+        .addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        .addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        .addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        .anisotropyEnable = VK_TRUE,
+        .maxAnisotropy = properties.limits.maxSamplerAnisotropy,
+        .compareEnable = VK_FALSE,
+        .compareOp = VK_COMPARE_OP_ALWAYS,
+        .borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK,
+        .unnormalizedCoordinates = VK_FALSE,
+    };
+    VULKAN_ERROR(vkCreateSampler(context->log_device, &sampler_info, NULL, sampler), "Failed to create texture sampler");
+    return 1;
+}
+
+//Creates the general command buffers used to generate draw calls
+uint8_t BOBi_vk_create_command_buffer(BOB_Context *context, BOBi_Vulkan_Frame_Resources *frame) {
+    VkCommandBufferAllocateInfo alloc_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .pNext = NULL,
+        .commandPool = context->command_pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1
+    };
+        VULKAN_ERROR(vkAllocateCommandBuffers(context->log_device, &alloc_info, &frame->command_buffer), "Failed to allocate command buffers");
+    return 1;
+}
+
+//Creates the semaphores and fences required to synchronise operations
+uint8_t BOBi_vk_create_sync_objects(BOBi_Vulkan_Frame_Resources *frame, VkDevice device) {
+    VkSemaphoreCreateInfo sem_info = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, .pNext = NULL, .flags = 0 };
+
+    VkFenceCreateInfo fence_info = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, .pNext = NULL, .flags = VK_FENCE_CREATE_SIGNALED_BIT};
+        VULKAN_ERROR(vkCreateSemaphore(device, &sem_info, NULL, &frame->render_finished_semaphore), "Failed to create a semaphore");
+        VULKAN_ERROR(vkCreateSemaphore(device, &sem_info, NULL, &frame->present_complete_semaphore), "Failed to create a semaphore");
+        VULKAN_ERROR(vkCreateFence(device, &fence_info, NULL, &frame->draw_fence), "Failed to create a fence");
+
+    return 1;
+}
+
+void BOBi_vk_destroy_frame_resources(BOB_Context *context) {
+    vkFreeCommandBuffers(context->log_device, context->command_pool, 1, &context->resources.command_buffer);
+    vkDestroySemaphore(context->log_device, context->resources.render_finished_semaphore, NULL);
+    vkDestroySemaphore(context->log_device, context->resources.present_complete_semaphore, NULL);
+    vkDestroyFence(context->log_device, context->resources.draw_fence, NULL);
+}
+
+uint8_t BOBi_vk_create_frame_resources(BOB_Context *context) {
+    if(!(BOBi_vk_create_sync_objects(&context->resources, context->log_device) &&
+         BOBi_vk_create_command_buffer(context, &context->resources))) {
+        BOBi_vk_destroy_frame_resources(context);
+        return 0;
+    }
+    return 1;
+}
+
+//Initialises vulkan
+uint8_t BOBi_vk_init_vulkan_context(BOB_Context *context, size_t width, size_t height, BOB_vk_create_surface surface_func) {
+    return surface_func(bob_state.instance, &context->surface) && BOBi_vk_pick_physical_device(context) && BOBi_vk_create_logical_device(context)
+    && BOBi_vk_create_swapchain(context, width, height) && BOBi_vk_create_image_views(context) && BOBi_vk_create_command_pool(context)
+    && BOBi_vk_create_depth_resources(context) && BOBi_vk_create_descriptor_pool(context) && BOBi_vk_create_texture_sampler(context, &context->sampler)
+    && BOBi_vk_create_frame_resources(context);
+}
+
+uint8_t BOB_create_vulkan_context(BOB_Context_Type type, size_t atlas_capacity, size_t pixelbuf_capacity, size_t tex_capacity, size_t mat_capacity,
+                            size_t font_capacity, size_t width, size_t height, BOB_Context_Handle *context, BOB_vk_create_surface surface_func) {
+    if(!BOBi_create_context(BOB_VULKAN_CONTEXT, atlas_capacity, pixelbuf_capacity, tex_capacity, mat_capacity, font_capacity, width, height, context)) return 0;
+
+    BOB_Context *intrn_context;
+    BOBi_get_context(*context, &intrn_context);
+    //Vulkan specific code goes here
+    if(!BOBi_vk_init_vulkan_context(intrn_context, width, height, surface_func)) {
+        BOB_destroy_context(context);
+    }
+    return 1;
+}
+
+void BOBi_vk_destroy_context(BOB_Context *context) {
+    for(size_t i = 0; i < context->num_images; i++) {
+        vkDestroyImageView(context->log_device, context->views[i], NULL);
+        vkDestroyImage(context->log_device, context->images[i], NULL);
+    }
+
+    free(context->views);
+    free(context->images);
+
+    BOBi_vk_destroy_frame_resources(context);
+    vkDestroySampler(context->log_device, context->sampler, NULL);
+    vkDestroyDescriptorPool(context->log_device, context->descriptor_pool, NULL);
+    vkDestroyCommandPool(context->log_device, context->command_pool, NULL);
+    vkDestroySwapchainKHR(context->log_device, context->swapchain, NULL);
+    vkDestroyDevice(context->log_device, NULL);
+    vkDestroySurfaceKHR(bob_state.instance, context->surface, NULL);
+}
+
+//===================================== MATERIAL CREATION =========================================
+
+//Creates a shader module object from a buffer filled with SPIR-V sharder bytecode
+//The buffer must be aligned to 4 bytes
+uint8_t BOBi_vk_create_shader_module(uint8_t *buf, size_t buf_sz, VkShaderModule *shader_module, VkDevice log_device) {
+    //Alignment check
+    if(buf_sz % 4 != 0) {
+        printf("Byte data not aligned to 4 bytes\n");
+        return 0;
+    }
+    //Create the shader module
+    VkShaderModuleCreateInfo create_info = {.codeSize = buf_sz, .pCode = (uint32_t *)buf, .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .pNext = NULL};
+    VULKAN_ERROR(vkCreateShaderModule(log_device, &create_info, NULL, shader_module), "Failed to create shader module");
+
+    return 1;
+}
+
+int BOBi_vk_convert_shader_type(BOB_Shader_Type type) {
+    switch (type) {
+        case BOB_VERTEX_SHADER: return VK_SHADER_STAGE_VERTEX_BIT;
+        case BOB_FRAGMENT_SHADER: return VK_SHADER_STAGE_FRAGMENT_BIT;
+        default: return 0;
+    }
+}
+
 //Creates our graphics pipeline
-uint8_t BOBi_vk_create_graphics_pipeline(BOB_Context *context, BOB_Renderer *r) {
-    //TODO: Spin shader creation out into its own function
-    //Get the shader code
-    uint8_t *shader_code;
-    int sz = BOBi_read_to_end("../shaders/shader.spv", &shader_code, 0);
-    if(sz < 0) {
-        printf("Failed to read file\n");
-        return 0;
+uint8_t BOBi_vk_create_graphics_pipeline(BOB_Context *context, BOB_Material *mat, BOB_Shader_Data *data, size_t num_shaders) {
+    VkPipelineShaderStageCreateInfo *shader_stages = malloc(sizeof(VkPipelineShaderStageCreateInfo) * num_shaders);
+
+    for(size_t i = 0; i < num_shaders; i++) {
+        if(data[i].type != BOB_VERTEX_SHADER || data[i].type != BOB_FRAGMENT_SHADER) {
+            printf("Shader type not supported");
+            return 0;
+        }
+
+        //Create the shader module to hold the shader
+        VkShaderModule shader_module;
+        if(!BOBi_vk_create_shader_module((uint8_t *)data[i].shader_code, data[i].code_buf_sz, &shader_module, context->log_device)) {
+            return 0;
+        }
+        //Telling the pipleine what shader stages we are using
+        shader_stages[i] = (VkPipelineShaderStageCreateInfo){
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .pNext = NULL,
+            .stage = BOBi_vk_convert_shader_type(data[i].type), .module = shader_module, .pName = data[i].entrypoint_name
+        };
     }
-
-    //Create the shader module to hold the shader
-    VkShaderModule shader_module;
-    if(!BOBi_vk_create_shader_module(shader_code, sz, &shader_module, context->log_device)) {
-        free(shader_code);
-        return 0;
-    }
-
-    //Telling the pipleine what shader stages we are using
-    VkPipelineShaderStageCreateInfo vert_shader_stage_info = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .pNext = NULL,
-                                                            .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = shader_module, .pName = "vertMain"};
-
-    VkPipelineShaderStageCreateInfo frag_shader_stage_info = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .pNext = NULL,
-                                                            .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = shader_module, .pName = "fragMain"};
-
-    VkPipelineShaderStageCreateInfo shader_stages[] = {vert_shader_stage_info, frag_shader_stage_info};
 
     //Can tell the pipeline what stages we want to be able to change at runtime without having to recreate the whole program
     VkDynamicState dynamic_states[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
@@ -1391,10 +1533,10 @@ uint8_t BOBi_vk_create_graphics_pipeline(BOB_Context *context, BOB_Renderer *r) 
     //Creating the pipeline layout
     VkPipelineLayoutCreateInfo pipeline_layout_info = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .pNext = NULL,
-        .setLayoutCount = 1, .pSetLayouts = &r->descriptor_set_layout, .pushConstantRangeCount = 0
+        .setLayoutCount = 1, .pSetLayouts = &mat->vulkan.descriptor_set_layout, .pushConstantRangeCount = 0
     };
-    VULKAN_ERROR(vkCreatePipelineLayout(context->log_device, &pipeline_layout_info, NULL, &r->layout),
-                          "Failed to create pipeline layout", free(shader_code); vkDestroyShaderModule(context->log_device, shader_module, NULL));
+    VULKAN_ERROR(vkCreatePipelineLayout(context->log_device, &pipeline_layout_info, NULL, &mat->vulkan.layout), "Failed to create pipeline layout",
+                 for(size_t i = 0; i < num_shaders; i++) { vkDestroyShaderModule(context->log_device, shader_stages[i].module, NULL); } free(shader_stages););
 
     //Specify the depth stencil data
     VkPipelineDepthStencilStateCreateInfo depth_stencil = {
@@ -1408,7 +1550,8 @@ uint8_t BOBi_vk_create_graphics_pipeline(BOB_Context *context, BOB_Renderer *r) 
         .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .pNext = NULL,
         .colorAttachmentCount = 1, .pColorAttachmentFormats = &context->format.format,
     };
-    if(!BOBi_vk_find_depth_format(context, &pipeline_rendering_create_info.depthAttachmentFormat)) return 0;
+    VULKAN_ERROR(!BOBi_vk_find_depth_format(context, &pipeline_rendering_create_info.depthAttachmentFormat), "Failed to create pipeline layout",
+                 for(size_t i = 0; i < num_shaders; i++) { vkDestroyShaderModule(context->log_device, shader_stages[i].module, NULL); } free(shader_stages););
 
     //Creating the graphics pipeline
     VkGraphicsPipelineCreateInfo graphics_create_info = {
@@ -1417,93 +1560,186 @@ uint8_t BOBi_vk_create_graphics_pipeline(BOB_Context *context, BOB_Renderer *r) 
         .pInputAssemblyState = &input_assembly, .pViewportState = &viewport_state,
         .pRasterizationState = &rasteriser, .pMultisampleState = &multisampling,
         .pColorBlendState = &colour_blending, .pDynamicState = &dynamic_state,
-        .layout = r->layout, .renderPass = NULL, .pDepthStencilState = &depth_stencil
+        .layout = mat->vulkan.layout, .renderPass = NULL, .pDepthStencilState = &depth_stencil
     };
 
-    VULKAN_ERROR(vkCreateGraphicsPipelines(context->log_device, VK_NULL_HANDLE, 1, &graphics_create_info, NULL, &r->pipeline),
-                          "Failed to create graphics pipeline", free(shader_code); vkDestroyShaderModule(context->log_device, shader_module, NULL););
+    VULKAN_ERROR(vkCreateGraphicsPipelines(context->log_device, VK_NULL_HANDLE, 1, &graphics_create_info, NULL, &mat->vulkan.pipeline), "Failed to create graphics pipeline",
+                 for(size_t i = 0; i < num_shaders; i++) { vkDestroyShaderModule(context->log_device, shader_stages[i].module, NULL); } free(shader_stages););
 
-    free(shader_code);
-    vkDestroyShaderModule(context->log_device, shader_module, NULL);
+    for(size_t i = 0; i < num_shaders; i++) {
+        vkDestroyShaderModule(context->log_device, shader_stages[i].module, NULL);
+    }
+    free(shader_stages);
 
     return 1;
 }
 
-//Creates a command pool
-uint8_t BOBi_vk_create_command_pool(BOB_Context *context) {
-    VkCommandPoolCreateInfo pool_info = {
-        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .pNext = NULL,
-        .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, .queueFamilyIndex = context->queue_family
-    };
-    VULKAN_ERROR(vkCreateCommandPool(context->log_device, &pool_info, NULL, &context->command_pool), "Failed to create command pool");
-    return 1;
+uint8_t BOBi_std140_alignment(BOB_Uniform_Type type) {
+    switch (type) {
+        case BOB_UNIFORM_FLOAT:
+        case BOB_UNIFORM_UNSIGNED_INT:
+        case BOB_UNIFORM_SIGNED_INT: return 4;
+        case BOB_UNIFORM_VEC2: return 8;
+        case BOB_UNIFORM_VEC3:
+        case BOB_UNIFORM_VEC4: return 16;
+        case BOB_UNIFORM_TEXTURE: return 0;
+        case BOB_UNIFORM_MAT4: return 16;
+    }
 }
 
-//Creates the resources used to do depth culling
-uint8_t BOBi_vk_create_depth_resources(BOB_Context *context) {
-    VkFormat depth_format;
-    if(!BOBi_vk_find_depth_format(context, &depth_format)) return 0;
-
-    BOBi_vk_create_image(context, context->extent.width, context->extent.height, depth_format, VK_IMAGE_TILING_OPTIMAL,
-                 VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &context->depth);
-    BOBi_vk_create_image_view(context, context->depth.image, depth_format, VK_IMAGE_ASPECT_DEPTH_BIT, &context->depth.view);
-
-    return 1;
+uint8_t BOBi_std140_size(BOB_Uniform_Type type) {
+    switch (type) {
+        case BOB_UNIFORM_FLOAT:
+        case BOB_UNIFORM_UNSIGNED_INT:
+        case BOB_UNIFORM_SIGNED_INT: return 4;
+        case BOB_UNIFORM_VEC2: return 8;
+        case BOB_UNIFORM_VEC3:
+        case BOB_UNIFORM_VEC4: return 16;
+        case BOB_UNIFORM_TEXTURE: return 0;
+        case BOB_UNIFORM_MAT4: return 64;
+    }
 }
 
-//Creates the descriptor pools that hold the information on the data we send to the GPU
-uint8_t BOBi_vk_create_descriptor_pool(BOB_Context *context, BOB_Renderer *r) {
-    VkDescriptorPoolSize pool_size[2] = {
-        {.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = MAX_FRAMES_IN_FLIGHT},
-        {.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = MAX_FRAMES_IN_FLIGHT}
-    };
+//Creates a layout for the descriptor set for the data we will be sending to our shader
+uint8_t BOBi_vk_create_descriptor_set_layout(BOB_Context *context, BOB_Material *mat) {
+    //Setting the binding data
+    VkDescriptorSetLayoutBinding bindings[BOB_MAX_UNIFORMS];
+    size_t binding_count = 0;
+    size_t offset = 0;
+    int uniform_binding = -1;
+    for(size_t i = 0; i < mat->uniform_count; i++) {
+        BOB_Uniform *uniform = &mat->uniforms[i];
+        bindings[i] = (VkDescriptorSetLayoutBinding) {
+            .descriptorCount = 1,
+        };
 
-    VkDescriptorPoolCreateInfo pool_info = {
-        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .pNext = NULL,
-        .flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, 
-        .maxSets = MAX_FRAMES_IN_FLIGHT, .poolSizeCount = 2,
-        .pPoolSizes = pool_size
-    };
+        switch (uniform->type) {
+            case BOB_UNIFORM_FLOAT:
+            case BOB_UNIFORM_VEC2:
+            case BOB_UNIFORM_VEC3:
+            case BOB_UNIFORM_VEC4:
+            case BOB_UNIFORM_MAT4:
+            case BOB_UNIFORM_UNSIGNED_INT:
+            case BOB_UNIFORM_SIGNED_INT:
+                if(uniform_binding < 0) {
+                    bindings[binding_count].binding = binding_count;
+                    bindings[binding_count].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+                    uniform_binding = binding_count;
+                    mat->vulkan.uniform_binding = (uint32_t)uniform_binding;
+                    binding_count++;
+                }
+                uniform->vulkan.offset = BOBi_align_up(offset, BOBi_std140_alignment(uniform->type));
+                offset = uniform->vulkan.offset + BOBi_std140_size(uniform->type);
+                bindings[uniform_binding].stageFlags |= uniform->vulkan.stage;
+            break;
+            case BOB_UNIFORM_TEXTURE:
+                bindings[binding_count].binding = binding_count;
+                uniform->vulkan.binding = binding_count;
+                bindings[binding_count].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                bindings[binding_count].stageFlags = uniform->vulkan.stage;
+                binding_count++;
+            break;
+        }
+    }
 
-    VULKAN_ERROR(vkCreateDescriptorPool(context->log_device, &pool_info, NULL, &r->descriptor_pool), "Failed to create descriptor pool");
+    //Create the descriptor set layout
+    VkDescriptorSetLayoutCreateInfo layout_info = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .pNext = NULL,
+        .bindingCount = binding_count, .pBindings = bindings
+    };
+    VULKAN_ERROR(vkCreateDescriptorSetLayout(context->log_device, &layout_info, NULL, &mat->vulkan.descriptor_set_layout), "Failed to create descriptor set layout");
+
     return 1;
 }
 
 //Creates descriptor sets that hold the actual data on what is sent to the shader
-uint8_t BOBi_vk_create_descriptor_set(BOB_Context *context, BOB_Renderer *r, BOBi_Vulkan_Frame_Resources *frame) {
-    VkDescriptorSetLayout layouts[MAX_FRAMES_IN_FLIGHT];
-
-    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
-        layouts[i] = r->descriptor_set_layout;
-
+uint8_t BOBi_vk_create_descriptor_set(BOB_Context *context, BOB_Material *mat) {
     VkDescriptorSetAllocateInfo alloc_info = {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .pNext = NULL,
-        .descriptorPool = r->descriptor_pool,
-        .descriptorSetCount = 1, .pSetLayouts = layouts
+        .descriptorPool = context->descriptor_pool,
+        .descriptorSetCount = 1, .pSetLayouts = &mat->vulkan.descriptor_set_layout
     };
 
-    VULKAN_ERROR(vkAllocateDescriptorSets(context->log_device, &alloc_info, &r->descriptor_set[context->frame_index]), "Failed to allocate descriptor sets");
+    VULKAN_ERROR(vkAllocateDescriptorSets(context->log_device, &alloc_info, &mat->vulkan.descriptor_set), "Failed to allocate descriptor sets");
 
-    VkDescriptorBufferInfo buf_info = { .buffer = frame->uniform_buffer.buffer, .offset = 0, .range = sizeof(BOBi_Vulkan_UniformBufferObject) };
-    //TODO: FIX
-    VkDescriptorImageInfo img_info;
-    // VkDescriptorImageInfo img_info = {.sampler = state->tex_image_sampler, .imageView = state->tex.view, .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
 
-    VkWriteDescriptorSet descriptor_write[2] = {
-        {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .pNext = NULL,
-         .dstSet = r->descriptor_set[context->frame_index], .dstBinding = 0, .dstArrayElement = 0,
-         .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-         .pBufferInfo = &buf_info},
-        {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .pNext = NULL,
-         .dstSet = r->descriptor_set[context->frame_index], .dstBinding = 1, .dstArrayElement = 0,
-         .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-         .pImageInfo = &img_info}
-    };
+    VkWriteDescriptorSet descriptor_writes[BOB_MAX_UNIFORMS];
+    VkDescriptorBufferInfo descriptor_buffer;
+    VkDescriptorImageInfo descriptor_images[BOB_MAX_UNIFORMS];
 
-    vkUpdateDescriptorSets(context->log_device, 2, descriptor_write, 0, NULL);
+    size_t range = 0;
+    int uniform_slot = -1;
+    size_t next_write = 0;
+    for(size_t i = 0; i < mat->uniform_count; i++) {
+        BOB_Uniform *uniform = &mat->uniforms[i];
+
+        switch(uniform->type) {
+            case BOB_UNIFORM_TEXTURE:
+                descriptor_images[i] = (VkDescriptorImageInfo) {
+                    .sampler = context->sampler, .imageView = context->texture_table[uniform->tex_index & 0xFFFFFFFFFF].vulkan.view,
+                    .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                };
+                descriptor_writes[next_write] = (VkWriteDescriptorSet){
+                    .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .pNext = NULL,
+                    .dstSet = mat->vulkan.descriptor_set, .dstBinding = uniform->vulkan.binding,
+                    .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                    .pImageInfo = &descriptor_images[i]
+                };
+                next_write++;
+            break;
+            default:
+                if(uniform_slot < 0) {
+                    uniform_slot = i;
+                    descriptor_buffer = (VkDescriptorBufferInfo) {
+                        .buffer = mat->vulkan.uniform_buffer.buffer, .offset = 0, .range = range
+                    };
+
+                    descriptor_writes[next_write] = (VkWriteDescriptorSet){
+                        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .pNext = NULL,
+                        .dstSet = mat->vulkan.descriptor_set, .dstBinding = mat->vulkan.uniform_binding,
+                        .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                        .pBufferInfo = &descriptor_buffer
+                    };
+                    next_write++;
+                }
+                range = uniform->vulkan.offset + BOBi_std140_size(uniform->type);
+            break;
+        }
+    }
+    descriptor_buffer.range = range;
+
+    vkUpdateDescriptorSets(context->log_device, next_write, descriptor_writes, 0, NULL);
 
     return 1;
 }
+
+uint8_t BOBi_vk_create_uniform_buffer(BOB_Context *context, BOBi_Vulkan_Frame_Resources *frame) {
+        VkDeviceSize buffer_sz = sizeof(BOBi_Vulkan_UniformBufferObject);
+        VULKAN_ERROR(!BOBi_vk_create_buffer(context, buffer_sz, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                    &frame->uniform_buffer), "Failed to create uniform buffer");
+
+        VULKAN_ERROR(vkMapMemory(context->log_device, frame->uniform_buffer.memory, 0, buffer_sz, 0, &frame->uniform_buffer_mapped),
+                     "Failed to map uniform buffer memory", BOBi_vk_destroy_buffer(context->log_device, &frame->uniform_buffer));
+
+    return 1;
+}
+
+uint8_t BOBi_vk_create_material(BOB_Context *context, uint32_t index, BOB_Shader_Data *data, size_t num_shaders) {
+    BOB_Material *mat = &context->material_table[index];
+    return BOBi_vk_create_graphics_pipeline(context, mat, data, num_shaders) && BOBi_vk_create_descriptor_set_layout(context, mat)
+    && BOBi_vk_create_descriptor_set(context, mat);
+}
+
+void BOBi_vk_destroy_material(BOB_Context *context, uint32_t index) {
+    BOB_Material *mat = &context->material_table[index];
+    vkFreeDescriptorSets(context->log_device, context->descriptor_pool, 1, &mat->vulkan.descriptor_set);
+    vkDestroyDescriptorSetLayout(context->log_device, mat->vulkan.descriptor_set_layout, NULL);
+    BOBi_vk_destroy_buffer(context->log_device, &mat->vulkan.uniform_buffer);
+    vkDestroyPipelineLayout(context->log_device, mat->vulkan.layout, NULL);
+    vkDestroyPipeline(context->log_device, mat->vulkan.pipeline, NULL);
+}
+
+//===================== RENDERER FUNCTIONS =================================
 
 //Creates a vertex buffer that is sent to the GPU
 uint8_t BOBi_vk_create_vertex_buffer(BOB_Context *context, BOB_Renderer *r, size_t num_vertices) {
@@ -1551,8 +1787,39 @@ uint8_t BOBi_vk_create_index_buffer(BOB_Context *context, BOB_Renderer *r, size_
     return 1;
 }
 
-//TODO: FIX
-uint8_t BOBi_vk_create_texture(BOB_Context *context, size_t width, size_t height, uint8_t *data, BOB_Format format, BOBi_Vulkan_Image *tex) {
+//TODO: Add code to create the pipeline
+uint8_t BOBi_vk_create_renderer(BOB_Context *context, BOB_Renderer *r, size_t vert_buf_sz, size_t index_buf_sz) {
+    //Create the vertex buffer
+    VULKAN_ERROR(!BOBi_vk_create_buffer(context, vert_buf_sz, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                                &r->vertex_buffer), "Failed to create vertex buffer");
+    //Create the index buffer
+    VULKAN_ERROR(!BOBi_vk_create_buffer(context, index_buf_sz, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,  &r->index_buffer), "Failed to create index buffer");
+
+    return 1;
+}
+//TODO: Add code to destroy the pipeline
+void BOBi_vk_destroy_renderer(BOB_Context *context, BOB_Renderer *r) {
+    BOBi_vk_destroy_buffer(context->log_device, &r->vertex_buffer);
+    BOBi_vk_destroy_buffer(context->log_device, &r->index_buffer);
+}
+
+// ================================= TEXTURE FUNCTIONS ===========================================
+
+void BOBi_vk_destroy_texture(BOB_Context *context, uint32_t tex_index) {
+    BOBi_Vulkan_Image *tex = &context->texture_table[tex_index].vulkan;
+
+    if(tex->view != VK_NULL_HANDLE) vkDestroyImageView(context->log_device, tex->view, NULL);
+    if(tex->memory != VK_NULL_HANDLE) vkFreeMemory(context->log_device, tex->memory, NULL);
+    if(tex->image != VK_NULL_HANDLE) vkDestroyImage(context->log_device, tex->image, NULL);
+}
+
+//TODO: Merge BOBi_vk_create_image and BOBi_vk_create_view into this, and parse the BOB_Format into a vulkan format instead of hardcoding it
+//      Also let user set the flags? Would need to make BOB API equivalents
+//      This would let us simplify this and BOBi_vk_create_depth_resources
+uint8_t BOBi_vk_create_texture(BOB_Context *context, uint32_t index, size_t width, size_t height, uint8_t *data, BOB_Format format) {
+    BOBi_Vulkan_Image *tex = &context->texture_table[index].vulkan;
+
     //Create the staging buffer
     BOBi_Vulkan_Buffer staging_buf;
     BOBi_vk_create_buffer(context, width * height, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &staging_buf);
@@ -1586,104 +1853,13 @@ uint8_t BOBi_vk_create_texture(BOB_Context *context, size_t width, size_t height
     return 1;
 }
 
-//Creates a texture sampler for the one texture we are using to be sent to the GPU
-uint8_t create_texture_sampler(BOB_Context *context, VkSampler *sampler) {
-    VkPhysicalDeviceProperties properties;
-    vkGetPhysicalDeviceProperties(context->phy_device, &properties);
-    VkSamplerCreateInfo sampler_info = {
-        .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .pNext = NULL,
-        .magFilter = VK_FILTER_LINEAR, .minFilter = VK_FILTER_LINEAR,
-        .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
-        .mipLodBias = 0.0f, .minLod = 0.0f, .maxLod = 0.0f,
-        .addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-        .addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-        .addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-        .anisotropyEnable = VK_TRUE,
-        .maxAnisotropy = properties.limits.maxSamplerAnisotropy,
-        .compareEnable = VK_FALSE,
-        .compareOp = VK_COMPARE_OP_ALWAYS,
-        .borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK,
-        .unnormalizedCoordinates = VK_FALSE,
-    };
-    VULKAN_ERROR(vkCreateSampler(context->log_device, &sampler_info, NULL, sampler), "Failed to create texture sampler");
-    return 1;
-}
-
-//Creates the general command buffers used to generate draw calls
-uint8_t BOBi_vk_create_command_buffer(BOB_Context *context, BOBi_Vulkan_Frame_Resources *frame) {
-    VkCommandBufferAllocateInfo alloc_info = {
-        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .pNext = NULL,
-        .commandPool = context->command_pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1
-    };
-        VULKAN_ERROR(vkAllocateCommandBuffers(context->log_device, &alloc_info, &frame->command_buffer), "Failed to allocate command buffers");
-    return 1;
-}
-
-//Creates the semaphores and fences required to synchronise operations
-uint8_t BOBi_vk_create_sync_objects(BOBi_Vulkan_Frame_Resources *frame, VkDevice device) {
-    VkSemaphoreCreateInfo sem_info = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, .pNext = NULL, .flags = 0 };
-
-    VkFenceCreateInfo fence_info = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, .pNext = NULL, .flags = VK_FENCE_CREATE_SIGNALED_BIT};
-        VULKAN_ERROR(vkCreateSemaphore(device, &sem_info, NULL, &frame->render_finished_semaphore), "Failed to create a semaphore");
-        VULKAN_ERROR(vkCreateSemaphore(device, &sem_info, NULL, &frame->present_complete_semaphore), "Failed to create a semaphore");
-        VULKAN_ERROR(vkCreateFence(device, &fence_info, NULL, &frame->draw_fence), "Failed to create a fence");
-
-    return 1;
-}
-
-uint8_t BOBi_vk_create_uniform_buffer(BOB_Context *context, BOBi_Vulkan_Frame_Resources *frame) {
-        VkDeviceSize buffer_sz = sizeof(BOBi_Vulkan_UniformBufferObject);
-        VULKAN_ERROR(!BOBi_vk_create_buffer(context, buffer_sz, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                                    &frame->uniform_buffer), "Failed to create uniform buffer");
-
-        VULKAN_ERROR(vkMapMemory(context->log_device, frame->uniform_buffer.memory, 0, buffer_sz, 0, &frame->uniform_buffer_mapped),
-                     "Failed to map uniform buffer memory", BOBi_vk_destroy_buffer(context->log_device, &frame->uniform_buffer));
-
-    return 1;
-}
-
-void BOBi_vk_destroy_frame_resources(BOB_Context *context, BOB_Renderer *r) {
-    for(size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        vkFreeCommandBuffers(context->log_device, context->command_pool, 1, &context->resources[i].command_buffer);
-        vkUnmapMemory(context->log_device, context->resources[i].uniform_buffer.memory);
-        BOBi_vk_destroy_buffer(context->log_device, &context->resources[i].uniform_buffer);
-        // vkFreeDescriptorSets(context->log_device, r->descriptor_pool, 1, &r->descriptor_set[i]);
-        vkDestroySemaphore(context->log_device, context->resources[i].render_finished_semaphore, NULL);
-        vkDestroySemaphore(context->log_device, context->resources[i].present_complete_semaphore, NULL);
-        vkDestroyFence(context->log_device, context->resources[i].draw_fence, NULL);
-    }
-}
-
-uint8_t BOBi_vk_create_frame_resources(BOB_Context *context, BOB_Renderer *r) {
-    uint8_t succeeded = 1;
-    for(size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        if(!(BOBi_vk_create_sync_objects(&context->resources[i], context->log_device) &&
-             BOBi_vk_create_uniform_buffer(context, &context->resources[i]) &&
-             // BOBi_vk_create_descriptor_set(context, r, &context->resources[i]) &&
-             BOBi_vk_create_command_buffer(context, &context->resources[i]))) {
-            succeeded = 0;
-            break;
-        }
-    }
-
-    if(!succeeded) BOBi_vk_destroy_frame_resources(context, r);
-
-    return succeeded;
-}
-
-//Initialises vulkan
-uint8_t BOBi_vk_init_vulkan_context(BOB_Context *context, size_t width, size_t height) {
-    return BOBi_vk_pick_physical_device(context) && BOBi_vk_create_logical_device(context)
-    && BOBi_vk_create_swapchain(context, width, height) && BOBi_vk_create_image_views(context)
-    && BOBi_vk_create_command_pool(context) && BOBi_vk_create_depth_resources(context);
-}
-
 // ============================================ DESTRUCTION FUNCTIONS ========================================
 
 //Destroys existing memory used by the swapchain
 void BOBi_vk_cleanup_swapchain(BOB_Context *context) {
     for(size_t i = 0; i < context->num_images; i++) {
         vkDestroyImageView(context->log_device, context->views[i], NULL);
+        vkDestroyImage(context->log_device, context->images[i], NULL);
     }
     free(context->views);
     free(context->images);
@@ -1702,17 +1878,43 @@ uint8_t BOBi_vk_recreate_swapchain(BOB_Context *context, size_t width, size_t he
 
 // ===================================== DRAWING FUNCTIONS =========================================
 
-//Records draw calls into the general command buffer
-uint8_t BOBi_vk_record_command_buffer(BOB_Context *context, BOB_Renderer *r, uint32_t image_index) {
+//Updates the uniform buffer with new texture position
+//TODO: FIX
+void BOBi_vk_update_uniform_buffer(BOB_Context *context, BOB_Renderer *r) {
+}
+
+uint8_t BOBi_vk_begin_frame(BOB_Context *context, BOB_Vector4 colour) {
+    //Wait until operations from previous frame have completed
+    VULKAN_ERROR(vkWaitForFences(context->log_device, 1, &context->resources.draw_fence, VK_TRUE, UINT64_MAX), "Failed to wait for fence");
+    vkResetFences(context->log_device, 1, &context->resources.draw_fence);
+
+    //Get the next swapchain image
+    VkResult res = vkAcquireNextImageKHR(context->log_device, context->swapchain, UINT64_MAX,
+                                         context->resources.present_complete_semaphore, VK_NULL_HANDLE, &context->next_swapchain_image_index);
+    //If the swapchain data is invalid, remake it
+    if(res == VK_ERROR_OUT_OF_DATE_KHR) {
+        BOBi_vk_recreate_swapchain(context, 0, 0); //TODO: Fix
+        return 1;
+    }
+    //If we haven't been able to get a valid image, throw an error
+    else if(res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR) {
+        assert(res == VK_TIMEOUT || res == VK_NOT_READY);
+        printf("Failed to acquire swap chain image\n");
+        return 0;
+    }
+
+    //CLear the command buffer and record the draw commands for the current frame
+    vkResetCommandBuffer(context->resources.command_buffer, 0);
+
     //Begin writing to the command buffer
     VkCommandBufferBeginInfo begin_info = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .pNext = NULL
     };
-    VkCommandBuffer buffer = context->resources[context->frame_index].command_buffer; //Getting a reference to the command buffer so that don't have to write out full code every time
+    VkCommandBuffer buffer = context->resources.command_buffer; //Getting a reference to the command buffer so that don't have to write out full code every time
     VULKAN_ERROR(vkBeginCommandBuffer(buffer, &begin_info), "Failed to begin command buffer operations");
 
     //Transition the image to VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
-    BOBi_vk_transition_image_layout(context->images[image_index], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, (VkAccessFlags2){},
+    BOBi_vk_transition_image_layout(context->images[context->next_swapchain_image_index], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, (VkAccessFlags2){},
                             VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                             VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_IMAGE_ASPECT_COLOR_BIT, buffer);
 
@@ -1728,7 +1930,7 @@ uint8_t BOBi_vk_record_command_buffer(BOB_Context *context, BOB_Renderer *r, uin
 
     VkRenderingAttachmentInfo attachment_info = {
         .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .pNext = NULL,
-        .imageView = context->views[image_index], //Specifies which view to render to
+            .imageView = context->views[context->next_swapchain_image_index], //Specifies which view to render to
         .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, //Specifies what to do with the image during rendering
         .storeOp = VK_ATTACHMENT_STORE_OP_STORE, //Specifies what to do with the image after rendering
@@ -1754,6 +1956,12 @@ uint8_t BOBi_vk_record_command_buffer(BOB_Context *context, BOB_Renderer *r, uin
     //Begin rendering
     vkCmdBeginRendering(buffer, &rendering_info);
 
+    return 1;
+}
+
+//Records draw calls into the general command buffer
+uint8_t BOBi_vk_draw(BOB_Context *context, BOB_Renderer *r) {
+    VkCommandBuffer buffer = context->resources.command_buffer; //Getting a reference to the command buffer so that don't have to write out full code every time
     //Bind the graphics pipeline
     vkCmdBindPipeline(buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, r->pipeline);
     //Bind the vertex buffer to the command buffer
@@ -1767,55 +1975,26 @@ uint8_t BOBi_vk_record_command_buffer(BOB_Context *context, BOB_Renderer *r, uin
     vkCmdSetScissor(buffer, 0, 1, &scissor);
 
     //Bind correct descriptor set for each frame to the descriptors in the shader
-    vkCmdBindDescriptorSets(buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, r->layout, 0, 1, &r->descriptor_set[context->frame_index], 0, NULL);
+    vkCmdBindDescriptorSets(buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, r->layout, 0, 1, &r->descriptor_set, 0, NULL);
     //Draw to the screen
     vkCmdDrawIndexed(buffer, num_indices, 1, 0, 0, 0);
 
+    BOBi_vk_update_uniform_buffer(context, r); //Update the uniforms sent to the shader
+
+    return 1;
+}
+
+//Draws every frame
+uint8_t BOBi_vk_end_frame(BOB_Context *context) {
+    VkCommandBuffer buffer = context->resources[context->frame_index].command_buffer; //Getting a reference to the command buffer so that don't have to write out full code every time
     vkCmdEndRendering(buffer); //End rendering
 
     //After rendering, transition the swapchain image to VK_IMAGE_LAYOUT_PRESENT_SRC_KHR so it can be presented to the screen
-    BOBi_vk_transition_image_layout(context->images[image_index], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+    BOBi_vk_transition_image_layout(context->images[context->next_swapchain_image_index], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
                             VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, (VkAccessFlags2){}, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                             VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, VK_IMAGE_ASPECT_COLOR_BIT, buffer);
 
     VULKAN_ERROR(vkEndCommandBuffer(buffer), "Failed to end command buffer");
-    return 1;
-}
-
-//Updates the uniform buffer with new texture position
-void BOBi_vk_update_uniform_buffer(BOB_Context *context, BOB_Renderer *r) {
-}
-
-//Draws every frame
-uint8_t draw_frame(BOB_Context *context, BOB_Renderer *r) {
-    //Wait until operations from previous frame have completed
-    VULKAN_ERROR(vkWaitForFences(context->log_device, 1, &context->resources[context->frame_index].draw_fence, VK_TRUE, UINT64_MAX), "Failed to wait for fence");
-    vkResetFences(context->log_device, 1, &context->resources[context->frame_index].draw_fence);
-
-    //Get the next swapchain image
-    uint32_t image_index;
-    VkResult res = vkAcquireNextImageKHR(context->log_device, context->swapchain, UINT64_MAX,
-                                         context->resources[context->frame_index].present_complete_semaphore, VK_NULL_HANDLE, &image_index);
-    //If the swapchain data is invalid, remake it
-    if(res == VK_ERROR_OUT_OF_DATE_KHR) {
-        BOBi_vk_recreate_swapchain(context, 0, 0); //TODO: Fix
-        return 1;
-    }
-    //If we haven't been able to get a valid image, throw an error
-    else if(res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR) {
-        assert(res == VK_TIMEOUT || res == VK_NOT_READY);
-        printf("Failed to acquire swap chain image\n");
-        return 0;
-    }
-
-    //CLear the command buffer and record the draw commands for the current frame
-    vkResetCommandBuffer(context->resources[context->frame_index].command_buffer, 0);
-    if(!BOBi_vk_record_command_buffer(context, r, image_index)) {
-        printf("Failed to record command buffer\n");
-        return 0;
-    }
-
-    BOBi_vk_update_uniform_buffer(context, r); //Update the uniforms sent to the shader
 
     //Submit render commands to the graphics queue
     VkPipelineStageFlagBits wait_dest_stage_mask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
@@ -1831,9 +2010,9 @@ uint8_t draw_frame(BOB_Context *context, BOB_Renderer *r) {
     VkPresentInfoKHR present_info = {
         .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .pNext = NULL,
         .waitSemaphoreCount = 1, .pWaitSemaphores = &context->resources[context->frame_index].render_finished_semaphore,
-        .swapchainCount = 1, .pSwapchains = &context->swapchain, .pImageIndices = &image_index
+        .swapchainCount = 1, .pSwapchains = &context->swapchain, .pImageIndices = &context->next_swapchain_image_index
     };
-    res = vkQueuePresentKHR(context->graphics_queue, &present_info);
+    VkResult res = vkQueuePresentKHR(context->graphics_queue, &present_info);
 
     //If its invalid, recreate the swapchain
     if(res == VK_ERROR_OUT_OF_DATE_KHR || res == VK_SUBOPTIMAL_KHR || context->framebuffer_resized) {
@@ -1848,12 +2027,108 @@ uint8_t draw_frame(BOB_Context *context, BOB_Renderer *r) {
     return 1;
 }
 
+void BOBi_vk_update_rend_dim(BOB_Context *context, BOB_Renderer *r, void *data, size_t data_sz) {
+    context->framebuffer_resized = 1;
+}
+
 #endif
+
+typedef uint8_t (*BOBi_back_create_tex_func)(BOB_Context *context, uint32_t tex_index, size_t width, size_t height, uint8_t * data, BOB_Format format);
+typedef uint8_t (*BOBi_back_create_mat_func)(BOB_Context *context, uint32_t mat_index, BOB_Shader_Data *shader_data, size_t num_shaders);
+typedef uint8_t (*BOBi_back_create_pb_func)(BOB_Context *context, uint32_t pb_index);
+typedef void (*BOBi_back_destr_obj_func)(BOB_Context *context, uint32_t obj_index);
+typedef uint8_t (*BOBi_back_begin_frame_func)(BOB_Context *context, BOB_Vector4 colour);
+typedef uint8_t (*BOBi_back_end_frame_func)(BOB_Context *context);
+typedef void (*BOBi_back_init_renderer_func)(BOB_Context *context, BOB_Renderer *r, size_t vert_buf_sz, size_t index_buf_sz);
+typedef void (*BOBi_back_destroy_renderer_func)(BOB_Context *context, BOB_Renderer *r);
+typedef uint8_t (*BOBi_back_draw_func)(BOB_Context *context, BOB_Renderer *r);
+typedef void (*BOBi_back_copy_data_tex_func)(BOB_Context *context, uint32_t atlas_index, BOB_Format format, BOB_Quad dest_rect, uint8_t *data);
+typedef uint8_t (*BOBi_back_bind_mem_func)(BOB_Context *context, uint32_t pb_index);
+typedef void (*BOBi_back_unbind_mem_func)(BOB_Context *context);
+typedef void (*BOBi_back_copy_into_buf_func)(BOB_Context *context, uint8_t *data, size_t sz);
+typedef void (*BOBi_back_copy_from_buf_func)(BOB_Context *context, uint8_t *dest, size_t sz);
+typedef void (*BOBi_back_update_tex_from_buf_func)(BOB_Context *context, uint32_t pb_index);
+typedef void (*BOBi_back_update_renderer_dimensions_func)(BOB_Context *context, BOB_Renderer *r, void *data, size_t sz);
+typedef void (*BOBi_back_destroy_context_func)(BOB_Context *context);
+
+typedef struct {
+    BOBi_back_destr_obj_func destroy_texture;
+    BOBi_back_destr_obj_func destroy_pixelbuffer;
+    BOBi_back_destr_obj_func destroy_material;
+    BOBi_back_create_tex_func create_texture;
+    BOBi_back_create_mat_func create_material;
+    BOBi_back_create_pb_func create_pixelbuffer;
+    BOBi_back_begin_frame_func begin_frame;
+    BOBi_back_end_frame_func end_frame;
+    BOBi_back_init_renderer_func init_renderer;
+    BOBi_back_destroy_renderer_func destroy_renderer;
+    BOBi_back_draw_func draw;
+    BOBi_back_copy_data_tex_func copy_data_to_tex;
+    BOBi_back_bind_mem_func bind_memory;
+    BOBi_back_unbind_mem_func unbind_memory;
+    BOBi_back_copy_into_buf_func copy_into_buf;
+    BOBi_back_copy_from_buf_func copy_from_buf;
+    BOBi_back_update_tex_from_buf_func update_tex_from_buf;
+    BOBi_back_update_renderer_dimensions_func update_rend_dim;
+    BOBi_back_destroy_context_func destroy_context;
+    BOB_Context_Type type;
+} BOBi_Backend_Vtable;
+
+BOBi_Backend_Vtable context_functions[BOB_NUM_CONTEXTS] = {
+    #ifdef BOB_INCLUDE_GLAD
+    (BOBi_Backend_Vtable) {
+        .destroy_texture = &BOBi_gl_delete_texture,
+        .destroy_pixelbuffer = &BOBi_gl_delete_buffer,
+        .destroy_material = &BOBi_gl_delete_program,
+        .create_texture = &BOBi_gl_create_tex,
+        .create_material = &BOBi_gl_create_material,
+        .create_pixelbuffer = &BOBi_gl_create_pbo,
+        .begin_frame = &BOBi_gl_clear_color,
+        .end_frame = &BOBi_gl_end_frame,
+        .init_renderer = &BOBi_gl_init_gpu_renderer_mem,
+        .destroy_renderer = &BOBi_gl_destroy_renderer_mem,
+        .draw = &BOBi_gl_draw,
+        .copy_data_to_tex = &BOBi_gl_copy_data_tex,
+        .bind_memory = &BOBi_gl_bind_pbo_mem,
+        .unbind_memory = &BOBi_gl_unbind_pbo_mem,
+        .copy_into_buf = &BOBi_gl_copy_pbo,
+        .copy_from_buf = &BOBi_gl_get_pbo_data,
+        .update_tex_from_buf = &BOBi_gl_upload_pbo_data,
+        .update_rend_dim = &BOBi_gl_copy_buffer_data,
+        .destroy_context = &BOBi_gl_destroy_context,
+        .type = BOB_OPENGL_CONTEXT,
+    },
+    #endif //BOB_INCLUDE_GLAD
+
+    #ifdef BOB_INCLUDE_VULKAN
+    (BOBi_Backend_Vtable) {
+        .destroy_texture = &BOBi_vk_destroy_texture,
+        .destroy_pixelbuffer = NULL, //TODO: FIGURE OUT HOW PBs in VULKAN WORK
+        .destroy_material = &BOBi_vk_destroy_material,
+        .create_texture = &BOBi_vk_create_texture,
+        .create_material = &BOBi_vk_create_material,
+        .create_pixelbuffer = NULL,
+        .begin_frame = &BOBi_vk_begin_frame,
+        .end_frame = *BOBi_vk_end_frame,
+        .destroy_renderer = &BOBi_vk_destroy_renderer,
+        .draw = &BOBi_vk_draw,
+        .copy_data_to_tex = NULL,
+        .bind_memory = NULL,
+        .unbind_memory = NULL,
+        .copy_into_buf = NULL,
+        .copy_from_buf = NULL,
+        .update_tex_from_buf = NULL,
+        .update_rend_dim = &BOBi_vk_update_rend_dim,
+        .destroy_context = &BOBi_vk_destroy_context,
+        .type = BOB_VULKAN_CONTEXT,
+    },
+    #endif //BOB_INCLUDE_VULKAN
+};
 
 //================================================= INTERNAL HELPER FUNCTIONS ===================================================
 
-uint8_t BOBi_create_context(BOB_Context_Type type, size_t atlas_capacity, size_t pixelbuf_capacity,
-                           size_t tex_capacity, size_t mat_capacity, size_t font_capacity, size_t width, size_t height, BOB_Context_Handle *context) {
+uint8_t BOBi_create_context(BOB_Context_Type type, size_t atlas_capacity, size_t pixelbuf_capacity, size_t tex_capacity, size_t mat_capacity,
+                            size_t font_capacity, size_t width, size_t height, BOB_Context_Handle *context) {
     if(bob_state.context_count >= bob_state.context_capcity) {
         printf("ERROR: Exceeded context capacity\n");
         return 0;
@@ -1879,10 +2154,6 @@ uint8_t BOBi_create_context(BOB_Context_Type type, size_t atlas_capacity, size_t
     }
 
     BOB_Context *intrn_context = &bob_state.contexts[index];
-
-    #ifdef BOB_INCLUDE_VULKAN
-    if(type == BOB_VULKAN_CONTEXT) BOBi_vk_init_vulkan_context(intrn_context, width, height);
-    #endif //BOB_INCLUDE_VULKAN
 
     //Calculating the size of the memory regions each buffer will end up using
     size_t atlas_sz = atlas_capacity * sizeof(BOB_Atlas);
@@ -1937,6 +2208,9 @@ uint8_t BOBi_create_context(BOB_Context_Type type, size_t atlas_capacity, size_t
     intrn_context->next_tex_slot = UINT32_MAX;
     intrn_context->next_mat_slot = UINT32_MAX;
     intrn_context->next_font_slot = UINT32_MAX;
+
+    //Set it to null so that no strange errors from uninitialised pointers
+    intrn_context->mapped_mem_ptr = NULL;
 
     //Create the default texture used
     intrn_context->type = type;
@@ -2449,22 +2723,16 @@ void BOBi_rotate_polygon(BOB_Vector2 *poly_points, size_t poly_size, float rotat
 }
 
 void BOBi_texture_free(BOB_Context *context, uint32_t index) {
-    #ifdef BOB_INCLUDE_GLAD
-    if(context->type == BOB_OPENGL_CONTEXT) BOBi_gl_delete_texture(&context->texture_table[index].opengl.texture);
-    #endif //BOB_INCLUDE_GLAD
+    context_functions[context->type].destroy_texture(context, index);
     context->texture_table[index] = (BOB_Texture){0}; //Clear the data
 }
 void BOBi_pixelbuffer_free(BOB_Context *context, uint32_t index) {
-    #ifdef BOB_INCLUDE_GLAD
-    if(context->type == BOB_OPENGL_CONTEXT) BOBi_gl_delete_buffer(&context->pixelbuffer_table[index].pbo);
-    #endif //BOB_INCLUDE_GLAD
+    context_functions[context->type].destroy_pixelbuffer(context, index);
     BOB_texture_free(&context->pixelbuffer_table[index].pixel_tex);
     context->pixelbuffer_table[index] = (BOB_PixelBuffer){0}; //Clear the data
 }
 void BOBi_material_free(BOB_Context *context, uint32_t index) {
-    #ifdef BOB_INCLUDE_GLAD
-    if(context->type == BOB_OPENGL_CONTEXT) BOBi_gl_delete_program(context->material_table[index].shader);
-    #endif //BOB_INCLUDE_GLAD
+    context_functions[context->type].destroy_material(context, index);
     free(context->material_table[index].uniforms);
     context->material_table[index] = (BOB_Material){0}; //Clear the data
 }
@@ -2665,6 +2933,7 @@ void BOBi_destroy_context(uint32_t index) {
             BOBi_font_free(context, i);
     }
     BOB_destroy_arena(&context->context_memory);
+    context_functions[context->type].destroy_context(context);
 
     *context = (BOB_Context){0}; //Clear all of the data
 }
@@ -2699,12 +2968,16 @@ void BOB_ortho(float left, float right, float bottom, float top, float nearZ, fl
     dest->m[3][3] = 1.0;
 }
 
-void BOB_clear_colour(BOB_Context_Handle handle, BOB_Vector4 colour) {
+void BOB_begin_frame(BOB_Context_Handle handle, BOB_Vector4 colour) {
     BOB_Context *context;
     BOBi_get_context_from_handle(handle, &context);
-    #ifdef BOB_INCLUDE_GLAD
-    if(context->type == BOB_OPENGL_CONTEXT) BOBi_gl_clear_color(colour);
-    #endif // BOB_INCLUDE_GLAD
+    context_functions[context->type].begin_frame(context, colour);
+}
+
+void BOB_end_frame(BOB_Context_Handle handle) {
+    BOB_Context *context;
+    BOBi_get_context_from_handle(handle, &context);
+    context_functions[context->type].end_frame(context);
 }
 
 //Converts an angle in degrees to radians
@@ -2825,14 +3098,12 @@ uint8_t BOB_renderer_init(BOB_Context_Handle context, size_t width, size_t heigh
     out->screen_height = height;
     out->screen_width = width;
 
-    #ifdef BOB_INCLUDE_GLAD
-    if(intrn_context->type == BOB_OPENGL_CONTEXT) BOBi_gl_init_gpu_renderer_mem(out, vert_buf_sz, index_buf_sz);
-    #endif //BOB_INCLUDE_GLAD
+    context_functions[intrn_context->type].init_renderer(intrn_context, out, vert_buf_sz, index_buf_sz);
 
     //Setting the projection matrix
     BOB_ortho(0.0f, out->screen_width, out->screen_height, 0.0f, -BOB_MAX_LAYER, 0.0f, &out->projection);
-    if(!BOB_create_material(context, (BOB_Shader_Data[2]){(BOB_Shader_Data){vertex_shader, BOB_VERTEX_SHADER},
-                            (BOB_Shader_Data){fragment_shader, BOB_FRAGMENT_SHADER}}, 2,
+    if(!BOB_create_material(context, (BOB_Shader_Data[2]){(BOB_Shader_Data){.shader_code = vertex_shader, .type = BOB_VERTEX_SHADER},
+                            (BOB_Shader_Data){.shader_code = fragment_shader, .type = BOB_FRAGMENT_SHADER}}, 2,
                             (BOB_Uniform[2]){BOB_uniform_mat4("uProjection", out->projection), BOB_uniform_signed_int("screenTexture", 0)}, 2, &out->default_mat)) return 0;
 
     //Initialise the stack of clip rects
@@ -2854,12 +3125,7 @@ void BOB_renderer_free(BOB_Renderer *r) {
     BOB_Context *intrn_context;
     if(BOBi_get_context(r->context, &intrn_context)) return;
 
-    #ifdef BOB_INCLUDE_GLAD
-    if(intrn_context->type == BOB_OPENGL_CONTEXT) {
-        glDeleteBuffers(1, &r->vbo);
-        glDeleteVertexArrays(1, &r->vao);
-    }
-    #endif
+    context_functions[intrn_context->type].destroy_renderer(intrn_context, r);
 
     free(r->stack->elems);
     r->stack->elems = NULL;
@@ -2988,9 +3254,7 @@ void BOB_renderer_end(BOB_Renderer *r) {
     BOB_Context *context = &bob_state.contexts[r->context];
     if(context->context_memory.memory == NULL) return;
 
-    #ifdef BOB_INCLUDE_GLAD
-    if(context->type == BOB_OPENGL_CONTEXT) BOBi_gl_draw(context, r);
-    #endif //BOB_INCLUDE_GLAD
+    context_functions[context->type].draw(context, r);
 }
 
 //Updates the dimensions of the screen that the renderer renders to.
@@ -3007,7 +3271,6 @@ void BOB_renderer_update_dimensions(BOB_Renderer *r, uint32_t width, uint32_t he
     BOB_ortho(0.0f, width, height, 0.0f, -BOB_MAX_LAYER, 0.0f, &r->projection);
     BOB_set_material_mat4(r->default_mat, 0, r->projection);
 
-    #ifdef BOB_INCLUDE_GLAD
     //Update the uv coordinates of the texture the renderer is rendering to
     float quadVertices[] = {
         0.0f, 0.0f,          0.0f, 0.0f,
@@ -3016,11 +3279,7 @@ void BOB_renderer_update_dimensions(BOB_Renderer *r, uint32_t width, uint32_t he
         width, 0.0f,         1.0f, 0.0f
     };
 
-    if(context->type == BOB_OPENGL_CONTEXT) BOBi_gl_copy_buffer_data(r->vbo, quadVertices, sizeof(quadVertices));
-    #endif //BOB_INCLUDE_GLAD
-    #ifdef BOB_INCLUDE_VULKAN
-    if(context->type == BOB_VULKAN_CONTEXT) context->framebuffer_resized = 1;
-    #endif //BOB_INCLUDE_VULKAN
+    context_functions->update_rend_dim(context, r, quadVertices, sizeof(quadVertices));
 }
 
 //================================================== TEXTURE FUNCTIONS ================================================
@@ -3053,14 +3312,15 @@ uint8_t BOB_create_texture(BOB_Context_Handle context, uint32_t width, uint32_t 
             intrn_context->next_tex_slot = UINT32_MAX;
     }
 
+    if(!context_functions[intrn_context->type].create_texture(intrn_context, index, width, height, data, format)) {
+        *tex |= BOBi_MSB;
+        return 0;
+    }
+
     intrn_context->texture_table[index].init = 1; //Setting the value to be initialised
     intrn_context->texture_table[index].width = width;
     intrn_context->texture_table[index].height = height;
     intrn_context->texture_table[index].format = format;
-
-    #ifdef BOB_INCLUDE_GLAD
-    if(intrn_context->type == BOB_OPENGL_CONTEXT) BOBi_gl_create_tex(&intrn_context->texture_table[index].opengl.texture, width, height, data, format);
-    #endif //BOB_INCLUDE_GLAD
 
     intrn_context->num_textures++;
     *tex = ((uint64_t)context << 32) | index;
@@ -3136,20 +3396,21 @@ uint8_t BOB_create_material(BOB_Context_Handle context, BOB_Shader_Data *data, s
             intrn_context->next_mat_slot = UINT32_MAX;
     }
 
-    uint32_t s;
     //TODO: Make an arena for this. Currently need to do this since cannot have references to stack memory in heap memory
     //otherwise will get pointer badness
     BOB_Uniform *temp = malloc(sizeof(BOB_Uniform) * num_uniforms);
     memcpy(temp, uniforms, num_uniforms * sizeof(BOB_Uniform));
 
-    #ifdef BOB_INCLUDE_GLAD
-    if(intrn_context->type == BOB_OPENGL_CONTEXT)
-        if(!BOBi_gl_create_material(data, num_shaders, temp, num_uniforms, mat, &s)) return 0;
-    #endif //BOB_INCLUDE_GLAD
+    intrn_context->material_table[index] = (BOB_Material){.uniforms = temp, .uniform_count = num_uniforms};
 
-    intrn_context->material_table[index] = (BOB_Material){.uniform_count = num_uniforms, .shader = s, .init = 1};
+    if(!context_functions[intrn_context->type].create_material(intrn_context, index, data, num_shaders)) {
+        *mat |= BOBi_MSB;
+        intrn_context->material_table[index].init = 0;
+        free(intrn_context->material_table[index].uniforms); //TODO: Change this to be arena based
+        return 0;
+    }
 
-    intrn_context->material_table[index].uniforms = temp;
+    intrn_context->material_table[index].init = 1;
 
     intrn_context->num_materials++;
     *mat = ((uint64_t)context << 32) | index;
@@ -3415,14 +3676,14 @@ uint8_t BOB_atlas_init(BOB_Context_Handle context, uint32_t width, uint32_t heig
             intrn_context->next_atlas_slot = UINT32_MAX;
     }
 
-    intrn_context->atlas_table[index].init = 1; //Setting the value to be initialised
-    intrn_context->atlas_table[index].format = format;
     if(!BOB_create_texture(context, width, height, NULL, format, &intrn_context->atlas_table[index].texture)) {
         intrn_context->atlas_table[index] = (BOB_Atlas){0};
         *a |= BOBi_MSB;
         return 0;
     }
 
+    intrn_context->atlas_table[index].init = 1; //Setting the value to be initialised
+    intrn_context->atlas_table[index].format = format;
     intrn_context->num_atlases++;
     *a = ((uint64_t)context << 32) | index;
     return 1;
@@ -3478,9 +3739,7 @@ uint8_t BOB_atlas_pack(BOB_Atlas_Handle a, uint8_t* pixels, size_t w, size_t h, 
         (float) h
     };
 
-    #ifdef BOB_INCLUDE_GLAD
-    if(context->type == BOB_OPENGL_CONTEXT) BOBi_gl_copy_data_tex(tex.opengl.texture, context->atlas_table[index].format, unnormalised, pixels);
-    #endif //BOB_INCLUDE_GLAD
+    context_functions[context->type].copy_data_to_tex(context, index, context->atlas_table[index].format, unnormalised, pixels);
 
     //Compute normalised UVs
     BOB_Quad uv = {
@@ -3548,10 +3807,10 @@ uint8_t BOB_pixelbuffer_init(BOB_Context_Handle context, size_t width, size_t he
     intrn_context->pixelbuffer_table[index].buf_sz = width * height * pixel_size;
 
     //Setting up the pbo for the pixel simulations
-    #ifdef BOB_INCLUDE_GLAD
-    if(intrn_context->type == BOB_OPENGL_CONTEXT)
-        if(!BOBi_gl_init_pbo(&intrn_context->pixelbuffer_table[index].pbo, intrn_context->pixelbuffer_table[index].buf_sz, pb)) return 0;
-    #endif
+    if(!context_functions[intrn_context->type].create_pixelbuffer(intrn_context, index)) {
+        *pb |= BOBi_MSB;
+        return 0;
+    }
 
     intrn_context->pixelbuffer_table[index].init = 1; //Setting the value to be initialised
 
@@ -3583,39 +3842,46 @@ BOB_PixelBuffer *BOB_get_pixelbuf_ref(BOB_PixelBuffer_Handle pb) {
     return &context->pixelbuffer_table[index];
 }
 
-//Draws the entire frame directly on the screen by copying its entire contents into the renderer's pixel buffer
-uint8_t BOB_pixelbuffer_updload_data(BOB_PixelBuffer_Handle pb, uint8_t *data) {
+//Binds the pixelbuffers gpu memory to cpu memory. This can currently only be done by one pixelbuffer at a time
+uint8_t BOB_bind_pixelbuffer_memory(BOB_PixelBuffer_Handle pb) {
     if(pb & BOBi_MSB) return 0; //Do not work with already invalid handles
-
     BOB_Context *context;
     uint32_t index;
     if(!BOBi_get_handle_data(pb, &context, &index)) return 0;
 
-    uint32_t tex_index;
-    if(!BOBi_get_index_from_handle(context->pixelbuffer_table[pb].pixel_tex, &tex_index)) return 0;
-    BOB_Texture tex = context->texture_table[tex_index];
-
-    #ifdef BOB_INCLUDE_GLAD
-    if(context->type == BOB_OPENGL_CONTEXT)
-        if(!BOBi_gl_copy_pbo(context->pixelbuffer_table[index].pbo, context->pixelbuffer_table[index].buf_sz, tex.opengl.texture, tex.width, tex.height, data)) return 0;
-    #endif
-    return 1;
+    return context_functions[context->type].bind_memory(context, index);
 }
+//Unbinds the pixelbuffer's gpu memory from cpu space
+void BOB_unbind_pixelbuffer_memory(BOB_PixelBuffer_Handle pb) {
+    if(pb & BOBi_MSB) return; //Do not work with already invalid handles
+    BOB_Context *context;
+    if(!BOBi_get_context_from_handle(pb, &context)) return;
+    return context_functions[context->type].unbind_memory(context);
+}
+//Updates the pixel data stored in a pixelbuffer
+void BOB_pixelbuffer_send_data(BOB_PixelBuffer_Handle pb, uint8_t *data, size_t data_sz) {
+    if(pb & BOBi_MSB) return; //Do not work with already invalid handles
+    BOB_Context *context;
+    if(!BOBi_get_context_from_handle(pb, &context)) return;
 
+    context_functions[context->type].copy_into_buf(context, data, data_sz);
+}
 //Gets the pixel data from a PixelBuffer
-uint8_t BOB_pixelbuffer_get_data(BOB_PixelBuffer_Handle pb, uint8_t *dest) {
-    if(pb & BOBi_MSB) return 0; //Do not work with already invalid handles
+void BOB_pixelbuffer_get_data(BOB_PixelBuffer_Handle pb, uint8_t *dest, size_t data_sz) {
+    if(pb & BOBi_MSB) return; //Do not work with already invalid handles
+    BOB_Context *context;
+    if(!BOBi_get_context_from_handle(pb, &context)) return;
 
+    context_functions[context->type].copy_from_buf(context, dest, data_sz);
+}
+//Uploads the pixel data from the pixelbuffer into its associated texture
+void BOB_pixelbuffer_updload(BOB_PixelBuffer_Handle pb) {
+    if(pb & BOBi_MSB) return; //Do not work with already invalid handles
     BOB_Context *context;
     uint32_t index;
-    if(!BOBi_get_handle_data(pb, &context, &index)) return 0;
+    if(!BOBi_get_handle_data(pb, &context, &index)) return;
 
-    #ifdef BOB_INCLUDE_GLAD
-    if(context->type == BOB_OPENGL_CONTEXT)
-        if(!BOBi_gl_get_pbo_data(context->pixelbuffer_table[index].pbo, context->pixelbuffer_table[index].buf_sz, dest)) return 0;
-    #endif
-
-    return 1;
+    context_functions[context->type].update_tex_from_buf(context, index);
 }
 
 //============================================================= DRAWING FUNCTIONS ===========================================
@@ -3915,10 +4181,6 @@ uint8_t BOB_draw_pixel_buffer_channel(BOB_Renderer *r, BOB_PixelBuffer_Handle pb
 
     if(!BOBi_clip_quad(r, &dimensions)) return 1; //Early exit
     BOB_Texture tex = context->texture_table[context->pixelbuffer_table[index].pixel_tex];
-
-    #ifdef BOB_INCLUDE_GLAD
-    if(context->type == BOB_OPENGL_CONTEXT) BOBi_gl_upload_pbo_data(context->pixelbuffer_table[index].pbo, tex.opengl.texture, tex.width, tex.height);
-    #endif //BOB_INCLUDE_GLAD
 
     return BOB_draw_texture_channel(r, context->pixelbuffer_table[index].pixel_tex, dimensions, uv_dimensions, colour, layer, rotation, mat, channel);
 }
