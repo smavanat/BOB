@@ -14,7 +14,7 @@
 //      Maybe allow custom vertex layout
 //      Debug mode with statistics
 
-#define BOB_INCLUDE_GLAD
+// #define BOB_INCLUDE_GLAD
 #define BOB_INCLUDE_VULKAN
 
 typedef uint64_t BOB_Texture_Handle;
@@ -46,14 +46,8 @@ typedef struct {
     VkImage image;
     VkImageView view;
     VkDeviceMemory memory;
+    VkDescriptorSet descriptor;
 } BOBi_Vulkan_Image;
-
-typedef struct {
-    VkSemaphore present_complete_semaphore;
-    VkFence draw_fence;
-    VkSemaphore render_finished_semaphore;
-    VkCommandBuffer command_buffer;
-} BOBi_Vulkan_Frame_Resources;
 
 //Callback function to create the vulkan surface used to represent the window
 typedef uint8_t (*BOB_vk_create_surface)(VkInstance, VkSurfaceKHR *);
@@ -135,8 +129,9 @@ uint8_t BOB_init(GLADloadproc proc, const char **required_extensions, size_t num
 uint8_t BOB_init(GLADloadproc proc, size_t num_contexts, size_t num_renderers);
 #endif // BOB_INCLUDE_VULKAN
 #else
-ifdef BOB_INCLUDE_VULKAN
+#ifdef BOB_INCLUDE_VULKAN
 uint8_t BOB_init(const char **required_extensions, size_t num_extensions, size_t num_contexts, size_t num_renderers);
+#endif //BOB_INCLUDE_VULKAN
 #endif //BOB_INCLUDE_GLAD
 void BOB_terminate(void);
 
@@ -266,7 +261,6 @@ typedef enum {
     BOB_UNIFORM_VEC2,
     BOB_UNIFORM_VEC3,
     BOB_UNIFORM_VEC4,
-    BOB_UNIFORM_TEXTURE,
     BOB_UNIFORM_MAT4,
 } BOB_Uniform_Type;
 
@@ -312,7 +306,6 @@ typedef struct {
 #define BOB_uniform_vector2(u_name, value) (BOB_Uniform){.name = (u_name), .vec2 = (value), .type = BOB_UNIFORM_VEC2, .is_reference = 0}
 #define BOB_uniform_vector3(u_name, value) (BOB_Uniform){.name = (u_name), .vec3 = (value), .type = BOB_UNIFORM_VEC3, .is_reference = 0}
 #define BOB_uniform_vector4(u_name, value) (BOB_Uniform){.name = (u_name), .vec4 = (value), .type = BOB_UNIFORM_VEC4, .is_reference = 0}
-#define BOB_uniform_texture(u_name, value) (BOB_Uniform){.name = (u_name), .tex_index = (value), .type = BOB_UNIFORM_TEXTURE, .is_reference = 0}
 #define BOB_uniform_mat4(u_name, value) (BOB_Uniform){.name = (u_name), .mat4 = (value), .type = BOB_UNIFORM_MAT4, .is_reference = 0}
 #define BOB_uniform_float_ref(u_name, value) (BOB_Uniform){.name = (u_name), .ptr = (value), .type = BOB_UNIFORM_FLOAT, .is_reference = 1}
 #define BOB_uniform_unsigned_int_ref(u_name, value) (BOB_Uniform){.name = (u_name), .ptr = (value), .type = BOB_UNIFORM_UNSIGNED_INT, .is_reference = 1}
@@ -320,7 +313,6 @@ typedef struct {
 #define BOB_uniform_vector2_ref(u_name, value) (BOB_Uniform){.name = (u_name), .ptr = (value), .type = BOB_UNIFORM_VEC2, .is_reference = 1}
 #define BOB_uniform_vector3_ref(u_name, value) (BOB_Uniform){.name = (u_name), .ptr = (value), .type = BOB_UNIFORM_VEC3, .is_reference = 1}
 #define BOB_uniform_vector4_ref(u_name, value) (BOB_Uniform){.name = (u_name), .ptr = (value), .type = BOB_UNIFORM_VEC4, .is_reference = 1}
-#define BOB_uniform_texture_ref(u_name, value) (BOB_Uniform){.name = (u_name), .ptr = (value), .type = BOB_UNIFORM_TEXTURE, .is_reference = 1}
 #define BOB_uniform_mat4_ref(u_name, value) (BOB_Uniform){.name = (u_name), .ptr = (value), .type = BOB_UNIFORM_MAT4, .is_reference = 1}
 
 uint8_t get_uniform(BOB_Material_Handle mat, char *name, BOB_Uniform_Handle *uniform);
@@ -341,8 +333,8 @@ typedef struct {
         struct {
             VkPipelineLayout layout;
             VkPipeline pipeline;
-            VkDescriptorSetLayout descriptor_set_layout;
-            VkDescriptorSet descriptor_set;
+            VkDescriptorSetLayout uniform_set_layout;
+            VkDescriptorSet uniform_descriptor_set;
             BOBi_Vulkan_Buffer uniform_buffer;
             void *uniform_buffer_mapped;
             uint32_t uniform_binding;
@@ -362,7 +354,6 @@ uint8_t BOB_set_material_signed_int(BOB_Material_Handle mat, BOB_Uniform_Handle 
 uint8_t BOB_set_material_vector2(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, BOB_Vector2 value);
 uint8_t BOB_set_material_vector3(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, BOB_Vector3 value);
 uint8_t BOB_set_material_vector4(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, BOB_Vector4 value);
-uint8_t BOB_set_material_texture(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, BOB_Texture_Handle value);
 uint8_t BOB_set_material_mat4(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, BOB_Mat4 value);
 uint8_t BOB_set_material_float_ref(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, float *value);
 uint8_t BOB_set_material_unsigned_int_ref(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, uint32_t *value);
@@ -370,7 +361,6 @@ uint8_t BOB_set_material_signed_int_ref(BOB_Material_Handle mat, BOB_Uniform_Han
 uint8_t BOB_set_material_vector2_ref(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, BOB_Vector2 *value);
 uint8_t BOB_set_material_vector3_ref(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, BOB_Vector3 *value);
 uint8_t BOB_set_material_vector4_ref(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, BOB_Vector4 *value);
-uint8_t BOB_set_material_texture_ref(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, BOB_Texture_Handle *value);
 uint8_t BOB_set_material_mat4_ref(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, BOB_Mat4 *value);
 
 typedef enum {
