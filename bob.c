@@ -694,6 +694,12 @@ uint8_t BOBi_vk_find_memory_type(BOB_Context *context, uint32_t type_filter, VkM
     return 0;
 }
 
+void BOBi_vk_destroy_image(BOB_Context *context, BOBi_Vulkan_Image *tex) {
+    if(tex->view != VK_NULL_HANDLE) vkDestroyImageView(context->log_device, tex->view, NULL);
+    if(tex->memory != VK_NULL_HANDLE) vkFreeMemory(context->log_device, tex->memory, NULL);
+    if(tex->image != VK_NULL_HANDLE) vkDestroyImage(context->log_device, tex->image, NULL);
+}
+
 //Creates an image and its allocated memory
 uint8_t BOBi_vk_create_image(BOB_Context *context, uint32_t width, uint32_t height, VkFormat format, VkImageTiling tiling,
                      VkImageUsageFlags usage, VkMemoryPropertyFlags properties, BOBi_Vulkan_Image *out_image) {
@@ -1313,14 +1319,14 @@ uint8_t BOBi_vk_create_depth_resources(BOB_Context *context) {
 //Creates the descriptor pools that hold the information on the data we send to the GPU
 uint8_t BOBi_vk_create_descriptor_pool(BOB_Context *context) {
     VkDescriptorPoolSize pool_size[2] = {
-        {.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = MAX_FRAMES_IN_FLIGHT},
-        {.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = MAX_FRAMES_IN_FLIGHT}
+        {.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 1},
+        {.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1}
     };
 
     VkDescriptorPoolCreateInfo pool_info = {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .pNext = NULL,
         .flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, 
-        .maxSets = MAX_FRAMES_IN_FLIGHT, .poolSizeCount = 2,
+        .maxSets = 1, .poolSizeCount = 1,
         .pPoolSizes = pool_size
     };
 
@@ -1397,7 +1403,7 @@ uint8_t BOBi_vk_init_vulkan_context(BOB_Context *context, size_t width, size_t h
     && BOBi_vk_create_frame_resources(context);
 }
 
-uint8_t BOB_create_vulkan_context(BOB_Context_Type type, size_t atlas_capacity, size_t pixelbuf_capacity, size_t tex_capacity, size_t mat_capacity,
+uint8_t BOB_create_vulkan_context(size_t atlas_capacity, size_t pixelbuf_capacity, size_t tex_capacity, size_t mat_capacity,
                             size_t font_capacity, size_t width, size_t height, BOB_Context_Handle *context, BOB_vk_create_surface surface_func) {
     if(!BOBi_create_context(BOB_VULKAN_CONTEXT, atlas_capacity, pixelbuf_capacity, tex_capacity, mat_capacity, font_capacity, width, height, context)) return 0;
 
@@ -1663,63 +1669,24 @@ uint8_t BOBi_vk_create_descriptor_set(BOB_Context *context, BOB_Material *mat) {
     VULKAN_ERROR(vkAllocateDescriptorSets(context->log_device, &alloc_info, &mat->vulkan.descriptor_set), "Failed to allocate descriptor sets");
 
 
-    VkWriteDescriptorSet descriptor_writes[BOB_MAX_UNIFORMS];
-    VkDescriptorBufferInfo descriptor_buffer;
-    VkDescriptorImageInfo descriptor_images[BOB_MAX_UNIFORMS];
-
     size_t range = 0;
-    int uniform_slot = -1;
-    size_t next_write = 0;
     for(size_t i = 0; i < mat->uniform_count; i++) {
         BOB_Uniform *uniform = &mat->uniforms[i];
 
         switch(uniform->type) {
-            case BOB_UNIFORM_TEXTURE:
-                descriptor_images[i] = (VkDescriptorImageInfo) {
-                    .sampler = context->sampler, .imageView = context->texture_table[uniform->tex_index & 0xFFFFFFFFFF].vulkan.view,
-                    .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-                };
-                descriptor_writes[next_write] = (VkWriteDescriptorSet){
-                    .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .pNext = NULL,
-                    .dstSet = mat->vulkan.descriptor_set, .dstBinding = uniform->vulkan.binding,
-                    .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                    .pImageInfo = &descriptor_images[i]
-                };
-                next_write++;
-            break;
+            case BOB_UNIFORM_TEXTURE: break;
             default:
-                if(uniform_slot < 0) {
-                    uniform_slot = i;
-                    descriptor_buffer = (VkDescriptorBufferInfo) {
-                        .buffer = mat->vulkan.uniform_buffer.buffer, .offset = 0, .range = range
-                    };
-
-                    descriptor_writes[next_write] = (VkWriteDescriptorSet){
-                        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .pNext = NULL,
-                        .dstSet = mat->vulkan.descriptor_set, .dstBinding = mat->vulkan.uniform_binding,
-                        .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                        .pBufferInfo = &descriptor_buffer
-                    };
-                    next_write++;
-                }
                 range = uniform->vulkan.offset + BOBi_std140_size(uniform->type);
             break;
         }
     }
-    descriptor_buffer.range = range;
 
-    vkUpdateDescriptorSets(context->log_device, next_write, descriptor_writes, 0, NULL);
+    //Create the uniform buffer to hold the data:
+    VULKAN_ERROR(!BOBi_vk_create_buffer(context, range, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                &mat->vulkan.uniform_buffer), "Failed to create uniform buffer");
 
-    return 1;
-}
-
-uint8_t BOBi_vk_create_uniform_buffer(BOB_Context *context, BOBi_Vulkan_Frame_Resources *frame) {
-        VkDeviceSize buffer_sz = sizeof(BOBi_Vulkan_UniformBufferObject);
-        VULKAN_ERROR(!BOBi_vk_create_buffer(context, buffer_sz, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                                    &frame->uniform_buffer), "Failed to create uniform buffer");
-
-        VULKAN_ERROR(vkMapMemory(context->log_device, frame->uniform_buffer.memory, 0, buffer_sz, 0, &frame->uniform_buffer_mapped),
-                     "Failed to map uniform buffer memory", BOBi_vk_destroy_buffer(context->log_device, &frame->uniform_buffer));
+    VULKAN_ERROR(vkMapMemory(context->log_device, mat->vulkan.uniform_buffer.memory, 0, range, 0, &mat->vulkan.uniform_buffer_mapped),
+                 "Failed to map uniform buffer memory", BOBi_vk_destroy_buffer(context->log_device, &mat->vulkan.uniform_buffer));
 
     return 1;
 }
@@ -1741,53 +1708,6 @@ void BOBi_vk_destroy_material(BOB_Context *context, uint32_t index) {
 
 //===================== RENDERER FUNCTIONS =================================
 
-//Creates a vertex buffer that is sent to the GPU
-uint8_t BOBi_vk_create_vertex_buffer(BOB_Context *context, BOB_Renderer *r, size_t num_vertices) {
-    //Create the staging buffer
-    VkDeviceSize buf_sz = sizeof(BOB_Render_Vertex) * num_vertices;
-    BOBi_Vulkan_Buffer staging_buf;
-    if(!BOBi_vk_create_buffer(context, buf_sz, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                  VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, &staging_buf)) return 0;
-
-    //Map the staging buffer to CPU memory and copy the vertex data into it
-    //TODO: Move this into the render function
-    // VULKAN_ERROR(!BOBi_vk_stream_to_buffer(context->log_device, vertices, buf_sz, &staging_buf), "Failed to stream data into a Vulkan Buffer");
-
-    //Create the destination VBO and map the data from the staging buffer into it
-    VULKAN_ERROR(!BOBi_vk_create_buffer(context, buf_sz, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                                &r->vertex_buffer), "Failed to create vertex buffer", BOBi_vk_destroy_buffer(context->log_device, &staging_buf));
-    BOBi_vk_copy_buffer(context, staging_buf.buffer, r->vertex_buffer.buffer, buf_sz);
-
-    //Destroy the staging buffer
-    BOBi_vk_destroy_buffer(context->log_device, &staging_buf);
-
-    return 1;
-}
-
-//Creates an index buffer to be sent to the GPU
-uint8_t BOBi_vk_create_index_buffer(BOB_Context *context, BOB_Renderer *r, size_t num_indicies) {
-    //Create the staging buffer
-    VkDeviceSize buf_sz = sizeof(uint32_t) * num_indicies;
-    BOBi_Vulkan_Buffer staging_buf;
-    if(!BOBi_vk_create_buffer(context, buf_sz, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                  VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, &staging_buf)) return 0;
-
-    //Map the staging buffer to CPU memory and copy the index data into it
-    //TODO: Move this into the render function
-    // VULKAN_ERROR(!BOBi_vk_stream_to_buffer(state->device.log_device, indices, buf_sz, &staging_buf), "Failed to stream data into a Vulkan Buffer");
-
-    //Create the actual destination buffer and copy the staging buffer data into it
-    VULKAN_ERROR(!BOBi_vk_create_buffer(context, buf_sz, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,  &r->index_buffer), "Failed to create index buffer", BOBi_vk_destroy_buffer(context->log_device, &staging_buf));
-    BOBi_vk_copy_buffer(context, staging_buf.buffer, r->index_buffer.buffer, buf_sz);
-
-    //Free the staging buffer
-    BOBi_vk_destroy_buffer(context->log_device, &staging_buf);
-
-    return 1;
-}
-
-//TODO: Add code to create the pipeline
 uint8_t BOBi_vk_create_renderer(BOB_Context *context, BOB_Renderer *r, size_t vert_buf_sz, size_t index_buf_sz) {
     //Create the vertex buffer
     VULKAN_ERROR(!BOBi_vk_create_buffer(context, vert_buf_sz, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
@@ -1798,14 +1718,12 @@ uint8_t BOBi_vk_create_renderer(BOB_Context *context, BOB_Renderer *r, size_t ve
 
     return 1;
 }
-//TODO: Add code to destroy the pipeline
 void BOBi_vk_destroy_renderer(BOB_Context *context, BOB_Renderer *r) {
     BOBi_vk_destroy_buffer(context->log_device, &r->vertex_buffer);
     BOBi_vk_destroy_buffer(context->log_device, &r->index_buffer);
 }
 
 // ================================= TEXTURE FUNCTIONS ===========================================
-
 void BOBi_vk_destroy_texture(BOB_Context *context, uint32_t tex_index) {
     BOBi_Vulkan_Image *tex = &context->texture_table[tex_index].vulkan;
 
@@ -1877,11 +1795,6 @@ uint8_t BOBi_vk_recreate_swapchain(BOB_Context *context, size_t width, size_t he
 }
 
 // ===================================== DRAWING FUNCTIONS =========================================
-
-//Updates the uniform buffer with new texture position
-//TODO: FIX
-void BOBi_vk_update_uniform_buffer(BOB_Context *context, BOB_Renderer *r) {
-}
 
 uint8_t BOBi_vk_begin_frame(BOB_Context *context, BOB_Vector4 colour) {
     //Wait until operations from previous frame have completed
@@ -1959,34 +1872,126 @@ uint8_t BOBi_vk_begin_frame(BOB_Context *context, BOB_Vector4 colour) {
     return 1;
 }
 
+//Updates the uniform buffer with new texture position
+void BOBi_vk_update_uniform(BOB_Context *context, BOB_Material *mat) {
+    VkWriteDescriptorSet descriptor_writes[BOB_MAX_UNIFORMS];
+    VkDescriptorImageInfo descriptor_images[BOB_MAX_UNIFORMS];
+    VkDescriptorBufferInfo descriptor_buffer;
+    int uniform_slot = -1;
+    size_t next_write = 0;
+    size_t range = 0;
+
+    for(size_t i = 0; i < mat->uniform_count; i++) {
+        BOB_Uniform *uniform = &mat->uniforms[i];
+
+        switch(uniform->type) {
+            case BOB_UNIFORM_TEXTURE:
+                descriptor_images[i] = (VkDescriptorImageInfo) {
+                    .sampler = context->sampler, .imageView = context->texture_table[uniform->tex_index & 0xFFFFFFFFFF].vulkan.view,
+                    .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                };
+                descriptor_writes[next_write] = (VkWriteDescriptorSet){
+                    .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .pNext = NULL,
+                    .dstSet = mat->vulkan.descriptor_set, .dstBinding = uniform->vulkan.binding,
+                    .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                    .pImageInfo = &descriptor_images[i]
+                };
+                next_write++;
+            break;
+            default:
+                if(uniform_slot < 0) {
+                    uniform_slot = i;
+                    descriptor_writes[next_write] = (VkWriteDescriptorSet){
+                        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .pNext = NULL,
+                        .dstSet = mat->vulkan.descriptor_set, .dstBinding = mat->vulkan.uniform_binding,
+                        .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                        .pBufferInfo = &descriptor_buffer
+                    };
+                    next_write++;
+                }
+                range = uniform->vulkan.offset + BOBi_std140_size(uniform->type);
+            break;
+        }
+    }
+    vkUpdateDescriptorSets(context->log_device, next_write, descriptor_writes, 0, NULL);
+
+    //Create the descriptor to hold the uniforms
+    descriptor_buffer = (VkDescriptorBufferInfo) {
+        .buffer = mat->vulkan.uniform_buffer.buffer, .offset = 0, .range = range
+    };
+
+    vkUpdateDescriptorSets(context->log_device, next_write, descriptor_writes, 0, NULL);
+
+}
+
 //Records draw calls into the general command buffer
 uint8_t BOBi_vk_draw(BOB_Context *context, BOB_Renderer *r) {
     VkCommandBuffer buffer = context->resources.command_buffer; //Getting a reference to the command buffer so that don't have to write out full code every time
-    //Bind the graphics pipeline
-    vkCmdBindPipeline(buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, r->pipeline);
+
     //Bind the vertex buffer to the command buffer
     vkCmdBindVertexBuffers(buffer, 0, 1, &r->vertex_buffer.buffer, (VkDeviceSize[]){0});
     //Bind the index buffer to the command buffer
-    vkCmdBindIndexBuffer(buffer, r->index_buffer.buffer, 0, VK_INDEX_TYPE_UINT16);
+    vkCmdBindIndexBuffer(buffer, r->index_buffer.buffer, 0, VK_INDEX_TYPE_UINT32);
+
+    //Copying the data from CPU to GPU
+    size_t index_sz = sizeof(uint32_t) * r->batch.num_indices;
+    size_t vertex_sz = sizeof(BOB_Render_Vertex) * r->batch.num_vertices;
+    //Create the staging buffer
+    VkDeviceSize buf_sz = (index_sz > vertex_sz) ? index_sz : vertex_sz;
+    BOBi_Vulkan_Buffer staging_buf;
+    if(!BOBi_vk_create_buffer(context, buf_sz, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                  VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, &staging_buf)) return 0;
+
+    //Map the staging buffer to CPU memory and copy the index data into it
+    VULKAN_ERROR(!BOBi_vk_stream_to_buffer(context->log_device, r->batch.vertex_arena.memory, index_sz, &staging_buf), "Failed to stream data into a Vulkan Buffer");
+    //Create the actual destination buffer and copy the staging buffer data into it
+    BOBi_vk_copy_buffer(context, staging_buf.buffer, r->index_buffer.buffer, index_sz);
+
+    //Map the staging buffer to CPU memory and copy the vertex data into it
+    VULKAN_ERROR(!BOBi_vk_stream_to_buffer(context->log_device, r->batch.vertex_arena_2.memory, vertex_sz, &staging_buf), "Failed to stream data into a Vulkan Buffer");
+    //Create the actual destination buffer and copy the staging buffer data into it
+    BOBi_vk_copy_buffer(context, staging_buf.buffer, r->vertex_buffer.buffer, vertex_sz);
+
+    //Free the staging buffer
+    BOBi_vk_destroy_buffer(context->log_device, &staging_buf);
+
     //Need to set the viewport and scissor since we're doing it dynamically
     VkViewport viewport = {0.0f, 0.0f, context->extent.width, context->extent.height, 0.0f, 1.0f};
     vkCmdSetViewport(buffer, 0, 1, &viewport);
     VkRect2D scissor = {(VkOffset2D){0, 0}, context->extent};
     vkCmdSetScissor(buffer, 0, 1, &scissor);
 
-    //Bind correct descriptor set for each frame to the descriptors in the shader
-    vkCmdBindDescriptorSets(buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, r->layout, 0, 1, &r->descriptor_set, 0, NULL);
-    //Draw to the screen
-    vkCmdDrawIndexed(buffer, num_indices, 1, 0, 0, 0);
+    for(size_t i = 0; i < r->batch.num_draw_calls; i++) {
+        BOBi_Draw_Call call = BOBi_get_arena_elem(r->batch.draw_call_arena, i, BOBi_Draw_Call);
 
-    BOBi_vk_update_uniform_buffer(context, r); //Update the uniforms sent to the shader
+        uint32_t mat_index, tex_index;
+        if(!BOBi_get_index_from_handle(call.mat, &mat_index)) return 0;
+        if(!BOBi_get_index_from_handle(call.tex, &tex_index)) return 0;
 
+        BOB_Material *mat = &context->material_table[mat_index];
+        //Set the material to use this texture. This is very fragile:
+        for(size_t i = 0; i < mat->uniform_count; i++) {
+            if(mat->uniforms[i].type == BOB_UNIFORM_TEXTURE) {
+                mat->uniforms[i].tex_index = call.tex;
+                mat->uniforms[i].is_reference = 0;
+            }
+        }
+        BOBi_vk_update_uniform(context, mat);
+
+        //Bind the graphics pipeline
+        vkCmdBindPipeline(buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, mat->vulkan.pipeline);
+        //Bind correct descriptor set for each frame to the descriptors in the shader
+        vkCmdBindDescriptorSets(buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, mat->vulkan.layout, 0, 1, &mat->vulkan.descriptor_set, 0, NULL);
+        //Draw to the screen
+        vkCmdDrawIndexed(buffer, call.num_indices, 1, BOBi_get_arena_elem(r->batch.vertex_arena, call.index_offset, uint32_t), 0, 0);
+
+    }
     return 1;
 }
 
 //Draws every frame
 uint8_t BOBi_vk_end_frame(BOB_Context *context) {
-    VkCommandBuffer buffer = context->resources[context->frame_index].command_buffer; //Getting a reference to the command buffer so that don't have to write out full code every time
+    VkCommandBuffer buffer = context->resources.command_buffer; //Getting a reference to the command buffer so that don't have to write out full code every time
     vkCmdEndRendering(buffer); //End rendering
 
     //After rendering, transition the swapchain image to VK_IMAGE_LAYOUT_PRESENT_SRC_KHR so it can be presented to the screen
@@ -2000,16 +2005,16 @@ uint8_t BOBi_vk_end_frame(BOB_Context *context) {
     VkPipelineStageFlagBits wait_dest_stage_mask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     VkSubmitInfo sub_info = {
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .pNext = NULL,
-        .waitSemaphoreCount = 1, .pWaitSemaphores = &context->resources[context->frame_index].present_complete_semaphore, .pWaitDstStageMask = &wait_dest_stage_mask,
-        .commandBufferCount = 1, .pCommandBuffers = &context->resources[context->frame_index].command_buffer,
-        .signalSemaphoreCount = 1, .pSignalSemaphores = &context->resources[context->frame_index].render_finished_semaphore
+        .waitSemaphoreCount = 1, .pWaitSemaphores = &context->resources.present_complete_semaphore, .pWaitDstStageMask = &wait_dest_stage_mask,
+        .commandBufferCount = 1, .pCommandBuffers = &buffer,
+        .signalSemaphoreCount = 1, .pSignalSemaphores = &context->resources.render_finished_semaphore
     };
-    VULKAN_ERROR(vkQueueSubmit(context->graphics_queue, 1, &sub_info, context->resources[context->frame_index].draw_fence), "Failed to Submit render data to the queue");
+    VULKAN_ERROR(vkQueueSubmit(context->graphics_queue, 1, &sub_info, context->resources.draw_fence), "Failed to Submit render data to the queue");
 
     //Get the present status
     VkPresentInfoKHR present_info = {
         .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .pNext = NULL,
-        .waitSemaphoreCount = 1, .pWaitSemaphores = &context->resources[context->frame_index].render_finished_semaphore,
+        .waitSemaphoreCount = 1, .pWaitSemaphores = &context->resources.render_finished_semaphore,
         .swapchainCount = 1, .pSwapchains = &context->swapchain, .pImageIndices = &context->next_swapchain_image_index
     };
     VkResult res = vkQueuePresentKHR(context->graphics_queue, &present_info);
@@ -2021,8 +2026,6 @@ uint8_t BOBi_vk_end_frame(BOB_Context *context) {
         return 1;
     }
     VULKAN_ERROR(res, "Failed to acquire swap chain image");
-
-    context->frame_index = (context->frame_index + 1) % MAX_FRAMES_IN_FLIGHT; //Update the index of the frame we are currently updating
 
     return 1;
 }

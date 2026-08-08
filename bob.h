@@ -37,8 +37,6 @@ typedef struct {
 #include <vulkan/vulkan.h>
 #include <vulkan/vulkan_core.h>
 
-#define MAX_FRAMES_IN_FLIGHT 2
-
 typedef struct {
     VkBuffer buffer;
     VkDeviceMemory memory;
@@ -125,7 +123,7 @@ uint8_t BOB_create_opengl_context(size_t atlas_capacity, size_t pixelbuf_capacit
                            size_t tex_capacity, size_t mat_capacity, size_t font_capacity, BOB_Context_Handle *context);
 #endif //BOB_INCLUDE_GLAD
 #ifdef BOB_INCLUDE_VULKAN
-uint8_t BOB_create_vulkan_context(BOB_Context_Type type, size_t atlas_capacity, size_t pixelbuf_capacity, size_t tex_capacity, size_t mat_capacity,
+uint8_t BOB_create_vulkan_context(size_t atlas_capacity, size_t pixelbuf_capacity, size_t tex_capacity, size_t mat_capacity,
                             size_t font_capacity, size_t width, size_t height, BOB_Context_Handle *context, BOB_vk_create_surface surface_func);
 #endif //BOB_INCLUDE_VULKAN
 void BOB_destroy_context(BOB_Context_Handle *context);
@@ -396,9 +394,9 @@ typedef struct {
 } BOBi_Clip_Stack;
 
 typedef struct {
-    BOBi_Arena vertex_arena;
+    BOBi_Arena vertex_arena; //Used for indices as well
     BOBi_Arena vertex_arena_2;
-    BOBi_Arena draw_call_arena; //Could repurpose this for indices as well
+    BOBi_Arena draw_call_arena;
     size_t num_vertices;
     size_t num_indices;
     size_t num_draw_calls;
