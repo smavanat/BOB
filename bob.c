@@ -398,6 +398,10 @@ uint8_t BOBi_gl_draw(BOB_Context *context, BOB_Renderer *r) {
 }
 
 void BOBi_gl_copy_buffer_data(BOB_Context *context, BOB_Renderer *r, void *data, size_t data_sz) {
+    //Update projection matrix for renderer
+    BOB_ortho_gl(0.0f, width, height, 0.0f, -BOB_MAX_LAYER, 0.0f, &r->projection);
+    BOB_set_material_mat4(r->default_mat, 0, r->projection);
+
     glBindBuffer(GL_ARRAY_BUFFER, r->vao);
     glBufferSubData(GL_ARRAY_BUFFER, 0, data_sz, data);
 }
@@ -626,6 +630,9 @@ const char *fragment_shader = "#version 330 core\n"
                               "}\n";
 
 uint8_t BOBi_gl_create_default_material(BOB_Context_Handle context, BOB_Renderer *r) {
+    //Setting the projection matrix
+    BOB_ortho_gl(0.0f, out->screen_width, out->screen_height, 0.0f, -BOB_MAX_LAYER, 0.0f, &out->projection);
+
     return BOB_create_material(context, (BOB_Shader_Data[2]){(BOB_Shader_Data){.shader_code = vertex_shader, .type = BOB_VERTEX_SHADER},
                             (BOB_Shader_Data){.shader_code = fragment_shader, .type = BOB_FRAGMENT_SHADER}}, 2,
                             (BOB_Uniform[2]){BOB_uniform_mat4("uProjection", r->projection), BOB_uniform_signed_int("screenTexture", 0)}, 2, &r->default_mat);
@@ -1569,7 +1576,13 @@ VkPipelineRasterizationStateCreateInfo rasteriser = {
 
     //Configuring Colour Blending
     VkPipelineColorBlendAttachmentState colour_blend_attachment = {
-        .blendEnable = VK_FALSE,
+        .blendEnable = VK_TRUE,
+        .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
+        .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+        .colorBlendOp = VK_BLEND_OP_ADD,
+        .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+        .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+        .alphaBlendOp = VK_BLEND_OP_ADD,
         .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT
     };
 
@@ -1586,32 +1599,21 @@ VkPipelineRasterizationStateCreateInfo rasteriser = {
     VULKAN_ERROR(vkCreatePipelineLayout(context->log_device, &pipeline_layout_info, NULL, &mat->vulkan.layout), "Failed to create pipeline layout",
                  for(size_t i = 0; i < num_shaders; i++) { vkDestroyShaderModule(context->log_device, shader_stages[i].module, NULL); } free(shader_stages););
 
-    //Specify the depth stencil data
-    // VkPipelineDepthStencilStateCreateInfo depth_stencil = {
-    //     .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO, .pNext = NULL,
-    //     .depthTestEnable = VK_TRUE, .depthWriteEnable = VK_TRUE, .depthCompareOp = VK_COMPARE_OP_LESS,
-    //     .depthBoundsTestEnable = VK_FALSE, .stencilTestEnable = VK_FALSE
-    // };
-VkPipelineDepthStencilStateCreateInfo depth_stencil = {
-    .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
-    .depthTestEnable = VK_FALSE,
-    .depthWriteEnable = VK_FALSE,
-    .depthCompareOp = VK_COMPARE_OP_ALWAYS,
-    .depthBoundsTestEnable = VK_FALSE,
-    .stencilTestEnable = VK_FALSE
-};
-    //Specify the formats of the attachments used during rendering
-    // VkPipelineRenderingCreateInfo pipeline_rendering_create_info = {
-    //     .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .pNext = NULL,
-    //     .colorAttachmentCount = 1, .pColorAttachmentFormats = &context->format.format,
-    // };
+    VkPipelineDepthStencilStateCreateInfo depth_stencil = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO, .pNext = NULL,
+        .depthTestEnable = VK_TRUE,
+        .depthWriteEnable = VK_TRUE,
+        .depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL,
+        .depthBoundsTestEnable = VK_FALSE,
+        .stencilTestEnable = VK_FALSE
+    };
     VkPipelineRenderingCreateInfo pipeline_rendering_create_info = {
-    .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
-    .colorAttachmentCount = 1,
-    .pColorAttachmentFormats = &context->format.format,
-    .depthAttachmentFormat = VK_FORMAT_UNDEFINED,
-    .stencilAttachmentFormat = VK_FORMAT_UNDEFINED
-};
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .pNext = NULL,
+        .colorAttachmentCount = 1,
+        .pColorAttachmentFormats = &context->format.format,
+        .depthAttachmentFormat = VK_FORMAT_UNDEFINED,
+        .stencilAttachmentFormat = VK_FORMAT_UNDEFINED
+    };
     VULKAN_ERROR(!BOBi_vk_find_depth_format(context, &pipeline_rendering_create_info.depthAttachmentFormat), "Failed to create pipeline layout",
                  for(size_t i = 0; i < num_shaders; i++) { vkDestroyShaderModule(context->log_device, shader_stages[i].module, NULL); } free(shader_stages););
 
@@ -1918,10 +1920,10 @@ void BOBi_vk_destroy_texture(BOB_Context *context, uint32_t tex_index) {
 
 VkFormat BOBi_vk_convert_format(BOB_Format format) {
     switch (format) {
-        case BOB_RED: return VK_FORMAT_R8_SRGB;
-        case BOB_RG: return VK_FORMAT_R8G8_SRGB;
-        case BOB_RGB: return VK_FORMAT_R8G8B8_SRGB;
-        case BOB_RGBA: return VK_FORMAT_R8G8B8A8_SRGB;
+        case BOB_RED: return VK_FORMAT_R8_UNORM;
+        case BOB_RG: return VK_FORMAT_R8G8_UNORM;
+        case BOB_RGB: return VK_FORMAT_R8G8B8_UNORM;
+        case BOB_RGBA: return VK_FORMAT_R8G8B8A8_UNORM;
     }
 }
 
@@ -2070,8 +2072,7 @@ uint8_t BOBi_vk_draw(BOB_Context *context, BOB_Renderer *r) {
         .sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .pNext = NULL,
         .renderArea = {.offset = {0, 0}, .extent = context->extent},
         .layerCount = 1, .colorAttachmentCount = 1, .pColorAttachments = &attachment_info,
-        .pDepthAttachment = NULL
-        // .pDepthAttachment = &depth_attachment_info
+        .pDepthAttachment = &depth_attachment_info
     };
 
     size_t index_sz = sizeof(uint32_t) * r->batch.num_indices;
@@ -2130,7 +2131,7 @@ uint8_t BOBi_vk_draw(BOB_Context *context, BOB_Renderer *r) {
     //Begin rendering
     vkCmdBeginRendering(buffer, &rendering_info);
 
-    VkViewport viewport = { .x = 0.0f, .y = 0.0f, .width = (float)context->extent.width, .height = (float)context->extent.height, .minDepth = 0.0f, .maxDepth = 1.0f };
+    VkViewport viewport = { .x = 0.0f, .y = (float)context->extent.height, .width = (float)context->extent.width, .height = -(float)context->extent.height, .minDepth = 0.0f, .maxDepth = 1.0f };
 
     vkCmdSetViewport(buffer, 0, 1, &viewport);
 
@@ -2145,16 +2146,6 @@ uint8_t BOBi_vk_draw(BOB_Context *context, BOB_Renderer *r) {
     BOBi_get_index_from_handle(r->default_mat, &index);
     BOB_Material *mat = &context->material_table[index];
 
-    // BOBi_vk_update_uniform(context, mat);
-    // BOBi_vk_write_buffer_descriptor(context, mat->vulkan.uniform_descriptor_set, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 0, mat->vulkan.uniform_buffer, mat->uniforms[mat->uniform_count-1].vulkan.offset + BOBi_std140_size(mat->uniforms[mat->uniform_count-1].type));
-    // // Use ONE known test pipeline.
-    // vkCmdBindPipeline(
-    //     buffer,
-    //     VK_PIPELINE_BIND_POINT_GRAPHICS,
-    //     context->material_table[index].vulkan.pipeline
-    // );
-    // vkCmdBindDescriptorSets(buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, mat->vulkan.layout, 0, 1, &mat->vulkan.uniform_descriptor_set, 0, NULL);
-
     //Bind the vertex buffer to the command buffer
     vkCmdBindVertexBuffers(buffer, 0, 1, &r->vertex_buffer.buffer, (VkDeviceSize[]){0});
     //Bind the index buffer to the command buffer
@@ -2163,6 +2154,7 @@ uint8_t BOBi_vk_draw(BOB_Context *context, BOB_Renderer *r) {
     uint32_t old_mat = UINT32_MAX, old_tex = UINT32_MAX;
     for(size_t i = 0; i < r->batch.num_draw_calls; i++) {
         BOBi_Draw_Call call = BOBi_get_arena_elem(r->batch.draw_call_arena, i, BOBi_Draw_Call);
+        printf("Draw call %zu, Num indicies: %zu, Offset: %zu\n", i, call.num_indices, call.index_offset);
 
         uint32_t mat_index, tex_index;
         if(!BOBi_get_index_from_handle(call.mat, &mat_index)) return 0;
@@ -2179,6 +2171,7 @@ uint8_t BOBi_vk_draw(BOB_Context *context, BOB_Renderer *r) {
             vkCmdBindDescriptorSets(buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, mat->vulkan.layout, 0, 1, &mat->vulkan.uniform_descriptor_set, 0, NULL);
         }
         if(old_tex != tex_index) {
+            printf("Switching texture\n");
             //Set the material to use this texture.
             BOB_Texture *tex = &context->texture_table[tex_index];
             vkCmdBindDescriptorSets(buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, mat->vulkan.layout, 1, 1, &tex->vulkan.descriptor, 0, NULL);
@@ -2233,6 +2226,9 @@ uint8_t BOBi_vk_end_frame(BOB_Context *context) {
 }
 
 void BOBi_vk_update_rend_dim(BOB_Context *context, BOB_Renderer *r, void *data, size_t data_sz) {
+    //Update the default projection matrix
+    BOB_ortho_vk( 0.0f, r->screen_width, r->screen_height, 0.0f, 0.0f, BOB_MAX_LAYER, &r->projection);
+
     context->framebuffer_resized = 1;
 }
 
@@ -2612,6 +2608,9 @@ unsigned char shader_vert_spv[] = {
 };
 unsigned int shader_vert_spv_len = 1700;
 uint8_t BOBi_vk_create_default_material(BOB_Context_Handle context, BOB_Renderer *r) {
+    //Update the default projection matrix
+    BOB_ortho_vk( 0.0f, r->screen_width, r->screen_height, 0.0f, 0.0f, BOB_MAX_LAYER, &r->projection);
+
     return BOB_create_material(context, (BOB_Shader_Data[2]){
         (BOB_Shader_Data){.shader_code = (const char *)shader_vert_spv, .code_buf_sz = shader_vert_spv_len, .entrypoint_name = "main", .type = BOB_VERTEX_SHADER},
         (BOB_Shader_Data){.shader_code = (const char *)shader_frag_spv, .code_buf_sz = shader_frag_spv_len, .entrypoint_name = "main", .type = BOB_FRAGMENT_SHADER},
@@ -3542,7 +3541,7 @@ void BOB_destroy_context(BOB_Context_Handle *context) {
 // ==================================== MISCELLANEOUS FUNCTIONS ========================================
 
 //Calculates the projection matrix
-void BOB_ortho(float left, float right, float bottom, float top, float nearZ, float farZ, BOB_Mat4 *dest) {
+void BOB_ortho_gl(float left, float right, float bottom, float top, float nearZ, float farZ, BOB_Mat4 *dest) {
     for(int i = 0; i < 4; i++) {
         for(int j = 0; j < 4; j++) {
             dest->m[i][j] = 0;
@@ -3560,6 +3559,30 @@ void BOB_ortho(float left, float right, float bottom, float top, float nearZ, fl
     dest->m[3][1] =-(top + bottom) * tb;
     dest->m[3][2] = (farZ + nearZ) * mfn;
     dest->m[3][3] = 1.0;
+}
+void BOB_ortho_vk(float left, float right, float bottom, float top, float nearZ, float farZ, BOB_Mat4 *dest) {
+    for (int i = 0; i < 4; i++) {
+        for (int j = 0; j < 4; j++) {
+            dest->m[i][j] = 0.0f;
+        }
+    }
+
+    float rl = 1.0f / (right - left);
+    float tb = 1.0f / (top - bottom);
+    float fn = 1.0f / (farZ - nearZ);
+
+    dest->m[0][0] = 2.0f * rl;
+    dest->m[1][1] = 2.0f * tb;
+
+    // Reversed Z:
+    // nearZ -> 1
+    // farZ  -> 0
+    dest->m[2][2] = -fn;
+    dest->m[3][2] = farZ * fn;
+
+    dest->m[3][0] = -(right + left) * rl;
+    dest->m[3][1] = -(top + bottom) * tb;
+    dest->m[3][3] = 1.0f;
 }
 
 void BOB_begin_frame(BOB_Context_Handle handle, BOB_Vector4 colour) {
@@ -3642,9 +3665,6 @@ uint8_t BOB_renderer_init(BOB_Context_Handle context, size_t width, size_t heigh
     out->screen_width = width;
 
     context_functions[intrn_context->type].init_renderer(intrn_context, out, vert_buf_sz, index_buf_sz);
-
-    //Setting the projection matrix
-    BOB_ortho(0.0f, out->screen_width, out->screen_height, 0.0f, -BOB_MAX_LAYER, 0.0f, &out->projection);
 
     //Creating the default material
     if(!context_functions[intrn_context->type].create_default_mat(context, out)) return 0;
@@ -3809,10 +3829,6 @@ void BOB_renderer_update_dimensions(BOB_Renderer *r, uint32_t width, uint32_t he
 
     r->screen_width = width;
     r->screen_height = height;
-
-    //Update projection matrix for renderer
-    BOB_ortho(0.0f, width, height, 0.0f, -BOB_MAX_LAYER, 0.0f, &r->projection);
-    BOB_set_material_mat4(r->default_mat, 0, r->projection);
 
     //Update the uv coordinates of the texture the renderer is rendering to
     float quadVertices[] = {
@@ -5216,9 +5232,11 @@ uint8_t BOB_draw_codepoint(BOB_Renderer *r, BOB_Font_Handle font, uint32_t codep
     if(hash_index == UINT32_MAX) return 0; //Codepoint doesn't exist
 
     BOB_Glyph g = f.glyphs[hash_index];
+    uint32_t tex_index;
+    if(!BOBi_get_index_from_handle(f.pages[g.page], &tex_index)) return 0;
     //Setting the flags we pass to the shader
     uint8_t chnl_flags = g.channel | BOB_GLYPH_BIT;
-    if(context->texture_table[f.pages[g.page]].format == BOB_RED) chnl_flags |= BOB_GREYSCALE_BIT;
+    if(context->texture_table[tex_index].format == BOB_RED) chnl_flags |= BOB_GREYSCALE_BIT;
 
     BOB_draw_texture_channel(r, f.pages[g.page], (BOB_Quad){pos->x + g.x_offset, pos->y + g.y_offset, g.sub_rect.w, g.sub_rect.h}, g.sub_rect, colour, layer, 0.0f, r->default_mat, chnl_flags);
     pos->x += g.x_advance;

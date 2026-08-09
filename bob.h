@@ -3,11 +3,12 @@
 #include <stdint.h>
 #include <stddef.h>
 
-//TODO: Vulkan support
+//TODO: Vulkan support - Fix memory leaks, screen resizing, and figure out why text is coloured in opengl version and not vulkan version
 //      Use macros to hide getting index and context from a handle and finding index where next object is placed
-//      Add semaphores/mutexes when getting a context from renderers/objects -> look at osn notes on readers/writers problem
-//      Do proper error reporting and document what each error code means somewhere
+//      Merge Renderer and context together
+//      Hide all of the structs in the .c file and use handles everywhere
 //
+//      Do proper error reporting and document what each error code means somewhere
 //      Allow the user to define render passes -> Custom framebuffers
 //      Allow the user to define their own pipeline and sampler layout
 //      Allow the user to select what kind of device you want vulkan to use
@@ -489,7 +490,8 @@ uint8_t BOB_draw_texture_channel(BOB_Renderer *r, BOB_Texture_Handle texture, BO
 uint8_t BOB_draw_pixel_buffer_channel(BOB_Renderer *r, BOB_PixelBuffer_Handle pb, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, uint16_t layer, float rotation, BOB_Material_Handle mat, uint8_t channel);
 
 //Determines the projection matrix
-void BOB_ortho(float left, float right, float bottom, float top, float nearZ, float farZ, BOB_Mat4 *dest);
+void BOB_ortho_gl(float left, float right, float bottom, float top, float nearZ, float farZ, BOB_Mat4 *dest);
+void BOB_ortho_vk(float left, float right, float bottom, float top, float nearZ, float farZ, BOB_Mat4 *dest);
 //Clears the collur of the screen
 void BOB_begin_frame(BOB_Context_Handle context, BOB_Vector4 colour);
 void BOB_end_frame(BOB_Context_Handle context);
