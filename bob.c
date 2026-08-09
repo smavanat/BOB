@@ -14,10 +14,10 @@
 #define BOBi_MSB 0x80000000
 
 typedef struct {
-    BOB_Context *contexts;
-    size_t context_count;
-    size_t context_capcity;
-    size_t next_context_slot;
+    BOB_Renderer *renderers;
+    size_t renderer_count;
+    size_t renderer_capcity;
+    size_t next_renderer_slot;
     #ifdef BOB_INCLUDE_VULKAN
     VkInstance instance;
     #endif //BOB_INCLUDE_VULKAN
@@ -70,87 +70,14 @@ void BOB_arena_clear(BOBi_Arena *arena) {
     arena->offset = 0;
 }
 
-struct BOBi_Context_t {
-    // void *context_memory;
-    BOBi_Arena context_memory; //Memory arena that this context uses. Each table is just a pointer into this arena
-
-    BOB_Atlas *atlas_table;
-    BOB_PixelBuffer *pixelbuffer_table;
-    BOB_Texture *texture_table;
-    BOB_Material *material_table;
-    BOB_Font *font_table;
-
-    void *mapped_mem_ptr; //Pointer to cpu memory mapped from gpu memory
-
-    //Vulkan members
-    //TODO: Turn this into a union so that other backends can be added
-    #ifdef BOB_INCLUDE_VULKAN
-    VkSemaphore present_complete_semaphore;
-    VkFence draw_fence;
-    VkSemaphore *render_finished_semaphore;
-    VkCommandBuffer command_buffer;
-
-    //Device management
-    VkPhysicalDevice phy_device;
-    VkDevice log_device;
-    VkQueue graphics_queue;
-    uint32_t queue_family;
-
-    //Swapchain management
-    VkImage *images;
-    VkImageView *views;
-    VkSwapchainKHR swapchain;
-    VkSurfaceKHR surface;
-    VkSurfaceFormatKHR format;
-    VkExtent2D extent;
-    uint32_t num_images;
-    uint32_t next_swapchain_image_index;
-
-    VkCommandPool command_pool;
-
-    BOBi_Vulkan_Image depth;
-    uint8_t framebuffer_resized;
-
-    //Pipeline stuff
-    VkSampler sampler;
-    VkDescriptorPool descriptor_pool;
-    VkDescriptorSetLayout default_tex_layout;
-
-    BOBi_Vulkan_Buffer vert_staging_buf;
-    BOBi_Vulkan_Buffer index_staging_buf;
-    #endif
-
-    size_t num_atlases;
-    size_t num_textures;
-    size_t num_pixelbuffers;
-    size_t num_materials;
-    size_t num_fonts;
-
-    size_t atlas_capacity;
-    size_t texture_capacity;
-    size_t pixelbuffer_capacity;
-    size_t material_capacity;
-    size_t font_capacity;
-
-    uint32_t next_atlas_slot;
-    uint32_t next_tex_slot;
-    uint32_t next_pixelbuf_slot;
-    uint32_t next_mat_slot;
-    uint32_t next_font_slot;
-
-    BOB_Texture_Handle default_tex;
-
-    BOB_Context_Type type;
-};
-
 #define BOBi_get_arena_elem(arena, index, type) ((type *)(arena).memory)[(index)]
 
-uint8_t BOBi_get_context_from_handle(uint64_t handle, BOB_Context **out) {
+uint8_t BOBi_get_renderer_from_handle(uint64_t handle, BOB_Renderer **out) {
     if(handle & BOBi_MSB) return 0; //Do not work with invalid handles
 
     uint32_t index = (handle & 0xFFFFFFFF00000000) >> 32;
-    if(bob_state.contexts[index].context_memory.memory == NULL) return 0; //Invalid context
-    *out = &bob_state.contexts[index];
+    if(bob_state.renderers[index].renderer_memory.memory == NULL) return 0; //Invalid renderer
+    *out = &bob_state.renderers[index];
     return 1;
 }
 
@@ -160,35 +87,34 @@ uint8_t BOBi_get_index_from_handle(uint64_t handle, uint32_t *out) {
     return 1;
 }
 
-uint8_t BOBi_get_handle_data(uint64_t handle, BOB_Context **context, uint32_t *index) {
+uint8_t BOBi_get_handle_data(uint64_t handle, BOB_Renderer **renderer, uint32_t *index) {
     if(handle & BOBi_MSB) return 0; //Do not work with invalid handles
 
-    uint32_t context_index = (handle & 0xFFFFFFFF00000000) >> 32;
-    if(bob_state.contexts[context_index].context_memory.memory == NULL) return 0; //Invalid context
-    *context = &bob_state.contexts[context_index];
+    uint32_t renderer_index = (handle & 0xFFFFFFFF00000000) >> 32;
+    if(bob_state.renderers[renderer_index].renderer_memory.memory == NULL) return 0; //Invalid renderer
+    *renderer = &bob_state.renderers[renderer_index];
 
     *index = handle & (~0xFFFFFFFF80000000);
     return 1;
 }
 
-uint8_t BOBi_get_context(BOB_Context_Handle handle, BOB_Context **out) {
+uint8_t BOBi_get_renderer(BOB_Renderer_Handle handle, BOB_Renderer **out) {
     if(handle & BOBi_MSB) {
-        printf("Invalid context handle\n");
+        printf("Invalid renderer handle\n");
         return 0;
     }
 
-    BOB_Context *context = &bob_state.contexts[handle];
-    if(context->context_memory.memory == NULL) {
-        printf("Invalid context handle\n");
+    BOB_Renderer *renderer = &bob_state.renderers[handle];
+    if(renderer->renderer_memory.memory == NULL) {
+        printf("Invalid renderer handle\n");
         return 0;
     }
 
-    *out = context;
+    *out = renderer;
     return 1;
 }
 
-uint8_t BOBi_create_context(BOB_Context_Type type, size_t atlas_capacity, size_t pixelbuf_capacity, size_t tex_capacity, size_t mat_capacity,
-                            size_t font_capacity, size_t width, size_t height, BOB_Context_Handle *context);
+uint8_t BOBi_create_renderer(BOB_Renderer_Type type, size_t atlas_capacity, size_t pixelbuf_capacity, size_t tex_capacity, size_t mat_capacity, size_t font_capacity, size_t vertex_capacity, size_t index_capacity, size_t draw_call_capacity, size_t width, size_t height, BOB_Renderer_Handle *renderer);
 
 typedef enum {
     BOBi_DRAW_QUAD,
@@ -291,292 +217,20 @@ void BOBi_gl_update_uniform(BOB_Uniform uniform) {
     }
 }
 
-void BOBi_gl_delete_texture(BOB_Context *context, uint32_t tex_index) {
-    if(context->texture_table[tex_index].init)
-        glDeleteTextures(1, &context->texture_table[tex_index].opengl.texture);
+void BOBi_gl_delete_texture(BOB_Renderer *renderer, uint32_t tex_index) {
+    if(renderer->texture_table[tex_index].init)
+        glDeleteTextures(1, &renderer->texture_table[tex_index].opengl.texture);
 }
 
-void BOBi_gl_delete_buffer(BOB_Context *context, uint32_t buf_index) {
-    if(context->pixelbuffer_table[buf_index].init)
-        glDeleteBuffers(1, &context->pixelbuffer_table[buf_index].pbo);
+void BOBi_gl_delete_buffer(BOB_Renderer *renderer, uint32_t buf_index) {
+    if(renderer->pixelbuffer_table[buf_index].init)
+        glDeleteBuffers(1, &renderer->pixelbuffer_table[buf_index].pbo);
 }
 
-void BOBi_gl_delete_program(BOB_Context *context, uint32_t program_index) {
-    if(context->material_table[program_index].init)
-        glDeleteProgram(context->material_table[program_index].opengl.shader);
+void BOBi_gl_delete_program(BOB_Renderer *renderer, uint32_t program_index) {
+    if(renderer->material_table[program_index].init)
+        glDeleteProgram(renderer->material_table[program_index].opengl.shader);
 }
-
-uint8_t BOBi_gl_clear_color(BOB_Context *context, BOB_Vector4 colour) {
-    glClearColor(colour.x, colour.y, colour.z, colour.w);
-    glClearDepth(1.0f);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT); //Need to clear the depth buffer as well
-    return 1;
-}
-
-uint8_t BOB_create_opengl_context(size_t atlas_capacity, size_t pixelbuf_capacity,
-                           size_t tex_capacity, size_t mat_capacity, size_t font_capacity, BOB_Context_Handle *context) {
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glEnable(GL_DEPTH_TEST);
-    glDepthFunc(GL_LEQUAL);
-    glClearDepth(1.0);
-
-    if(!BOBi_create_context(BOB_OPENGL_CONTEXT, atlas_capacity, pixelbuf_capacity, tex_capacity, mat_capacity, font_capacity, 0, 0, context)) return 0;
-
-    //Create the default texture used
-    BOB_Context *intrn_context;
-    BOBi_get_context(*context, &intrn_context);
-    if(!BOB_create_texture(*context, 1, 1, (uint8_t[4]){255, 255, 255, 255}, BOB_RGBA, &intrn_context->default_tex)) {
-        BOB_destroy_context(context);
-        return 0;
-    }
-
-    return 1;
-}
-
-uint8_t BOBi_gl_init_gpu_renderer_mem(BOB_Context *context, BOB_Renderer *r, size_t vert_buf_sz, size_t index_buf_sz) {
-    glGenVertexArrays(1, &r->vao);
-    glBindVertexArray(r->vao);
-
-    //Getting the vbo
-    glGenBuffers(1, &r->vbo);
-    glBindBuffer(GL_ARRAY_BUFFER, r->vbo);
-    glBufferData(GL_ARRAY_BUFFER, vert_buf_sz, NULL, GL_DYNAMIC_DRAW);
-
-    //Getting the ebo
-    glGenBuffers(1, &r->ebo);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, r->ebo);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, index_buf_sz, NULL, GL_DYNAMIC_DRAW);
-
-    glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, sizeof(BOB_Render_Vertex), (void *)offsetof(BOB_Render_Vertex, colour)); //Vertex Colour
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(BOB_Render_Vertex), (void *)offsetof(BOB_Render_Vertex, pos)); //Vertex Position
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(BOB_Render_Vertex), (void *)offsetof(BOB_Render_Vertex, uv)); //UV
-    glEnableVertexAttribArray(2);
-    glVertexAttribPointer(3, 1, GL_UNSIGNED_BYTE, GL_FALSE, sizeof(BOB_Render_Vertex), (void *)offsetof(BOB_Render_Vertex, flags));
-    glEnableVertexAttribArray(3);
-
-    return 1;
-}
-
-void BOBi_gl_destroy_renderer_mem(BOB_Context *context, BOB_Renderer *r) {
-    glDeleteBuffers(1, &r->vbo);
-    glDeleteVertexArrays(1, &r->vao);
-}
-
-uint8_t BOBi_gl_draw(BOB_Context *context, BOB_Renderer *r) {
-    //Bind all of the arrays and buffers we will reuse over time
-    glBindVertexArray(r->vao);
-    glBindBuffer(GL_ARRAY_BUFFER, r->vbo);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, r->ebo);
-
-    BOBi_Draw_Call start = BOBi_get_arena_elem(r->batch.draw_call_arena, 0, BOBi_Draw_Call);
-    glBufferSubData(GL_ARRAY_BUFFER, 0, r->batch.num_vertices * sizeof(BOB_Render_Vertex), r->batch.vertex_arena_2.memory); //Copies the data from renderer's triangle data into the vbo
-    glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, r->batch.num_indices * sizeof(uint32_t), r->batch.vertex_arena.memory); //Copies the quad data into the vbo
-
-    //TODO: At the very least make a texture array so we don't keep switching textures, but would also be nice to make an SSBO for the materials
-    for(size_t i = 0; i < r->batch.num_draw_calls; i++) {
-        BOBi_Draw_Call call = BOBi_get_arena_elem(r->batch.draw_call_arena, i, BOBi_Draw_Call);
-        uint32_t mat_index, tex_index;
-        if(!BOBi_get_index_from_handle(call.mat, &mat_index)) return 0;
-        if(!BOBi_get_index_from_handle(call.tex, &tex_index)) return 0;
-        glUseProgram(context->material_table[mat_index].opengl.shader);
-        //Setting the uniforms
-        for(size_t j = 0; j < context->material_table[mat_index].uniform_count; j++) {
-            BOBi_gl_update_uniform(context->material_table[mat_index].uniforms[j]);
-        }
-
-        //Bind the atlas texture
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, context->texture_table[tex_index].opengl.texture);
-
-        glDrawElements(GL_TRIANGLES, call.num_indices, GL_UNSIGNED_INT, (void *)(call.index_offset * sizeof(uint32_t))); //Make the draw call
-    }
-
-    return 1;
-}
-
-void BOBi_gl_copy_buffer_data(BOB_Context *context, BOB_Renderer *r, void *data, size_t data_sz) {
-    //Update projection matrix for renderer
-    BOB_ortho_gl(0.0f, width, height, 0.0f, -BOB_MAX_LAYER, 0.0f, &r->projection);
-    BOB_set_material_mat4(r->default_mat, 0, r->projection);
-
-    glBindBuffer(GL_ARRAY_BUFFER, r->vao);
-    glBufferSubData(GL_ARRAY_BUFFER, 0, data_sz, data);
-}
-
-uint32_t BOBi_gl_convert_format(BOB_Format format) {
-    switch (format) {
-        case BOB_RED: return GL_RED;
-        case BOB_RG: return GL_RG;
-        case BOB_RGB: return GL_RGB;
-        case BOB_RGBA: return GL_RGBA;
-    }
-}
-
-uint8_t BOBi_gl_create_tex(BOB_Context *context, uint32_t tex_index, size_t width, size_t height, uint8_t *data, BOB_Format format) {
-    uint32_t *tex = &context->texture_table[tex_index].opengl.texture;
-
-    glGenTextures(1, tex);
-    glBindTexture(GL_TEXTURE_2D, *tex);
-    // set the texture wrapping/filtering options (on the currently bound texture object)
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexImage2D(GL_TEXTURE_2D, 0, BOBi_gl_convert_format(format), width, height, 0, BOBi_gl_convert_format(format), GL_UNSIGNED_BYTE, data);
-    glBindTexture(GL_TEXTURE_2D, 0);
-
-    return 1;
-}
-
-uint32_t BOBi_gl_create_shader(BOB_Shader_Data s) {
-    uint32_t shader;
-    int32_t shader_type;
-    switch(s.type) {
-        case BOB_VERTEX_SHADER: shader_type = GL_VERTEX_SHADER; break;
-        case BOB_FRAGMENT_SHADER: shader_type = GL_FRAGMENT_SHADER; break;
-        case BOB_TESS_CTRL_SHADER: shader_type = GL_TESS_CONTROL_SHADER; break;
-        case BOB_TESS_EVAL_SHADER: shader_type = GL_TESS_EVALUATION_SHADER; break;
-        case BOB_COMPUTE_SHADER: shader_type = GL_COMPUTE_SHADER; break;
-        case BOB_GEOMETRY_SHADER: shader_type = GL_GEOMETRY_SHADER; break;
-    }
-
-    shader = glCreateShader(shader_type);
-    glShaderSource(shader, 1, &s.shader_code, NULL);
-    glCompileShader(shader);
-
-    int result;
-    char infolog[512];
-
-    glGetShaderiv(shader, GL_COMPILE_STATUS, &result);
-    if(!result) {
-        glGetShaderInfoLog(shader, 512, NULL, infolog);
-        printf("ERROR::SHADER::COMPILATION_FAILED\n");
-        for(int i = 0; i < 512; i++){
-            if(infolog[i] == '\0') break;
-            printf("%c", infolog[i]);
-        }
-        printf("\n");
-    }
-
-    return shader;
-}
-
-uint8_t BOBi_gl_create_material(BOB_Context *context, uint32_t index, BOB_Shader_Data *data, size_t num_shaders) {
-    BOB_Material *intrn_mat = &context->material_table[index];
-    uint32_t shader_buf[BOB_MAX_SHADERS]; //Array to store the ids of the loaded shader sub-programs
-    intrn_mat->opengl.shader = glCreateProgram();
-
-    //Attaching all of the shaders together
-    for(int i = 0; i < num_shaders; i++) {
-        shader_buf[i] = BOBi_gl_create_shader(data[i]);
-        glAttachShader(intrn_mat->opengl.shader, shader_buf[i]);
-    }
-
-    glLinkProgram(intrn_mat->opengl.shader);
-    int result;
-    char infolog[512];
-
-    //Print errors if any:
-    glGetProgramiv(intrn_mat->opengl.shader, GL_LINK_STATUS, &result);
-    if(!result) {
-        glGetProgramInfoLog(intrn_mat->opengl.shader, 512, NULL, infolog);
-        printf("ERROR::SHADER::LINKING_FAILED\n");
-        for(int i = 0; i < 512; i++){
-            if(infolog[i] == '\0') break;
-            printf("%c", infolog[i]);
-        }
-        printf("\n");
-        return 0;
-    }
-
-    //Cleanup
-    for(int i = 0; i < num_shaders; i++) {
-        glDeleteShader(shader_buf[i]);
-    }
-
-    //Setting the uniforms
-    for(size_t i = 0; i < intrn_mat->uniform_count; i++) {
-        intrn_mat->uniforms[i].opengl.location = glGetUniformLocation(intrn_mat->opengl.shader, intrn_mat->uniforms[i].name);
-    }
-    return 1;
-}
-
-void BOBi_gl_copy_data_tex(BOB_Context *context, uint32_t tex_index, BOB_Format format, BOB_Quad region, uint8_t *pixels) {
-    GLenum gl_format = BOBi_gl_convert_format(format);
-
-    //Upload the subregion
-    glBindTexture(GL_TEXTURE_2D, context->texture_table[tex_index].opengl.texture);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, region.x, region.y, region.w, region.h, gl_format, GL_UNSIGNED_BYTE, pixels);
-}
-
-uint8_t BOBi_gl_create_pbo(BOB_Context *context, uint32_t index) {
-    uint32_t *pbo = &context->pixelbuffer_table[index].pbo;
-    size_t buf_sz = context->pixelbuffer_table[index].buf_sz;
-
-    glGenBuffers(1, pbo);
-    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, *pbo);
-    glBufferData(GL_PIXEL_UNPACK_BUFFER, buf_sz, NULL, GL_STREAM_DRAW);
-    uint8_t *ptr = glMapBuffer(GL_PIXEL_UNPACK_BUFFER, GL_WRITE_ONLY);
-    if(ptr == NULL) {
-        printf("Failed to map GPU to CPU memory\n");
-        return 0;
-    }
-    memset(ptr, 0x00, buf_sz); //Setting all of the pixels to be colourless initially
-    glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
-    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
-
-    return 1;
-}
-
-uint8_t BOBi_gl_bind_pbo_mem(BOB_Context *context, uint32_t pb_index) {
-    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, context->pixelbuffer_table[pb_index].pbo);
-
-    if(context->mapped_mem_ptr != NULL) {
-        printf("Memory region already mapped");
-        return 0;
-    }
-
-    context->mapped_mem_ptr= glMapBuffer(GL_PIXEL_UNPACK_BUFFER, GL_WRITE_ONLY);
-    if(context->mapped_mem_ptr == NULL) {
-        printf("Failed to map GPU to CPU memory\n");
-        return 0;
-    }
-    return 1;
-}
-
-void BOBi_gl_unbind_pbo_mem(BOB_Context *context) {
-    if(context->mapped_mem_ptr != NULL) {
-        glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
-        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
-        context->mapped_mem_ptr = NULL;
-    }
-}
-
-void BOBi_gl_copy_pbo(BOB_Context *context, uint8_t *data, size_t buf_sz) {
-    memcpy(context->mapped_mem_ptr, data, buf_sz);
-}
-
-void BOBi_gl_get_pbo_data(BOB_Context *context, uint8_t *dest, size_t buf_sz) {
-    memcpy(dest, context->mapped_mem_ptr, buf_sz);
-}
-
-void BOBi_gl_upload_pbo_data(BOB_Context *context, uint32_t pb_index) {
-    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, context->pixelbuffer_table[pb_index].pbo);
-    BOBi_gl_unbind_pbo_mem(context);
-    BOBi_gl_bind_pbo_mem(context, pb_index);
-    glBindTexture(GL_TEXTURE_2D, context->pixelbuffer_table[pb_index].pixel_tex);
-    uint32_t tex_index;
-    BOBi_get_index_from_handle(context->pixelbuffer_table[pb_index].pixel_tex, &tex_index);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, context->texture_table[tex_index].width, context->texture_table[tex_index].height, GL_RGB, GL_UNSIGNED_BYTE, 0);
-}
-
-void BOBi_gl_destroy_context(BOB_Context *context) {return;}
-uint8_t BOBi_gl_end_frame(BOB_Context *context) {return 1;}
 
 //Shaders for this program are simple enough that we can just encode them as strings
 //to avoid annoying file loading/reading every startup
@@ -629,1608 +283,281 @@ const char *fragment_shader = "#version 330 core\n"
                               "    }\n"
                               "}\n";
 
-uint8_t BOBi_gl_create_default_material(BOB_Context_Handle context, BOB_Renderer *r) {
-    //Setting the projection matrix
-    BOB_ortho_gl(0.0f, out->screen_width, out->screen_height, 0.0f, -BOB_MAX_LAYER, 0.0f, &out->projection);
+uint8_t BOB_create_opengl_renderer(size_t atlas_capacity, size_t pixelbuf_capacity, size_t tex_capacity, size_t mat_capacity, size_t font_capacity, size_t width, size_t height, size_t vertex_capacity, size_t index_capacity, size_t draw_call_capacity, BOB_Renderer_Handle *renderer) {
+    if(!BOBi_create_renderer(BOB_OPENGL_RENDERER, atlas_capacity, pixelbuf_capacity, tex_capacity, mat_capacity, font_capacity, vertex_capacity, index_capacity, draw_call_capacity, 0, 0, renderer)) return 0;
 
-    return BOB_create_material(context, (BOB_Shader_Data[2]){(BOB_Shader_Data){.shader_code = vertex_shader, .type = BOB_VERTEX_SHADER},
-                            (BOB_Shader_Data){.shader_code = fragment_shader, .type = BOB_FRAGMENT_SHADER}}, 2,
-                            (BOB_Uniform[2]){BOB_uniform_mat4("uProjection", r->projection), BOB_uniform_signed_int("screenTexture", 0)}, 2, &r->default_mat);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LEQUAL);
+    glClearDepth(1.0);
+
+    BOB_Renderer *r;
+    BOBi_get_renderer(*renderer, &r);
+
+    glGenVertexArrays(1, &r->opengl.vao);
+    glBindVertexArray(r->opengl.vao);
+
+    //Getting the vbo
+    glGenBuffers(1, &r->opengl.vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, r->opengl.vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(BOB_Render_Vertex) * vertex_capacity, NULL, GL_DYNAMIC_DRAW);
+
+    //Getting the ebo
+    glGenBuffers(1, &r->opengl.ebo);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, r->opengl.ebo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(uint32_t) * index_capacity, NULL, GL_DYNAMIC_DRAW);
+
+    glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, sizeof(BOB_Render_Vertex), (void *)offsetof(BOB_Render_Vertex, colour)); //Vertex Colour
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(BOB_Render_Vertex), (void *)offsetof(BOB_Render_Vertex, pos)); //Vertex Position
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(BOB_Render_Vertex), (void *)offsetof(BOB_Render_Vertex, uv)); //UV
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(3, 1, GL_UNSIGNED_BYTE, GL_FALSE, sizeof(BOB_Render_Vertex), (void *)offsetof(BOB_Render_Vertex, flags));
+    glEnableVertexAttribArray(3);
+
+    BOB_ortho_gl(0.0f, r->screen_width, r->screen_height, 0.0f, -BOB_MAX_LAYER, 0.0f, &r->projection);
+
+    if(!BOB_create_texture(*renderer, 1, 1, (uint8_t[4]){255, 255, 255, 255}, BOB_RGBA, &r->default_tex)) {
+        BOB_destroy_renderer(renderer);
+        return 0;
+    }
+
+    if(!BOB_create_material(*renderer, (BOB_Shader_Data[2]){(BOB_Shader_Data){.shader_code = vertex_shader, .type = BOB_VERTEX_SHADER}, (BOB_Shader_Data){.shader_code = fragment_shader, .type = BOB_FRAGMENT_SHADER}}, 2, (BOB_Uniform[2]){BOB_uniform_mat4("uProjection", r->projection), BOB_uniform_signed_int("screenTexture", 0)}, 2, &r->default_mat)) {
+        BOB_destroy_renderer(renderer);
+        return 0;
+    }
+
+    return 1;
 }
+
+void BOBi_gl_destroy_renderer_mem(BOB_Renderer *r) {
+    glDeleteBuffers(2, (uint32_t[2]){r->opengl.vbo, r->opengl.ebo});
+    glDeleteVertexArrays(1, &r->opengl.vao);
+}
+
+uint8_t BOBi_gl_draw(BOB_Renderer *r, float colour[4]) {
+    //Resetting colour and depth
+    if(colour != NULL) glClearColor(colour[0], colour[1], colour[2], colour[3]);
+    glClearDepth(1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT); //Need to clear the depth buffer as well
+
+    //Bind all of the arrays and buffers we will reuse over time
+    glBindVertexArray(r->opengl.vao);
+    glBindBuffer(GL_ARRAY_BUFFER, r->opengl.vbo);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, r->opengl.ebo);
+
+    BOBi_Draw_Call start = BOBi_get_arena_elem(r->batch.draw_call_arena, 0, BOBi_Draw_Call);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, r->batch.num_vertices * sizeof(BOB_Render_Vertex), r->batch.vertex_arena_2.memory); //Copies the data from renderer's triangle data into the vbo
+    glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, r->batch.num_indices * sizeof(uint32_t), r->batch.vertex_arena.memory); //Copies the quad data into the vbo
+
+    //TODO: At the very least make a texture array so we don't keep switching textures, but would also be nice to make an SSBO for the materials
+    for(size_t i = 0; i < r->batch.num_draw_calls; i++) {
+        BOBi_Draw_Call call = BOBi_get_arena_elem(r->batch.draw_call_arena, i, BOBi_Draw_Call);
+        uint32_t mat_index, tex_index;
+        if(!BOBi_get_index_from_handle(call.mat, &mat_index)) return 0;
+        if(!BOBi_get_index_from_handle(call.tex, &tex_index)) return 0;
+        glUseProgram(r->material_table[mat_index].opengl.shader);
+        //Setting the uniforms
+        for(size_t j = 0; j < r->material_table[mat_index].uniform_count; j++) {
+            BOBi_gl_update_uniform(r->material_table[mat_index].uniforms[j]);
+        }
+
+        //Bind the atlas texture
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, r->texture_table[tex_index].opengl.texture);
+
+        glDrawElements(GL_TRIANGLES, call.num_indices, GL_UNSIGNED_INT, (void *)(call.index_offset * sizeof(uint32_t))); //Make the draw call
+    }
+
+    return 1;
+}
+
+//TODO: FIX
+void BOBi_gl_copy_buffer_data(BOB_Renderer *r, void *data, size_t data_sz) {
+    //Update projection matrix for renderer
+    BOB_ortho_gl(0.0f, width, height, 0.0f, -BOB_MAX_LAYER, 0.0f, &r->projection);
+    BOB_set_material_mat4(r->default_mat, 0, r->projection);
+
+    glBindBuffer(GL_ARRAY_BUFFER, r->opengl.vao);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, data_sz, data);
+}
+
+uint32_t BOBi_gl_convert_format(BOB_Format format) {
+    switch (format) {
+        case BOB_RED: return GL_RED;
+        case BOB_RG: return GL_RG;
+        case BOB_RGB: return GL_RGB;
+        case BOB_RGBA: return GL_RGBA;
+    }
+}
+
+uint8_t BOBi_gl_create_tex(BOB_Renderer *renderer, uint32_t tex_index, size_t width, size_t height, uint8_t *data, BOB_Format format) {
+    uint32_t *tex = &renderer->texture_table[tex_index].opengl.texture;
+
+    glGenTextures(1, tex);
+    glBindTexture(GL_TEXTURE_2D, *tex);
+    // set the texture wrapping/filtering options (on the currently bound texture object)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, BOBi_gl_convert_format(format), width, height, 0, BOBi_gl_convert_format(format), GL_UNSIGNED_BYTE, data);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    return 1;
+}
+
+uint32_t BOBi_gl_create_shader(BOB_Shader_Data s) {
+    uint32_t shader;
+    int32_t shader_type;
+    switch(s.type) {
+        case BOB_VERTEX_SHADER: shader_type = GL_VERTEX_SHADER; break;
+        case BOB_FRAGMENT_SHADER: shader_type = GL_FRAGMENT_SHADER; break;
+        case BOB_TESS_CTRL_SHADER: shader_type = GL_TESS_CONTROL_SHADER; break;
+        case BOB_TESS_EVAL_SHADER: shader_type = GL_TESS_EVALUATION_SHADER; break;
+        case BOB_COMPUTE_SHADER: shader_type = GL_COMPUTE_SHADER; break;
+        case BOB_GEOMETRY_SHADER: shader_type = GL_GEOMETRY_SHADER; break;
+    }
+
+    shader = glCreateShader(shader_type);
+    glShaderSource(shader, 1, &s.shader_code, NULL);
+    glCompileShader(shader);
+
+    int result;
+    char infolog[512];
+
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &result);
+    if(!result) {
+        glGetShaderInfoLog(shader, 512, NULL, infolog);
+        printf("ERROR::SHADER::COMPILATION_FAILED\n");
+        for(int i = 0; i < 512; i++){
+            if(infolog[i] == '\0') break;
+            printf("%c", infolog[i]);
+        }
+        printf("\n");
+    }
+
+    return shader;
+}
+
+uint8_t BOBi_gl_create_material(BOB_Renderer *renderer, uint32_t index, BOB_Shader_Data *data, size_t num_shaders) {
+    BOB_Material *intrn_mat = &renderer->material_table[index];
+    uint32_t shader_buf[BOB_MAX_SHADERS]; //Array to store the ids of the loaded shader sub-programs
+    intrn_mat->opengl.shader = glCreateProgram();
+
+    //Attaching all of the shaders together
+    for(int i = 0; i < num_shaders; i++) {
+        shader_buf[i] = BOBi_gl_create_shader(data[i]);
+        glAttachShader(intrn_mat->opengl.shader, shader_buf[i]);
+    }
+
+    glLinkProgram(intrn_mat->opengl.shader);
+    int result;
+    char infolog[512];
+
+    //Print errors if any:
+    glGetProgramiv(intrn_mat->opengl.shader, GL_LINK_STATUS, &result);
+    if(!result) {
+        glGetProgramInfoLog(intrn_mat->opengl.shader, 512, NULL, infolog);
+        printf("ERROR::SHADER::LINKING_FAILED\n");
+        for(int i = 0; i < 512; i++){
+            if(infolog[i] == '\0') break;
+            printf("%c", infolog[i]);
+        }
+        printf("\n");
+        return 0;
+    }
+
+    //Cleanup
+    for(int i = 0; i < num_shaders; i++) {
+        glDeleteShader(shader_buf[i]);
+    }
+
+    //Setting the uniforms
+    for(size_t i = 0; i < intrn_mat->uniform_count; i++) {
+        intrn_mat->uniforms[i].opengl.location = glGetUniformLocation(intrn_mat->opengl.shader, intrn_mat->uniforms[i].name);
+    }
+    return 1;
+}
+
+void BOBi_gl_copy_data_tex(BOB_Renderer *renderer, uint32_t tex_index, BOB_Format format, BOB_Quad region, uint8_t *pixels) {
+    GLenum gl_format = BOBi_gl_convert_format(format);
+
+    //Upload the subregion
+    glBindTexture(GL_TEXTURE_2D, renderer->texture_table[tex_index].opengl.texture);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, region.x, region.y, region.w, region.h, gl_format, GL_UNSIGNED_BYTE, pixels);
+}
+
+uint8_t BOBi_gl_create_pbo(BOB_Renderer *renderer, uint32_t index) {
+    uint32_t *pbo = &renderer->pixelbuffer_table[index].pbo;
+    size_t buf_sz = renderer->pixelbuffer_table[index].buf_sz;
+
+    glGenBuffers(1, pbo);
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, *pbo);
+    glBufferData(GL_PIXEL_UNPACK_BUFFER, buf_sz, NULL, GL_STREAM_DRAW);
+    uint8_t *ptr = glMapBuffer(GL_PIXEL_UNPACK_BUFFER, GL_WRITE_ONLY);
+    if(ptr == NULL) {
+        printf("Failed to map GPU to CPU memory\n");
+        return 0;
+    }
+    memset(ptr, 0x00, buf_sz); //Setting all of the pixels to be colourless initially
+    glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+
+    return 1;
+}
+
+uint8_t BOBi_gl_bind_pbo_mem(BOB_Renderer *renderer, uint32_t pb_index) {
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, renderer->pixelbuffer_table[pb_index].pbo);
+
+    if(renderer->mapped_mem_ptr != NULL) {
+        printf("Memory region already mapped");
+        return 0;
+    }
+
+    renderer->mapped_mem_ptr= glMapBuffer(GL_PIXEL_UNPACK_BUFFER, GL_WRITE_ONLY);
+    if(renderer->mapped_mem_ptr == NULL) {
+        printf("Failed to map GPU to CPU memory\n");
+        return 0;
+    }
+    return 1;
+}
+
+void BOBi_gl_unbind_pbo_mem(BOB_Renderer *renderer) {
+    if(renderer->mapped_mem_ptr != NULL) {
+        glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+        renderer->mapped_mem_ptr = NULL;
+    }
+}
+
+void BOBi_gl_copy_pbo(BOB_Renderer *renderer, uint8_t *data, size_t buf_sz) {
+    memcpy(renderer->mapped_mem_ptr, data, buf_sz);
+}
+
+void BOBi_gl_get_pbo_data(BOB_Renderer *renderer, uint8_t *dest, size_t buf_sz) {
+    memcpy(dest, renderer->mapped_mem_ptr, buf_sz);
+}
+
+void BOBi_gl_upload_pbo_data(BOB_Renderer *renderer, uint32_t pb_index) {
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, renderer->pixelbuffer_table[pb_index].pbo);
+    BOBi_gl_unbind_pbo_mem(renderer);
+    BOBi_gl_bind_pbo_mem(renderer, pb_index);
+    glBindTexture(GL_TEXTURE_2D, renderer->pixelbuffer_table[pb_index].pixel_tex);
+    uint32_t tex_index;
+    BOBi_get_index_from_handle(renderer->pixelbuffer_table[pb_index].pixel_tex, &tex_index);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, renderer->texture_table[tex_index].width, renderer->texture_table[tex_index].height, GL_RGB, GL_UNSIGNED_BYTE, 0);
+}
+
 #endif //BOB_INCLUDE_GLAD
 
 //================================================= VULKAN FUNCTIONS ================================================
 
 #ifdef BOB_INCLUDE_VULKAN
-
-//Validation layers we are using.
-const char *validation_layers[] = {"VK_LAYER_KHRONOS_validation"};
-size_t num_validation_layers = 1;
-//Extensions we are using
-const char *required_device_extensions[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME}; //Need the swapchain extension for drawing surfaces to a window
-size_t num_required_device_extensions = 1;
-
-BOB_Render_Vertex vertices[4] = {
-    (BOB_Render_Vertex){.pos = {-0.5f, -0.5f}},
-    (BOB_Render_Vertex){.pos = {-0.5f,  0.5f}},
-    (BOB_Render_Vertex){.pos = { 0.5f,  0.5f}},
-    (BOB_Render_Vertex){.pos = { 0.5f, -0.5f}},
-};
-size_t num_vertices = 4;
-uint32_t indices[6] = {
-    0,1,3,1,2,3
-};
-size_t num_indices = 6;
-BOBi_Vulkan_Buffer index_buf;
-BOBi_Vulkan_Buffer vertex_buf;
-
-//Not really used ig?
-#ifdef NDEBUG
-#define ENABLE_VALIDATION_LAYERS 0
-#else
-#define ENABLE_VALIDATION_LAYERS 1
-#endif
-
-//Macro to get a list of values from vulkan. Allocates memory which must be freed later
-//func1 must be the vulkan enumeration function with the output list set to NULL and the
-//output size set to some variable
-//func2 must have both values set.
-//size must be the number of elements in the list (obtained from the call to func1)
-//* the size of an individual element
-#define VULKAN_ENUMERATE(func1, func2, enumerator_list, size, failure_string) do {  \
-    if((func1) != VK_SUCCESS) {                                                     \
-        printf("%s\n", (failure_string));                                           \
-        return 0;                                                                   \
-    }                                                                               \
-    (enumerator_list) = malloc((size));                                             \
-    if((func2) != VK_SUCCESS) {                                                     \
-        printf("%s\n", (failure_string));                                           \
-        return 0;                                                                   \
-    }                                                                               \
-} while(0)
-
-//Checks if a vulkan function has succeeded, returns 0, calls the functions to free data, and prints failure if not
-#define VULKAN_ERROR(func, failure_string, ...) do {     \
-    if((func) != VK_SUCCESS) {                           \
-        printf("%s\n", (failure_string));                \
-        __VA_ARGS__;                                     \
-        return 0;                                        \
-    }                                                    \
-} while(0)
-
-//A vertex binding describes the rate at which to load data from memory throughout the vertices
-VkVertexInputBindingDescription BOBi_vk_get_binding_desc() {
-    return (VkVertexInputBindingDescription){.binding = 0, .stride = sizeof(BOB_Render_Vertex), .inputRate = VK_VERTEX_INPUT_RATE_VERTEX};
-}
-
-//Returns the VAO for our Vertex struct
-void BOBi_vk_get_attrib_descs(VkVertexInputAttributeDescription *out_list, size_t *sz) {
-    *sz = 4;
-    out_list[0] = (VkVertexInputAttributeDescription){.location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = offsetof(BOB_Render_Vertex, colour)};
-    out_list[1] = (VkVertexInputAttributeDescription){.location = 1, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(BOB_Render_Vertex, pos)};
-    out_list[2] = (VkVertexInputAttributeDescription){.location = 2, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT, .offset = offsetof(BOB_Render_Vertex, uv)};
-    out_list[3] = (VkVertexInputAttributeDescription){.location = 3, .binding = 0, .format = VK_FORMAT_R8_UINT, .offset = offsetof(BOB_Render_Vertex, flags)};
-}
-
-//Allocates and begins a given command buffer. Should only be used if a command buffer needs to be used once
-uint8_t BOBi_vk_begin_single_time_commands(BOB_Context *context, VkCommandBuffer *out) {
-    //Allocate the command buffer
-    VkCommandBufferAllocateInfo alloc_info = {
-        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .pNext = NULL,
-        .commandPool = context->command_pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1
-    };
-    VULKAN_ERROR(vkAllocateCommandBuffers(context->log_device, &alloc_info, out), "Failed to allocate a command buffer");
-
-    //Begin accepting commands
-    VkCommandBufferBeginInfo begin_info = {
-        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .pNext = NULL,
-        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT
-    };
-    VULKAN_ERROR(vkBeginCommandBuffer(*out, &begin_info), "Failed to start command buffer");
-
-    return 1;
-}
-
-//Ends given command buffer, submits its internal commands to the Vulkan_State
-//struct's graphics_queue and frees the command buffer at the end
-uint8_t BOBi_vk_end_single_time_commands(BOB_Context *context, VkCommandBuffer buf) {
-    //End the command buffer
-    VULKAN_ERROR(vkEndCommandBuffer(buf), "Failed to end copy command buffer",
-                          vkFreeCommandBuffers(context->log_device, context->command_pool, 1, &buf));
-
-    //Submit the command buffer's instructions to the graphics_queue
-    VkSubmitInfo queue_info = {
-        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .pNext = NULL,
-        .commandBufferCount = 1, .pCommandBuffers = &buf
-    };
-    VULKAN_ERROR(vkQueueSubmit(context->graphics_queue, 1, &queue_info, VK_NULL_HANDLE), "Failed to submit commands to graphics queue",
-                          vkFreeCommandBuffers(context->log_device, context->command_pool, 1, &buf));
-    //Wait until the queue is idle to continue with the program
-    VULKAN_ERROR(vkQueueWaitIdle(context->graphics_queue), "Failed to wait for commands to complete",
-                          vkFreeCommandBuffers(context->log_device, context->command_pool, 1, &buf));
-
-    //Free command buffer memory
-    vkFreeCommandBuffers(context->log_device, context->command_pool, 1, &buf);
-
-    return 1;
-}
-
-//Gets the index of the memory type that matches our desired properties
-uint8_t BOBi_vk_find_memory_type(BOB_Context *context, uint32_t type_filter, VkMemoryPropertyFlags properties, uint32_t *out) {
-    //Getting the properties used on our current physical device
-    VkPhysicalDeviceMemoryProperties mem_properties;
-    vkGetPhysicalDeviceMemoryProperties(context->phy_device, &mem_properties);
-
-    //Search to find the one that matches our desired properties
-    for(size_t i = 0; i < mem_properties.memoryTypeCount; i++) {
-        if((type_filter & (1 << i)) && (mem_properties.memoryTypes[i].propertyFlags & properties) == properties) {
-            *out = i;
-            return 1;
-        }
-    }
-
-    //Throw an error on failure
-    printf("Failed to find suitable memory type\n");
-    return 0;
-}
-
-void BOBi_vk_destroy_image(BOB_Context *context, BOBi_Vulkan_Image *tex) {
-    if(tex->view != VK_NULL_HANDLE) {
-        vkDestroyImageView(context->log_device, tex->view, NULL);
-        tex->view = VK_NULL_HANDLE;
-    }
-    if(tex->image != VK_NULL_HANDLE) {
-        vkDestroyImage(context->log_device, tex->image, NULL);
-        tex->image = VK_NULL_HANDLE;
-    }
-    if(tex->memory != VK_NULL_HANDLE) {
-        vkFreeMemory(context->log_device, tex->memory, NULL);
-        tex->memory = VK_NULL_HANDLE;
-    }
-}
-
-//Creates an image and its allocated memory
-uint8_t BOBi_vk_create_image(BOB_Context *context, uint32_t width, uint32_t height, VkFormat format, VkImageTiling tiling,
-                     VkImageUsageFlags usage, VkMemoryPropertyFlags properties, BOBi_Vulkan_Image *out_image) {
-    //Creating the struct that holds the image properties
-    VkImageCreateInfo image_info = {
-        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .pNext = NULL,
-        .imageType = VK_IMAGE_TYPE_2D, .format = format,
-        .extent = {width, height, 1}, .mipLevels = 1, .arrayLayers = 1,
-        .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = tiling,
-        .usage = usage, .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-    };
-    VULKAN_ERROR(vkCreateImage(context->log_device, &image_info, NULL, &out_image->image), "Failed to create image");
-
-    //Get the memory requirements to store the image
-    VkMemoryRequirements mem_req;
-    vkGetImageMemoryRequirements(context->log_device, out_image->image, &mem_req);
-
-    //Allocate the memory to store the image data
-    VkMemoryAllocateInfo alloc_info = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = NULL, .allocationSize = mem_req.size };
-    VULKAN_ERROR(!BOBi_vk_find_memory_type(context, mem_req.memoryTypeBits, properties, &alloc_info.memoryTypeIndex), "Failed to find memory type",
-                 vkDestroyImage(context->log_device, out_image->image, NULL); out_image->image = NULL);
-    VULKAN_ERROR(vkAllocateMemory(context->log_device, &alloc_info, NULL, &out_image->memory), "Failed to create image memory", BOBi_vk_destroy_image(context, out_image));
-    //Bind the memory to the image properties
-    VULKAN_ERROR(vkBindImageMemory(context->log_device, out_image->image, out_image->memory, 0), "Failed to bind image memory", BOBi_vk_destroy_image(context, out_image));
-
-    return 1;
-}
-
-//Creates a view for an image
-uint8_t BOBi_vk_create_image_view(BOB_Context *context, VkImage image, VkFormat format, VkImageAspectFlags aspect_flags, VkImageView *out) {
-    VkImageViewCreateInfo view_info = {
-        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .pNext = NULL,
-        .image = image, .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = format,
-        .subresourceRange = {.aspectMask = aspect_flags, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1}
-    };
-    VULKAN_ERROR(vkCreateImageView(context->log_device, &view_info, NULL, out), "Failed to create image view");
-
-    return 1;
-}
-
-void BOBi_vk_destroy_image_view(BOB_Context *context, VkImageView *view) {
-    if(*view != VK_NULL_HANDLE) vkDestroyImageView(context->log_device, *view, NULL);
-    *view = VK_NULL_HANDLE;
-}
-
-//Returns a format that supports our given features from a list of candidates, or throws an error on failure
-uint8_t BOBi_vk_find_supported_format(BOB_Context *context, VkFormat *candidates, size_t num_candidates, VkImageTiling tiling, VkFormatFeatureFlags features, VkFormat *out) {
-    for(size_t i = 0; i < num_candidates; i++) {
-        VkFormatProperties props;
-        vkGetPhysicalDeviceFormatProperties(context->phy_device, candidates[i], &props);
-
-        if(((tiling == VK_IMAGE_TILING_LINEAR) && ((props.linearTilingFeatures & features) == features)) ||
-           ((tiling == VK_IMAGE_TILING_OPTIMAL) && ((props.optimalTilingFeatures & features) == features))) {
-            *out = candidates[i];
-            return 1;
-        }
-    }
-
-    printf("Failed to find supported format\n");
-    return 0;
-}
-
-//Returns the format used by our depth image
-uint8_t BOBi_vk_find_depth_format(BOB_Context *context, VkFormat *out) {
-    return BOBi_vk_find_supported_format(context, (VkFormat[3]){VK_FORMAT_D32_SFLOAT, VK_FORMAT_D32_SFLOAT_S8_UINT, VK_FORMAT_D24_UNORM_S8_UINT}, 3, 
-                                 VK_IMAGE_TILING_OPTIMAL, VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT, out);
-}
-
-//Destroys a BOBi_Vulkan_Buffer
-void BOBi_vk_destroy_buffer(VkDevice device, BOBi_Vulkan_Buffer *buf) {
-    if(buf->buffer != VK_NULL_HANDLE) vkDestroyBuffer(device, buf->buffer, NULL);
-    if(buf->memory != VK_NULL_HANDLE) vkFreeMemory(device, buf->memory, NULL);
-    buf->memory = VK_NULL_HANDLE;
-    buf->buffer = VK_NULL_HANDLE;
-}
-
-//Creates buffers in GPU memory
-uint8_t BOBi_vk_create_buffer(BOB_Context *context, VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, BOBi_Vulkan_Buffer *out_buf) {
-    //Creates the VKBuffer struct that stores the buffer's properties
-    VkBufferCreateInfo buf_info = {
-        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .pNext = NULL,
-        .size = size, .usage = usage, .sharingMode = VK_SHARING_MODE_EXCLUSIVE
-    };
-    VULKAN_ERROR(vkCreateBuffer(context->log_device, &buf_info, NULL, &out_buf->buffer), "Failed to create a buffer");
-
-    //Getting the memory requirements for this buffer
-    VkMemoryRequirements mem_req;
-    vkGetBufferMemoryRequirements(context->log_device, out_buf->buffer, &mem_req);
-
-    //Allocating the memory region to store this buffer
-    VkMemoryAllocateInfo mem_alloc_info = {
-        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = NULL,
-        .allocationSize = mem_req.size,
-    };
-
-    if(!BOBi_vk_find_memory_type(context, mem_req.memoryTypeBits, properties, &mem_alloc_info.memoryTypeIndex)) return 0;
-    VULKAN_ERROR(vkAllocateMemory(context->log_device, &mem_alloc_info, NULL, &out_buf->memory), "Failed to allocate vertex buffer memory",
-                          vkDestroyBuffer(context->log_device, out_buf->buffer, NULL));
-    //Bind the memory to this buffer properties struct
-    VULKAN_ERROR(vkBindBufferMemory(context->log_device, out_buf->buffer, out_buf->memory, 0), "Failed to bind buffer memory", 
-                          BOBi_vk_destroy_buffer(context->log_device, out_buf));
-
-    return 1;
-}
-
-//Streams data into a BOBi_Vulkan_Buffer
-uint8_t BOBi_vk_stream_to_buffer(VkDevice device, const void *src, size_t size, BOBi_Vulkan_Buffer *dst) {
-    void *data;
-    VULKAN_ERROR(vkMapMemory(device, dst->memory, 0, size, 0, &data), "Failed to map GPU memory to CPU memory");
-    memcpy(data, src, size);
-    vkUnmapMemory(device, dst->memory);
-    return 1;
-}
-
-//Copies the data from a buffer to an image's data memory
-void BOBi_vk_copy_buffer_to_image(VkCommandBuffer command_buf, VkBuffer buffer, VkImage image, uint32_t width, uint32_t height) {
-    VkBufferImageCopy region = {
-        .bufferOffset = 0, .bufferRowLength = 0, .bufferImageHeight = 0,
-        .imageSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1},
-        .imageOffset = {0, 0, 0},
-        .imageExtent = {width, height, 1}
-    };
-    vkCmdCopyBufferToImage(command_buf, buffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-}
-
-//Copies a certain amount of data from one buffer to another buffer. Assumes that the copy/sources ranges always start at 0
-uint8_t BOBi_vk_copy_buffer(BOB_Context *context, VkBuffer src_buf, VkBuffer dst_buf, VkDeviceSize sz) {
-    //Begin a local command buffer
-    VkCommandBuffer command_copy_buffer;
-    if(!BOBi_vk_begin_single_time_commands(context, &command_copy_buffer)) return 0;
-
-    //Copy the data
-    VkBufferCopy copy_region = {0, 0, sz};
-    vkCmdCopyBuffer(command_copy_buffer, src_buf, dst_buf, 1, &copy_region);
-
-    //Destroy the local command buffer
-    BOBi_vk_end_single_time_commands(context, command_copy_buffer);
-    return 1;
-}
-
-//Checks if a given physical device is suitable to our needs
-//TODO: Add some sort of priority to device selection (e.g. select a dedicated GPU over an integrated one)
-uint8_t BOBi_vk_is_device_suitable(VkPhysicalDevice device) {
-    //Get the properties of the physical device
-    VkPhysicalDeviceProperties dProperties;
-    vkGetPhysicalDeviceProperties(device, &dProperties);
-
-    //Check if the physical device supports Vulkan 1.3 API version
-    uint8_t supports_vulkan_1_3 = dProperties.apiVersion >= VK_API_VERSION_1_3;
-
-    //Check if any of the queue families support graphics operations
-    uint32_t num_queue_families = 0;
-    vkGetPhysicalDeviceQueueFamilyProperties(device, &num_queue_families, NULL);
-    VkQueueFamilyProperties *family_properties = malloc(sizeof(VkQueueFamilyProperties) * num_queue_families);
-    vkGetPhysicalDeviceQueueFamilyProperties(device, &num_queue_families, family_properties);
-
-    //Iterate and check if the queue families have the graphics bit set
-    uint8_t supports_graphics = 0;
-    for(size_t i = 0; i < num_queue_families; i++) {
-        if(family_properties[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
-            supports_graphics = 1;
-            break;
-        }
-    }
-    free(family_properties); //Cleanup
-
-    //Get the extensions included in the device
-    uint32_t included_extension_count = 0;
-    VkExtensionProperties *available_extensions;
-    VULKAN_ENUMERATE(vkEnumerateDeviceExtensionProperties(device, NULL, &included_extension_count, NULL),
-                     vkEnumerateDeviceExtensionProperties(device, NULL, &included_extension_count, available_extensions),
-                     available_extensions, included_extension_count * sizeof(VkExtensionProperties), "Failed to enumerate instance extensions");
-
-    //Check if the device supports all of our required extensions
-    uint8_t all_found = 1;
-    for(size_t i = 0; i < num_required_device_extensions; i++) {
-        uint8_t found = 0;
-
-        for(size_t j = 0; j < included_extension_count; j++) {
-            if(!strcmp(required_device_extensions[i], available_extensions[j].extensionName)) { //Use strcmp to compare extension names
-                found = 1;
-                break;
-            }
-        }
-
-        if (!found) {
-            printf("Missing required extension: %s\n", required_device_extensions[i]);
-            all_found = 0;
-            break;
-        }
-    }
-    free(available_extensions); //Cleanup
-
-    //Struct chain to get the features of the device
-    VkPhysicalDeviceExtendedDynamicStateFeaturesEXT extended_dynamic_state = {
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT,
-        .pNext = NULL,
-    };
-    VkPhysicalDeviceVulkan13Features vulkan_13 = {
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, .pNext = &extended_dynamic_state
-    };
-    VkPhysicalDeviceFeatures2 features2 = {
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &vulkan_13
-    };
-    vkGetPhysicalDeviceFeatures2(device, &features2);
-
-    uint8_t supports_required_features = features2.features.samplerAnisotropy && vulkan_13.dynamicRendering
-        && vulkan_13.synchronization2 && extended_dynamic_state.extendedDynamicState;
-
-    return all_found && supports_graphics && supports_vulkan_1_3 && supports_required_features;
-}
-
-//Choose a format that will be used by our swapchain
-uint8_t BOBi_vk_choose_swap_surface_format(VkSurfaceFormatKHR *formats, size_t format_sz, VkSurfaceFormatKHR *out) {
-    if(format_sz == 0) return 0; //Early exit
-
-    size_t index = format_sz;
-    for(size_t i = 0; i < format_sz; i++) {
-        if(formats[i].format == VK_FORMAT_R8G8B8A8_SRGB && formats[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
-            index = i;
-            break;
-        }
-    }
-    *out = (index == format_sz) ? formats[0] : formats[index];
-    return 1;
-}
-
-//Choose the present mode used by our swapchain
-uint8_t BOBi_vk_choose_swap_present_mode(VkPresentModeKHR *modes, size_t mode_sz, VkPresentModeKHR *out) {
-    if(mode_sz == 0) return 0; //Early exit
-
-    size_t index = mode_sz;
-    for(size_t i = 0; i < mode_sz; i++) {
-        if(modes[i] == VK_PRESENT_MODE_MAILBOX_KHR) {
-            index = i;
-            break;
-        }
-    }
-
-    //VK_PRESENT_MODE_FIFO_KHR is guaranteed to be on all devices so can default to it if we don't find any other suitable ones
-    *out = (index == mode_sz) ? VK_PRESENT_MODE_FIFO_KHR : modes[index];
-    return 1;
-}
-
-//Returns the clamped version of a number between a given upper and lower bound
-size_t BOBi_clamp(size_t val, size_t min, size_t max) {
-    if(val < min) val = min;
-    if(val > max) val = max;
-
-    return val;
-}
-
-//Get the extent (dimensions) of the images in the swapchain
-VkExtent2D BOBi_vk_choose_swap_extent(VkSurfaceCapabilitiesKHR *capabilities, size_t width, size_t height) {
-    if(capabilities->currentExtent.width != UINT32_MAX) return capabilities->currentExtent; //If we already have it set to some value, just return that one
-
-    //Otherwise clamp the size to the dimensions of the window
-    return (VkExtent2D){BOBi_clamp(width, capabilities->minImageExtent.width, capabilities->maxImageExtent.width),
-                        BOBi_clamp(height, capabilities->minImageExtent.height, capabilities->maxImageExtent.height)};
-}
-
-//Returns the minimum number of images present in the swapchain
-uint32_t BOBi_vk_choose_swap_min_image_count(VkSurfaceCapabilitiesKHR *capabilities) {
-    uint32_t min_image_count = (capabilities->minImageCount < 3) ? capabilities->minImageCount : 3; //Defaults to 3
-
-    //If the max is lower than our min, set our min to the max
-    if((0 < capabilities->maxImageCount) && (capabilities->maxImageCount < min_image_count)) {
-        min_image_count = capabilities->maxImageCount;
-    }
-
-    return min_image_count;
-}
-
-//Transitions a swapchain image
-void BOBi_vk_transition_image_layout(VkImage image, VkImageLayout old_layout, VkImageLayout new_layout, VkAccessFlags2 src_access_mask,
-                             VkAccessFlags2 dst_access_mask, VkPipelineStageFlags2 src_stage_mask, VkPipelineStageFlags2 dst_stage_mask,
-                             VkImageAspectFlags image_aspect_flags, VkCommandBuffer command_buf) {
-    VkImageMemoryBarrier2 barrier = {
-        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2, .pNext = NULL,
-        .srcStageMask = src_stage_mask, .srcAccessMask = src_access_mask,
-        .dstStageMask = dst_stage_mask, .dstAccessMask = dst_access_mask,
-        .oldLayout = old_layout, .newLayout = new_layout,
-        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .image = image,
-        .subresourceRange = (VkImageSubresourceRange){
-            .aspectMask = image_aspect_flags,
-            .baseMipLevel = 0,
-            .levelCount = 1,
-            .baseArrayLayer = 0,
-            .layerCount = 1
-        }
-    };
-
-    VkDependencyInfo dep_info = {
-        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .pNext = NULL,
-        .dependencyFlags = 0, .imageMemoryBarrierCount = 1,
-        .pImageMemoryBarriers = &barrier
-    };
-
-    vkCmdPipelineBarrier2(command_buf, &dep_info);
-}
-
-//Transitions a non-swapchain images layout
-uint8_t BOBi_vk_transition_tex_layout(VkCommandBuffer command_buf, VkImage image, VkImageLayout old_layout, VkImageLayout new_layout) {
-    //Deterine the flags for the source and destination changes
-    VkPipelineStageFlags2 src_stage;
-    VkPipelineStageFlags2 dst_stage;
-    VkAccessFlags2 src_access_mask;
-    VkAccessFlags2 dst_access_mask;
-    if(old_layout == VK_IMAGE_LAYOUT_UNDEFINED && new_layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
-        src_access_mask = (VkAccessFlags){0};
-        dst_access_mask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-
-        src_stage = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
-        dst_stage = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
-    }
-    else if(old_layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && new_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
-        src_access_mask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-        dst_access_mask = VK_ACCESS_2_SHADER_READ_BIT;
-
-        src_stage = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
-        dst_stage = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
-    }
-    else {
-        printf("Unsupported layout transition\n");
-        return 0;
-    }
-
-    //Transition the image
-    BOBi_vk_transition_image_layout(image, old_layout, new_layout, src_access_mask, dst_access_mask, src_stage, dst_stage, VK_IMAGE_ASPECT_COLOR_BIT, command_buf);
-
-    return 1;
-}
-
-//================================ INTIALISATION/CONTEXT CREATION FUNCTIONS =================================
-
-uint8_t BOBi_vk_init_vulkan(const char **required_extensions, size_t num_extensions) {
-    VkApplicationInfo app_info = {
-        .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pNext = NULL,
-        .pApplicationName = "", .applicationVersion = VK_MAKE_VERSION(1, 0, 0),
-        .pEngineName = "", .engineVersion = VK_MAKE_VERSION(1, 0, 0), .apiVersion = VK_API_VERSION_1_3,
-    };
-
-    //Check if the required GLFW extensions are supported by the Vulkan implementation
-    uint32_t included_extension_count = 0;
-    VkExtensionProperties *available_extensions;
-    VULKAN_ENUMERATE(vkEnumerateInstanceExtensionProperties(NULL, &included_extension_count, NULL),
-                     vkEnumerateInstanceExtensionProperties(NULL, &included_extension_count, available_extensions),
-                     available_extensions, included_extension_count * sizeof(VkExtensionProperties), "Failed to enumerate instance extensions");
-
-    for(size_t i = 0; i < num_extensions; i++) {
-        uint8_t found = 0;
-
-        for(size_t j = 0; j < included_extension_count; j++) {
-            if(!strcmp(required_extensions[i], available_extensions[j].extensionName)) {
-                found = 1;
-                break;
-            }
-        }
-
-        if (!found) {
-            printf("Missing required extension: %s\n", required_extensions[i]);
-            free(available_extensions);
-            return 0;
-        }
-    }
-    free(available_extensions);
-
-    //Setting up Validation layers
-    const char **required_layers = NULL;
-    if(ENABLE_VALIDATION_LAYERS) {
-        required_layers = validation_layers;
-        uint32_t enabled_layers = 0;
-        VkLayerProperties *properties;
-        VULKAN_ENUMERATE(vkEnumerateInstanceLayerProperties(&enabled_layers, NULL),
-                         vkEnumerateInstanceLayerProperties(&enabled_layers, properties),
-                         properties, enabled_layers * sizeof(VkLayerProperties), "Failed to enumerate instance layers");
-
-        for(size_t i = 0; i < num_validation_layers; i++) {
-            uint8_t found = 0;
-
-            for(size_t j = 0; j < enabled_layers; j++) {
-                if(!strcmp(validation_layers[i], properties[j].layerName)) {
-                    found = 1;
-                    break;
-                }
-            }
-
-            if (!found) {
-                printf("Missing required extension: %s\n", required_extensions[i]);
-                free(properties);
-                return 0;
-            }
-        }
-
-        free(properties);
-    }
-
-    //Creating the instance itself
-    VkInstanceCreateInfo create_info = {
-        .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pNext = NULL, .pApplicationInfo = &app_info,
-        .enabledExtensionCount = num_extensions, .ppEnabledExtensionNames = required_extensions, .ppEnabledLayerNames = required_layers,
-        .enabledLayerCount = ENABLE_VALIDATION_LAYERS ? num_validation_layers : 0
-    };
-    VULKAN_ERROR(vkCreateInstance(&create_info, NULL, &bob_state.instance), "Failed to create a vulkan instance");
-
-    return 1;
-}
-
-//Picks the physical device to use for this application from all available options
-uint8_t BOBi_vk_pick_physical_device(BOB_Context *context) {
-    //Get all available physical devices
-    uint32_t physical_device_count = 0;
-    VkPhysicalDevice *devices;
-    VULKAN_ENUMERATE(vkEnumeratePhysicalDevices(bob_state.instance, &physical_device_count, NULL),
-                     vkEnumeratePhysicalDevices(bob_state.instance, &physical_device_count, devices),
-                     devices, physical_device_count * sizeof(VkPhysicalDevice), "Failed to enumerate physical devices");
-
-    //Early exit if there aren't any
-    if(physical_device_count == 0) {
-        printf("Failed to find GPUs with Vulkan support\n");
-        free(devices);
-        return 0;
-    }
-
-    //Otherwise pick the first suitable one
-    for(size_t i = 0; i < physical_device_count; i++) {
-        if(BOBi_vk_is_device_suitable(devices[i])) {
-            context->phy_device = devices[i];
-            free(devices);
-            return 1;
-        }
-    }
-    free(devices);
-
-    printf("Failed to find a suitable GPU\n");
-    return 0;
-}
-
-//Create a virtual device representation to liase with the physical hardware
-uint8_t BOBi_vk_create_logical_device(BOB_Context *context) {
-    //Get all of the queue families present on the physical device
-    uint32_t num_queue_families = 0;
-    vkGetPhysicalDeviceQueueFamilyProperties(context->phy_device, &num_queue_families, NULL);
-    VkQueueFamilyProperties *family_properties = malloc(sizeof(VkQueueFamilyProperties) * num_queue_families);
-    vkGetPhysicalDeviceQueueFamilyProperties(context->phy_device, &num_queue_families, family_properties);
-
-    //Check if any of the queue families support graphics operations
-    context->queue_family = num_queue_families;
-    for(size_t i = 0; i < num_queue_families; i++) {
-        uint32_t res;
-        VULKAN_ERROR(vkGetPhysicalDeviceSurfaceSupportKHR(context->phy_device, i, context->surface, &res), "Could not get device surface support");
-        if(family_properties[i].queueFlags & VK_QUEUE_GRAPHICS_BIT && res) {
-            context->queue_family = i;
-            break;
-        }
-    }
-    free(family_properties);
-
-    if(context->queue_family == num_queue_families) { //Early exit if no condition is met
-        printf("No device queue supports graphics operations\n");
-        return 0;
-    }
-
-    //Info for creating the graphics queue
-    float queue_priority = 0.5f;
-    VkDeviceQueueCreateInfo device_queue_create_info = {
-        .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .pNext = NULL,
-        .queueFamilyIndex = context->queue_family, .queueCount = 1,
-        .pQueuePriorities = &queue_priority
-    };
-
-    //Create a chain of feature structures:
-    //Enable extended dynamic state from the extension
-    VkPhysicalDeviceExtendedDynamicStateFeaturesEXT extendedDynamicStateFeatures = {
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT,
-        .pNext = NULL,
-        .extendedDynamicState = VK_TRUE,
-    };
-
-    //Enable dynamic rendering from Vulkan 1.3
-    VkPhysicalDeviceVulkan13Features vulkan13Features = {
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
-        .pNext = &extendedDynamicStateFeatures,
-        .synchronization2 = VK_TRUE, .dynamicRendering = VK_TRUE,
-    };
-
-    //Enable shader draw parameters from Vulkan 1.1
-    VkPhysicalDeviceVulkan11Features vulkan11Features = {
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
-        .pNext = &vulkan13Features,
-        .shaderDrawParameters = VK_TRUE,
-    };
-
-    //Empty for now
-    VkPhysicalDeviceFeatures2 features2 = {
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
-        .pNext = &vulkan11Features,
-        .features = {.samplerAnisotropy = VK_TRUE},
-    };
-
-    //Create the logical device
-    VkDeviceCreateInfo device_create_info = {
-        .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-        .pNext = &features2,
-        .queueCreateInfoCount = 1,
-        .pQueueCreateInfos = &device_queue_create_info,
-        .enabledExtensionCount = num_required_device_extensions,
-        .ppEnabledExtensionNames = required_device_extensions
-    };
-    VULKAN_ERROR(vkCreateDevice(context->phy_device, &device_create_info, NULL, &context->log_device), "Failed to create logical device");
-    vkGetDeviceQueue(context->log_device, context->queue_family, 0, &context->graphics_queue); //Get the reference to the graphics queue
-
-    return 1;
-}
-
-//Create the swapchain used to render images to the screen
-uint8_t BOBi_vk_create_swapchain(BOB_Context *context, size_t width, size_t height) {
-    //Get the surface capabilities
-    VkSurfaceCapabilitiesKHR sur_cap;
-    VULKAN_ERROR(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(context->phy_device, context->surface, &sur_cap), "Could not get surface capabilities");
-
-    //Get swapchain properties
-    context->extent = BOBi_vk_choose_swap_extent(&sur_cap, width, height);
-    uint32_t min_image_count = BOBi_vk_choose_swap_min_image_count(&sur_cap);
-
-    //Get the available surface formats
-    uint32_t surface_format_count = 0;
-    VkSurfaceFormatKHR *surface_formats;
-    VULKAN_ENUMERATE(vkGetPhysicalDeviceSurfaceFormatsKHR(context->phy_device, context->surface, &surface_format_count, NULL),
-                     vkGetPhysicalDeviceSurfaceFormatsKHR(context->phy_device, context->surface, &surface_format_count, surface_formats),
-                     surface_formats, surface_format_count * sizeof(VkSurfaceFormatKHR), "Failed to get surface formats\n");
-    //Pick the swapchain surface format we will use
-    if(!BOBi_vk_choose_swap_surface_format(surface_formats, surface_format_count, &context->format)) {
-        printf("Failed to choose the swap chain surface format\n");
-        free(surface_formats);
-        return 0;
-    }
-
-    //Get the available present modes
-    uint32_t available_present_modes = 0;
-    VkPresentModeKHR *present_modes;
-    VULKAN_ENUMERATE(vkGetPhysicalDeviceSurfacePresentModesKHR(context->phy_device, context->surface, &available_present_modes, NULL),
-                     vkGetPhysicalDeviceSurfacePresentModesKHR(context->phy_device, context->surface, &available_present_modes, present_modes),
-                     present_modes, available_present_modes * sizeof(VkPresentModeKHR), "Failed to get surface modes\n");
-    //Get the present mode we will use
-    VkPresentModeKHR chosen_mode;
-    if(!BOBi_vk_choose_swap_present_mode(present_modes, available_present_modes, &chosen_mode)) {
-        printf("Failed to choose a present mode\n");
-        free(present_modes);
-        return 0;
-    }
-
-    //Cleanup
-    free(surface_formats);
-    free(present_modes);
-
-    //Create the swapchain
-    VkSwapchainCreateInfoKHR swapchain_create_info = {
-        .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR, .pNext = NULL,
-        .surface = context->surface, .minImageCount = min_image_count,
-        .imageFormat = context->format.format,
-        .imageColorSpace = context->format.colorSpace,
-        .imageExtent = context->extent,
-        .imageArrayLayers = 1, //Specifies num layers each image consists of. Always 1 unless making a stereoscopic 3D app
-        .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, //Specifies what kind of operations we use the images in the swap chain for
-        .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE, //Specifies how to handle swap chain images that might be used across multiple queue families
-        .preTransform = sur_cap.currentTransform, //Can specify that certain transforms can be applied to images in the swap chain
-        .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR, //Specifies if the alpha channel should be used for blending with other windows
-        .presentMode = chosen_mode,
-        .clipped = 1, .oldSwapchain = VK_NULL_HANDLE,
-    };
-    VULKAN_ERROR(vkCreateSwapchainKHR(context->log_device, &swapchain_create_info, NULL, &context->swapchain), "Failed to create swapchain");
-
-    //Get a reference to the swapchain images
-    VULKAN_ENUMERATE(vkGetSwapchainImagesKHR(context->log_device, context->swapchain, &context->num_images, NULL),
-                     vkGetSwapchainImagesKHR(context->log_device, context->swapchain, &context->num_images, context->images),
-                     context->images, context->num_images * sizeof(VkImage), "Failed to get the swapchain images");
-
-
-    return 1;
-}
-
-//Creates views for the swapchain images
-uint8_t BOBi_vk_create_image_views(BOB_Context *context) {
-    context->views = malloc(sizeof(VkImageView) * context->num_images);
-
-    for(size_t i = 0; i < context->num_images; i++) {
-        if(!BOBi_vk_create_image_view(context, context->images[i], context->format.format, VK_IMAGE_ASPECT_COLOR_BIT, &context->views[i])) return 0;
-    }
-
-    return 1;
-}
-
-//Creates a command pool
-uint8_t BOBi_vk_create_command_pool(BOB_Context *context) {
-    VkCommandPoolCreateInfo pool_info = {
-        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .pNext = NULL,
-        .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, .queueFamilyIndex = context->queue_family
-    };
-    VULKAN_ERROR(vkCreateCommandPool(context->log_device, &pool_info, NULL, &context->command_pool), "Failed to create command pool");
-    return 1;
-}
-
-//Creates the resources used to do depth culling
-uint8_t BOBi_vk_create_depth_resources(BOB_Context *context) {
-    VkFormat depth_format;
-    if(!BOBi_vk_find_depth_format(context, &depth_format)) return 0;
-
-    if(!BOBi_vk_create_image(context, context->extent.width, context->extent.height, depth_format, VK_IMAGE_TILING_OPTIMAL,
-                 VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &context->depth)) return 0;
-    if(!BOBi_vk_create_image_view(context, context->depth.image, depth_format, VK_IMAGE_ASPECT_DEPTH_BIT, &context->depth.view)) return 0;
-
-    return 1;
-}
-
-//Creates the descriptor pools that hold the information on the data we send to the GPU
-uint8_t BOBi_vk_create_descriptor_pool(BOB_Context *context) {
-    VkDescriptorPoolSize pool_size[2] = {
-        {.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 1},
-        {.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1}
-    };
-
-    VkDescriptorPoolCreateInfo pool_info = {
-        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .pNext = NULL,
-        .flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, 
-        .maxSets = BOB_MAX_MATERIAL_CAPACITY, .poolSizeCount = 2,
-        .pPoolSizes = pool_size
-    };
-
-    VULKAN_ERROR(vkCreateDescriptorPool(context->log_device, &pool_info, NULL, &context->descriptor_pool), "Failed to create descriptor pool");
-    return 1;
-}
-
-//Creates a texture sampler for the one texture we are using to be sent to the GPU
-uint8_t BOBi_vk_create_texture_sampler(BOB_Context *context, VkSampler *sampler) {
-    VkPhysicalDeviceProperties properties;
-    vkGetPhysicalDeviceProperties(context->phy_device, &properties);
-    VkSamplerCreateInfo sampler_info = {
-        .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .pNext = NULL,
-        .magFilter = VK_FILTER_LINEAR, .minFilter = VK_FILTER_LINEAR,
-        .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
-        .mipLodBias = 0.0f, .minLod = 0.0f, .maxLod = 0.0f,
-        .addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-        .addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-        .addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-        .anisotropyEnable = VK_TRUE,
-        .maxAnisotropy = properties.limits.maxSamplerAnisotropy,
-        .compareEnable = VK_FALSE,
-        .compareOp = VK_COMPARE_OP_ALWAYS,
-        .borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK,
-        .unnormalizedCoordinates = VK_FALSE,
-    };
-    VULKAN_ERROR(vkCreateSampler(context->log_device, &sampler_info, NULL, sampler), "Failed to create texture sampler");
-    return 1;
-}
-
-//Creates the general command buffers used to generate draw calls
-uint8_t BOBi_vk_create_command_buffer(BOB_Context *context, VkCommandBuffer *command_buf) {
-    VkCommandBufferAllocateInfo alloc_info = {
-        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .pNext = NULL,
-        .commandPool = context->command_pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1
-    };
-        VULKAN_ERROR(vkAllocateCommandBuffers(context->log_device, &alloc_info, command_buf), "Failed to allocate command buffers");
-    return 1;
-}
-
-//Creates the semaphores and fences required to synchronise operations
-uint8_t BOBi_vk_create_sync_objects(BOB_Context *context) {
-    VkSemaphoreCreateInfo sem_info = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, .pNext = NULL, .flags = 0 };
-
-    VkFenceCreateInfo fence_info = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, .pNext = NULL, .flags = VK_FENCE_CREATE_SIGNALED_BIT};
-    context->render_finished_semaphore = malloc(sizeof(VkSemaphore) * context->num_images);
-    for(size_t i = 0; i < context->num_images; i++) {
-        VULKAN_ERROR(vkCreateSemaphore(context->log_device, &sem_info, NULL, &context->render_finished_semaphore[i]), "Failed to create a semaphore");
-    }
-    VULKAN_ERROR(vkCreateSemaphore(context->log_device, &sem_info, NULL, &context->present_complete_semaphore), "Failed to create a semaphore");
-    VULKAN_ERROR(vkCreateFence(context->log_device, &fence_info, NULL, &context->draw_fence), "Failed to create a fence");
-
-    return 1;
-}
-
-//===================================== MATERIAL CREATION =========================================
-
-//Creates a shader module object from a buffer filled with SPIR-V sharder bytecode
-//The buffer must be aligned to 4 bytes
-uint8_t BOBi_vk_create_shader_module(uint8_t *buf, size_t buf_sz, VkShaderModule *shader_module, VkDevice log_device) {
-    //Alignment check
-    if(buf_sz % 4 != 0) {
-        printf("Byte data not aligned to 4 bytes\n");
-        return 0;
-    }
-    //Create the shader module
-    VkShaderModuleCreateInfo create_info = {.codeSize = buf_sz, .pCode = (uint32_t *)buf, .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .pNext = NULL};
-    VULKAN_ERROR(vkCreateShaderModule(log_device, &create_info, NULL, shader_module), "Failed to create shader module");
-
-    return 1;
-}
-
-int BOBi_vk_convert_shader_type(BOB_Shader_Type type) {
-    switch (type) {
-        case BOB_VERTEX_SHADER: return VK_SHADER_STAGE_VERTEX_BIT;
-        case BOB_FRAGMENT_SHADER: return VK_SHADER_STAGE_FRAGMENT_BIT;
-        default: return 0;
-    }
-}
-
-//Creates our graphics pipeline
-uint8_t BOBi_vk_create_graphics_pipeline(BOB_Context *context, BOB_Material *mat, BOB_Shader_Data *data, size_t num_shaders) {
-    VkPipelineShaderStageCreateInfo *shader_stages = malloc(sizeof(VkPipelineShaderStageCreateInfo) * num_shaders);
-
-    for(size_t i = 0; i < num_shaders; i++) {
-        if(data[i].type != BOB_VERTEX_SHADER && data[i].type != BOB_FRAGMENT_SHADER) {
-            printf("Shader type not supported");
-            return 0;
-        }
-
-        //Create the shader module to hold the shader
-        VkShaderModule shader_module;
-        if(!BOBi_vk_create_shader_module((uint8_t *)data[i].shader_code, data[i].code_buf_sz, &shader_module, context->log_device)) {
-            return 0;
-        }
-        //Telling the pipleine what shader stages we are using
-        shader_stages[i] = (VkPipelineShaderStageCreateInfo){
-            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .pNext = NULL,
-            .stage = BOBi_vk_convert_shader_type(data[i].type), .module = shader_module, .pName = data[i].entrypoint_name
-        };
-    }
-
-    //Can tell the pipeline what stages we want to be able to change at runtime without having to recreate the whole program
-    VkDynamicState dynamic_states[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
-    VkPipelineDynamicStateCreateInfo dynamic_state = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .pNext = NULL,
-                                                    .dynamicStateCount = 2, .pDynamicStates = dynamic_states};
-
-    //Get the binding and attribute descriptions
-    VkVertexInputBindingDescription binding_desc = BOBi_vk_get_binding_desc();
-    VkVertexInputAttributeDescription attrib_descs[4];
-    size_t num_attrib_descs;
-    BOBi_vk_get_attrib_descs(attrib_descs, &num_attrib_descs);
-
-    //Get the data on the vertex input
-    VkPipelineVertexInputStateCreateInfo vertexInputInfo = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO, .pNext = NULL,
-        .vertexBindingDescriptionCount = 1, .pVertexBindingDescriptions = &binding_desc,
-        .vertexAttributeDescriptionCount = num_attrib_descs, .pVertexAttributeDescriptions = attrib_descs
-    };
-
-    //Tell the shader we will be outputting triangle data
-    VkPipelineInputAssemblyStateCreateInfo input_assembly = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, .pNext = NULL,
-        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST
-    };
-
-    VkViewport viewport = {0.0f, 0.0f, context->extent.width, context->extent.height, 0.0f, 1.0f}; //Viewport rectangle
-    VkRect2D scissor = {(VkOffset2D){0, 0}, context->extent}; //Scissor rectangle
-    VkPipelineViewportStateCreateInfo viewport_state = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .pNext = NULL, .viewportCount = 1, .scissorCount = 1};
-
-VkPipelineRasterizationStateCreateInfo rasteriser = {
-    .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-    .depthClampEnable = VK_FALSE,
-    .rasterizerDiscardEnable = VK_FALSE,
-    .polygonMode = VK_POLYGON_MODE_FILL,
-    .cullMode = VK_CULL_MODE_NONE,
-    .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
-    .depthBiasEnable = VK_FALSE,
-    .lineWidth = 1.0f
-};
-    // VkPipelineRasterizationStateCreateInfo rasteriser = {
-    //     .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, .pNext = NULL,
-    //     .depthClampEnable = VK_FALSE, //If set to true, fragments beyond near and far planes are clamped to them instead of discarded
-    //     .rasterizerDiscardEnable = VK_FALSE, //If set to true, then geometry never passes through rasteriser stage. Disables output to framebuffer
-    //     .polygonMode = VK_POLYGON_MODE_FILL, //Determines how fragments are generated for geometry. Can also be drawn as lines or points
-    //     .cullMode = VK_CULL_MODE_BACK_BIT, //Determines what kind of face culling to use
-    //     .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE, //Determines the vertex order for the faces to be considered front facing and can be clockwise or counter-clockwise
-    //     .depthBiasEnable = VK_FALSE, //Rasteriser can alter the depth values by adding a constant value or biasing them based on a fragments slope. Not necessary
-    //     .lineWidth = 1.0}; //Determines the thickness of lines in terms of fragments
-
-    //Configure Multisampling
-    VkPipelineMultisampleStateCreateInfo multisampling = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, .pNext = NULL,
-        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT, .sampleShadingEnable = VK_FALSE
-    };
-
-    //Configuring Colour Blending
-    VkPipelineColorBlendAttachmentState colour_blend_attachment = {
-        .blendEnable = VK_TRUE,
-        .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
-        .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
-        .colorBlendOp = VK_BLEND_OP_ADD,
-        .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
-        .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
-        .alphaBlendOp = VK_BLEND_OP_ADD,
-        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT
-    };
-
-    VkPipelineColorBlendStateCreateInfo colour_blending = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, .pNext = NULL,
-        .logicOpEnable = VK_FALSE, .logicOp = VK_LOGIC_OP_COPY, .attachmentCount = 1, .pAttachments = &colour_blend_attachment
-    };
-
-    //Creating the pipeline layout
-    VkPipelineLayoutCreateInfo pipeline_layout_info = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .pNext = NULL,
-        .setLayoutCount = 2, .pSetLayouts = (VkDescriptorSetLayout[2]){mat->vulkan.uniform_set_layout, context->default_tex_layout}, .pushConstantRangeCount = 0
-    };
-    VULKAN_ERROR(vkCreatePipelineLayout(context->log_device, &pipeline_layout_info, NULL, &mat->vulkan.layout), "Failed to create pipeline layout",
-                 for(size_t i = 0; i < num_shaders; i++) { vkDestroyShaderModule(context->log_device, shader_stages[i].module, NULL); } free(shader_stages););
-
-    VkPipelineDepthStencilStateCreateInfo depth_stencil = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO, .pNext = NULL,
-        .depthTestEnable = VK_TRUE,
-        .depthWriteEnable = VK_TRUE,
-        .depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL,
-        .depthBoundsTestEnable = VK_FALSE,
-        .stencilTestEnable = VK_FALSE
-    };
-    VkPipelineRenderingCreateInfo pipeline_rendering_create_info = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .pNext = NULL,
-        .colorAttachmentCount = 1,
-        .pColorAttachmentFormats = &context->format.format,
-        .depthAttachmentFormat = VK_FORMAT_UNDEFINED,
-        .stencilAttachmentFormat = VK_FORMAT_UNDEFINED
-    };
-    VULKAN_ERROR(!BOBi_vk_find_depth_format(context, &pipeline_rendering_create_info.depthAttachmentFormat), "Failed to create pipeline layout",
-                 for(size_t i = 0; i < num_shaders; i++) { vkDestroyShaderModule(context->log_device, shader_stages[i].module, NULL); } free(shader_stages););
-
-    //Creating the graphics pipeline
-    VkGraphicsPipelineCreateInfo graphics_create_info = {
-        .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &pipeline_rendering_create_info,
-        .stageCount = num_shaders, .pStages = shader_stages, .pVertexInputState = &vertexInputInfo,
-        .pInputAssemblyState = &input_assembly, .pViewportState = &viewport_state,
-        .pRasterizationState = &rasteriser, .pMultisampleState = &multisampling,
-        .pColorBlendState = &colour_blending, .pDynamicState = &dynamic_state,
-        .layout = mat->vulkan.layout, .renderPass = NULL, .pDepthStencilState = &depth_stencil
-    };
-
-    VULKAN_ERROR(vkCreateGraphicsPipelines(context->log_device, VK_NULL_HANDLE, 1, &graphics_create_info, NULL, &mat->vulkan.pipeline), "Failed to create graphics pipeline",
-                 for(size_t i = 0; i < num_shaders; i++) { vkDestroyShaderModule(context->log_device, shader_stages[i].module, NULL); } free(shader_stages););
-
-    for(size_t i = 0; i < num_shaders; i++) {
-        vkDestroyShaderModule(context->log_device, shader_stages[i].module, NULL);
-    }
-    free(shader_stages);
-
-    return 1;
-}
-
-uint8_t BOBi_std140_alignment(BOB_Uniform_Type type) {
-    switch (type) {
-        case BOB_UNIFORM_FLOAT:
-        case BOB_UNIFORM_UNSIGNED_INT:
-        case BOB_UNIFORM_SIGNED_INT: return 4;
-        case BOB_UNIFORM_VEC2: return 8;
-        case BOB_UNIFORM_VEC3:
-        case BOB_UNIFORM_VEC4: return 16;
-        case BOB_UNIFORM_MAT4: return 16;
-    }
-}
-
-uint8_t BOBi_std140_size(BOB_Uniform_Type type) {
-    switch (type) {
-        case BOB_UNIFORM_FLOAT:
-        case BOB_UNIFORM_UNSIGNED_INT:
-        case BOB_UNIFORM_SIGNED_INT: return 4;
-        case BOB_UNIFORM_VEC2: return 8;
-        case BOB_UNIFORM_VEC3:
-        case BOB_UNIFORM_VEC4: return 16;
-        case BOB_UNIFORM_MAT4: return 64;
-    }
-}
-
-//Creates a layout for the descriptor set for the data we will be sending to our shader
-uint8_t BOBi_vk_create_descriptor_layout(BOB_Context *context, VkDescriptorSetLayout *layout, VkDescriptorType *type, VkShaderStageFlags *stages, size_t *bindings, size_t num_layouts) {
-    VkDescriptorSetLayoutBinding layouts[BOB_MAX_UNIFORMS];
-    for(size_t i = 0; i < num_layouts; i++) {
-        layouts[i] = (VkDescriptorSetLayoutBinding){
-            .binding = bindings[i], .descriptorType = type[i], .descriptorCount = 1, .stageFlags = stages[i]
-        };
-    }
-
-    //Create the descriptor set layout
-    VkDescriptorSetLayoutCreateInfo layout_info = {
-        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .pNext = NULL,
-        .bindingCount = num_layouts, .pBindings = layouts
-    };
-    VULKAN_ERROR(vkCreateDescriptorSetLayout(context->log_device, &layout_info, NULL, layout), "Failed to create descriptor set layout");
-    return 1;
-}
-
-uint8_t BOBi_vk_create_descriptor_sets(BOB_Context *context, VkDescriptorSet *set, VkDescriptorSetLayout *layouts, size_t num_sets) {
-    VkDescriptorSetAllocateInfo alloc_info = {
-        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .pNext = NULL,
-        .descriptorPool = context->descriptor_pool,
-        .descriptorSetCount = num_sets, .pSetLayouts = layouts
-    };
-
-    VULKAN_ERROR(vkAllocateDescriptorSets(context->log_device, &alloc_info, set), "Failed to allocate descriptor sets");
-
-    return 1;
-}
-
-void BOBi_vk_destroy_material(BOB_Context *context, uint32_t index) {
-    BOB_Material *mat = &context->material_table[index];
-    if(mat->vulkan.uniform_descriptor_set != VK_NULL_HANDLE) {vkFreeDescriptorSets(context->log_device, context->descriptor_pool, 1, &mat->vulkan.uniform_descriptor_set); mat->vulkan.uniform_descriptor_set = VK_NULL_HANDLE;}
-    if(mat->vulkan.uniform_set_layout != VK_NULL_HANDLE) {vkDestroyDescriptorSetLayout(context->log_device, mat->vulkan.uniform_set_layout, NULL); mat->vulkan.uniform_set_layout = VK_NULL_HANDLE;}
-    BOBi_vk_destroy_buffer(context->log_device, &mat->vulkan.uniform_buffer);
-    if(mat->vulkan.layout!= VK_NULL_HANDLE) {vkDestroyPipelineLayout(context->log_device, mat->vulkan.layout, NULL); mat->vulkan.layout = VK_NULL_HANDLE;}
-    if(mat->vulkan.pipeline!= VK_NULL_HANDLE) {vkDestroyPipeline(context->log_device, mat->vulkan.pipeline, NULL); mat->vulkan.pipeline = VK_NULL_HANDLE;}
-}
-
-uint8_t BOBi_vk_create_material(BOB_Context *context, uint32_t index, BOB_Shader_Data *data, size_t num_shaders) {
-    BOB_Material *mat = &context->material_table[index];
-
-    size_t offset = 0;
-    VkShaderStageFlags uniform_stages = 0;
-
-    //Set the uniform data
-    for(size_t i = 0; i < mat->uniform_count; i++) {
-        BOB_Uniform *uniform = &mat->uniforms[i];
-        uniform->vulkan.offset = BOBi_align_up(offset, BOBi_std140_alignment(uniform->type));
-        offset = uniform->vulkan.offset + BOBi_std140_size(uniform->type);
-        uniform_stages |= uniform->vulkan.stage;
-    }
-
-    //Create the descriptor sets and the pipeline
-    VULKAN_ERROR(!BOBi_vk_create_descriptor_layout(context, &mat->vulkan.uniform_set_layout,
-                                        (VkDescriptorType[1]){VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER},
-                                        (VkShaderStageFlagBits[1]){uniform_stages}, (size_t[1]){0}, 1),
-                 "Failed to create descriptor sets");
-    VULKAN_ERROR(!BOBi_vk_create_descriptor_sets(context, &mat->vulkan.uniform_descriptor_set, &mat->vulkan.uniform_set_layout, 1),
-                 "Failed to create descriptor layouts");
-    VULKAN_ERROR(!BOBi_vk_create_graphics_pipeline(context, mat, data, num_shaders), "Failed to create graphics pipeline", BOBi_vk_destroy_material(context, index));
-
-    //Create the uniform buffer to hold the data:
-    VULKAN_ERROR(!BOBi_vk_create_buffer(context, offset, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                                &mat->vulkan.uniform_buffer), "Failed to create uniform buffer", BOBi_vk_destroy_material(context, index));
-
-    VULKAN_ERROR(vkMapMemory(context->log_device, mat->vulkan.uniform_buffer.memory, 0, offset, 0, &mat->vulkan.uniform_buffer_mapped),
-                 "Failed to map uniform buffer memory", BOBi_vk_destroy_material(context, index));
-
-    return 1;
-}
-
-void BOBi_vk_write_image_descriptor(BOB_Context *context, VkDescriptorSet set, VkDescriptorType type, size_t binding, uint32_t index) {
-    VkDescriptorImageInfo descriptor_images = (VkDescriptorImageInfo) {
-        .sampler = context->sampler, .imageView = context->texture_table[index].vulkan.view,
-        .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-    };
-    VkWriteDescriptorSet descriptor_writes = (VkWriteDescriptorSet){
-        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .pNext = NULL,
-        .dstSet = set, .dstBinding = binding,
-        .descriptorCount = 1, .descriptorType = type,
-        .pImageInfo = &descriptor_images
-    };
-    //Create the descriptor to hold the uniforms
-    vkUpdateDescriptorSets(context->log_device, 1, &descriptor_writes, 0, NULL);
-}
-
-void BOBi_vk_write_buffer_descriptor(BOB_Context *context, VkDescriptorSet set, VkDescriptorType type, size_t binding, BOBi_Vulkan_Buffer buf, VkDeviceSize range) {
-    VkDescriptorBufferInfo descriptor_buffer = (VkDescriptorBufferInfo) {
-        .buffer = buf.buffer, .offset = 0, .range = range
-    };
-    VkWriteDescriptorSet descriptor_writes = (VkWriteDescriptorSet){
-        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .pNext = NULL,
-        .dstSet = set, .dstBinding = binding,
-        .descriptorCount = 1, .descriptorType = type,
-        .pBufferInfo = &descriptor_buffer,
-    };
-    //Create the descriptor to hold the uniforms
-    vkUpdateDescriptorSets(context->log_device, 1, &descriptor_writes, 0, NULL);
-}
-
-//Updates the uniform buffer with new texture position
-void BOBi_vk_update_uniform(BOB_Context *context, BOB_Material *mat) {
-    for(size_t i = 0; i < mat->uniform_count; i++) {
-        BOB_Uniform *uniform = &mat->uniforms[i];
-        //Copying data
-        switch (uniform->type) {
-            case BOB_UNIFORM_FLOAT: memcpy(mat->vulkan.uniform_buffer_mapped + uniform->vulkan.offset, &uniform->f, sizeof(float)); break;
-            case BOB_UNIFORM_UNSIGNED_INT:memcpy(mat->vulkan.uniform_buffer_mapped + uniform->vulkan.offset, &uniform->u32, sizeof(uint32_t)); break;
-            case BOB_UNIFORM_SIGNED_INT: memcpy(mat->vulkan.uniform_buffer_mapped + uniform->vulkan.offset, &uniform->i32, sizeof(int32_t)); break;
-            case BOB_UNIFORM_VEC2: memcpy(mat->vulkan.uniform_buffer_mapped + uniform->vulkan.offset, &uniform->vec2, sizeof(BOB_Vector2)); break;
-            case BOB_UNIFORM_VEC3: memcpy(mat->vulkan.uniform_buffer_mapped + uniform->vulkan.offset, &uniform->vec3, sizeof(BOB_Vector3)); break;
-            case BOB_UNIFORM_VEC4: memcpy(mat->vulkan.uniform_buffer_mapped + uniform->vulkan.offset, &uniform->vec4, sizeof(BOB_Vector4)); break;
-            case BOB_UNIFORM_MAT4: memcpy(mat->vulkan.uniform_buffer_mapped + uniform->vulkan.offset, &uniform->mat4, sizeof(BOB_Mat4)); break;
-        }
-    }
-}
-
-uint8_t create_vertex_buffer(BOB_Context *context) {
-    //Create the staging buffer
-    VkDeviceSize buf_sz = sizeof(BOB_Render_Vertex) * num_vertices;
-    BOBi_Vulkan_Buffer staging_buf;
-    if(!BOBi_vk_create_buffer(context, buf_sz, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                  VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, &staging_buf)) return 0;
-
-    //Map the staging buffer to CPU memory and copy the vertex data into it
-    VULKAN_ERROR(!BOBi_vk_stream_to_buffer(context->log_device, vertices, buf_sz, &staging_buf), "Failed to stream data into a Vulkan Buffer");
-
-    //Create the destination VBO and map the data from the staging buffer into it
-    VULKAN_ERROR(!BOBi_vk_create_buffer(context, buf_sz, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                                &vertex_buf), "Failed to create vertex buffer", BOBi_vk_destroy_buffer(context->log_device, &staging_buf));
-    BOBi_vk_copy_buffer(context, staging_buf.buffer, vertex_buf.buffer, buf_sz);
-
-    //Destroy the staging buffer
-    BOBi_vk_destroy_buffer(context->log_device, &staging_buf);
-
-    return 1;
-}
-
-uint8_t create_index_buffer(BOB_Context *state) {
-    //Create the staging buffer
-    VkDeviceSize buf_sz = sizeof(indices[0]) * num_indices;
-    BOBi_Vulkan_Buffer staging_buf;
-    VkDeviceMemory staging_buf_mem;
-    if(!BOBi_vk_create_buffer(state, buf_sz, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                  VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, &staging_buf)) return 0;
-
-    //Map the staging buffer to CPU memory and copy the index data into it
-    VULKAN_ERROR(!BOBi_vk_stream_to_buffer(state->log_device, indices, buf_sz, &staging_buf), "Failed to stream data into a Vulkan Buffer");
-
-    //Create the actual destination buffer and copy the staging buffer data into it
-    VULKAN_ERROR(!BOBi_vk_create_buffer(state, buf_sz, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,  &index_buf), "Failed to create index buffer", BOBi_vk_destroy_buffer(state->log_device, &staging_buf));
-    BOBi_vk_copy_buffer(state, staging_buf.buffer, index_buf.buffer, buf_sz);
-
-    //Free the staging buffer
-    BOBi_vk_destroy_buffer(state->log_device, &staging_buf);
-
-    return 1;
-}
-
-//Initialises vulkan
-uint8_t BOBi_vk_init_vulkan_context(BOB_Context *context, size_t width, size_t height, BOB_vk_create_surface surface_func) {
-    VULKAN_ERROR(!surface_func(bob_state.instance, &context->surface), "Didn't create surface");
-    VULKAN_ERROR(!BOBi_vk_pick_physical_device(context), "Didn't pick physical device");
-    VULKAN_ERROR(!BOBi_vk_create_logical_device(context), "Didn't create logical device");
-    VULKAN_ERROR(!BOBi_vk_create_swapchain(context, width, height), "Didn't create swapchain");
-    VULKAN_ERROR(!BOBi_vk_create_image_views(context), "Didn't create swapchain images");
-    VULKAN_ERROR(!BOBi_vk_create_command_pool(context), "Didn't create command pool");
-    VULKAN_ERROR(!BOBi_vk_create_depth_resources(context), "Didn't create depth resources");
-    VULKAN_ERROR(!BOBi_vk_create_descriptor_pool(context), "Didn't create descriptor pool");
-    VULKAN_ERROR(!BOBi_vk_create_descriptor_layout(context, &context->default_tex_layout, 
-                (VkDescriptorType[1]){VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER}, (VkShaderStageFlags[1]){VK_SHADER_STAGE_FRAGMENT_BIT},
-                (size_t[1]){0}, 1), "Failed to create texture descriptor layout");
-    VULKAN_ERROR(!BOBi_vk_create_texture_sampler(context, &context->sampler), "Didn't create texture sampler");
-    VULKAN_ERROR(!BOBi_vk_create_command_buffer(context, &context->command_buffer), "Failed to creation command buffer");
-    VULKAN_ERROR(!BOBi_vk_create_sync_objects(context), "Failed to create sync objects");
-
-    create_vertex_buffer(context);
-    create_index_buffer(context);
-    return 1;
-}
-
-uint8_t BOB_create_vulkan_context(size_t atlas_capacity, size_t pixelbuf_capacity, size_t tex_capacity, size_t mat_capacity,
-                            size_t font_capacity, size_t width, size_t height, BOB_Context_Handle *context, BOB_vk_create_surface surface_func) {
-    if(!BOBi_create_context(BOB_VULKAN_CONTEXT, atlas_capacity, pixelbuf_capacity, tex_capacity, mat_capacity, font_capacity, width, height, context)) return 0;
-
-    BOB_Context *intrn_context;
-    BOBi_get_context(*context, &intrn_context);
-
-    //Vulkan specific initialisation
-    if(!BOBi_vk_init_vulkan_context(intrn_context, width, height, surface_func)) {
-        BOB_destroy_context(context);
-        return 0;
-    }
-
-    //Create the default texture used
-    if(!BOB_create_texture(*context, 1, 1, (uint8_t[4]){255, 255, 255, 255}, BOB_RGBA, &intrn_context->default_tex)) {
-        BOB_destroy_context(context);
-        return 0;
-    }
-    return 1;
-}
-
-void BOBi_vk_destroy_context(BOB_Context *context) {
-    for(size_t i = 0; i < context->num_images; i++) {
-        vkDestroyImageView(context->log_device, context->views[i], NULL);
-    }
-
-    free(context->views);
-    free(context->images);
-
-    vkFreeCommandBuffers(context->log_device, context->command_pool, 1, &context->command_buffer);
-    context->render_finished_semaphore = malloc(sizeof(VkSemaphore) * context->num_images);
-    for(size_t i = 0; i < context->num_images; i++) {
-        vkDestroySemaphore(context->log_device, context->render_finished_semaphore[i], NULL);
-    }
-    free(context->render_finished_semaphore);
-    vkDestroySemaphore(context->log_device, context->present_complete_semaphore, NULL);
-    vkDestroyFence(context->log_device, context->draw_fence, NULL);
-
-    vkDestroySampler(context->log_device, context->sampler, NULL);
-    vkDestroyDescriptorPool(context->log_device, context->descriptor_pool, NULL);
-    vkDestroyCommandPool(context->log_device, context->command_pool, NULL);
-    vkDestroySwapchainKHR(context->log_device, context->swapchain, NULL);
-    vkDestroyDevice(context->log_device, NULL);
-    vkDestroySurfaceKHR(bob_state.instance, context->surface, NULL);
-}
-
-//===================== RENDERER FUNCTIONS =================================
-
-uint8_t BOBi_vk_create_renderer(BOB_Context *context, BOB_Renderer *r, size_t vert_buf_sz, size_t index_buf_sz) {
-    //Create the vertex buffer
-    VULKAN_ERROR(!BOBi_vk_create_buffer(context, vert_buf_sz, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                                &r->vertex_buffer), "Failed to create vertex buffer");
-    //Create the index buffer
-    VULKAN_ERROR(!BOBi_vk_create_buffer(context, index_buf_sz, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,  &r->index_buffer), "Failed to create index buffer");
-
-    return 1;
-}
-void BOBi_vk_destroy_renderer(BOB_Context *context, BOB_Renderer *r) {
-    BOBi_vk_destroy_buffer(context->log_device, &r->vertex_buffer);
-    BOBi_vk_destroy_buffer(context->log_device, &r->index_buffer);
-}
-
-// ================================= TEXTURE FUNCTIONS ===========================================
-void BOBi_vk_destroy_texture(BOB_Context *context, uint32_t tex_index) {
-    BOBi_Vulkan_Image *tex = &context->texture_table[tex_index].vulkan;
-
-    if(tex->view != VK_NULL_HANDLE) vkDestroyImageView(context->log_device, tex->view, NULL);
-    if(tex->memory != VK_NULL_HANDLE) vkFreeMemory(context->log_device, tex->memory, NULL);
-    if(tex->image != VK_NULL_HANDLE) vkDestroyImage(context->log_device, tex->image, NULL);
-    if(tex->descriptor != VK_NULL_HANDLE) vkFreeDescriptorSets(context->log_device, context->descriptor_pool, 1, &tex->descriptor);
-}
-
-VkFormat BOBi_vk_convert_format(BOB_Format format) {
-    switch (format) {
-        case BOB_RED: return VK_FORMAT_R8_UNORM;
-        case BOB_RG: return VK_FORMAT_R8G8_UNORM;
-        case BOB_RGB: return VK_FORMAT_R8G8B8_UNORM;
-        case BOB_RGBA: return VK_FORMAT_R8G8B8A8_UNORM;
-    }
-}
-
-//TODO: Merge BOBi_vk_create_image and BOBi_vk_create_view into this, and parse the BOB_Format into a vulkan format instead of hardcoding it
-//      Also let user set the flags? Would need to make BOB API equivalents
-//      This would let us simplify this and BOBi_vk_create_depth_resources
-uint8_t BOBi_vk_create_texture(BOB_Context *context, uint32_t index, size_t width, size_t height, uint8_t *data, BOB_Format format) {
-    BOBi_Vulkan_Image *tex = &context->texture_table[index].vulkan;
-
-    //Create the staging buffer
-    BOBi_Vulkan_Buffer staging_buf;
-    if(!BOBi_vk_create_buffer(context, width * height * (format + 1), VK_BUFFER_USAGE_TRANSFER_SRC_BIT,  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &staging_buf)) return 0;
-
-    //Map the staging buffer memory into CPU memory and copy the pixel data into it
-    VULKAN_ERROR(!BOBi_vk_stream_to_buffer(context->log_device, data, width * height * (format + 1), &staging_buf), "Failed to stream data into a Vulkan Buffer");
-
-    //Create the image
-    if(!BOBi_vk_create_image(context, width, height, BOBi_vk_convert_format(format), VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, tex)) return 0;
-
-    VkCommandBuffer command_buf;
-    VULKAN_ERROR(!BOBi_vk_begin_single_time_commands(context, &command_buf), "Failed to begin command buffer",
-        BOBi_vk_destroy_buffer(context->log_device, &staging_buf);
-    );
-    VULKAN_ERROR(!BOBi_vk_transition_tex_layout(command_buf, tex->image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL), "Failed to transition layout",
-        BOBi_vk_destroy_buffer(context->log_device, &staging_buf);
-    );
-    BOBi_vk_copy_buffer_to_image(command_buf, staging_buf.buffer, tex->image, width, height);
-    VULKAN_ERROR(!BOBi_vk_transition_tex_layout(command_buf, tex->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
-        "Failed to transition layout", BOBi_vk_destroy_buffer(context->log_device, &staging_buf);
-    );
-    VULKAN_ERROR(!BOBi_vk_end_single_time_commands(context, command_buf), "Failed to end command buffer",
-        BOBi_vk_destroy_buffer(context->log_device, &staging_buf);
-    );
-
-    BOBi_vk_destroy_buffer(context->log_device, &staging_buf);
-
-    //Create view for the image
-    VULKAN_ERROR(!BOBi_vk_create_image_view(context, tex->image, BOBi_vk_convert_format(format),  VK_IMAGE_ASPECT_COLOR_BIT, &tex->view),
-                 "Failed to create view", BOBi_vk_destroy_image(context, tex));
-
-    //Create the descriptor set for the image
-    VULKAN_ERROR(!BOBi_vk_create_descriptor_sets(context, &tex->descriptor, &context->default_tex_layout, 1),
-                 "Failed to create texture descriptor set", BOBi_vk_destroy_image(context, tex));
-
-    BOBi_vk_write_image_descriptor(context, tex->descriptor, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 0, index);
-    return 1;
-}
-
-// ============================================ DESTRUCTION FUNCTIONS ========================================
-
-//Destroys existing memory used by the swapchain
-void BOBi_vk_cleanup_swapchain(BOB_Context *context) {
-    for(size_t i = 0; i < context->num_images; i++) {
-        vkDestroyImageView(context->log_device, context->views[i], NULL);
-    }
-    free(context->views);
-    free(context->images);
-    vkDestroySwapchainKHR(context->log_device, context->swapchain, NULL);
-}
-
-//Rebuilds the swapchain on framebuffer resize
-uint8_t BOBi_vk_recreate_swapchain(BOB_Context *context, size_t width, size_t height) {
-    VULKAN_ERROR(vkDeviceWaitIdle(context->log_device), "Failed to wait for signal");
-    BOBi_vk_cleanup_swapchain(context);
-    vkDestroyImageView(context->log_device, context->depth.view, NULL);
-    vkFreeMemory(context->log_device, context->depth.memory, NULL);
-    vkDestroyImage(context->log_device, context->depth.image, NULL);
-    return BOBi_vk_create_swapchain(context, width, height) && BOBi_vk_create_image_views(context) && BOBi_vk_create_depth_resources(context);
-}
-
-// ===================================== DRAWING FUNCTIONS =========================================
-
-uint8_t BOBi_vk_begin_frame(BOB_Context *context, BOB_Vector4 colour) {
-    //Wait until operations from previous frame have completed
-    VULKAN_ERROR(vkWaitForFences(context->log_device, 1, &context->draw_fence, VK_TRUE, UINT64_MAX), "Failed to wait for fence");
-    BOBi_vk_destroy_buffer(context->log_device, &context->vert_staging_buf);
-    BOBi_vk_destroy_buffer(context->log_device, &context->index_staging_buf);
-
-    //Get the next swapchain image
-    VkResult res = vkAcquireNextImageKHR(context->log_device, context->swapchain, UINT64_MAX,
-                                         context->present_complete_semaphore, VK_NULL_HANDLE, &context->next_swapchain_image_index);
-    //If the swapchain data is invalid, remake it
-    if(res == VK_ERROR_OUT_OF_DATE_KHR) {
-        BOBi_vk_recreate_swapchain(context, 0, 0); //TODO: Fix
-        return 1;
-    }
-    //If we haven't been able to get a valid image, throw an error
-    else if(res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR) {
-        assert(res == VK_TIMEOUT || res == VK_NOT_READY);
-        printf("Failed to acquire swap chain image\n");
-        return 0;
-    }
-    vkResetFences(context->log_device, 1, &context->draw_fence);
-
-    //CLear the command buffer and record the draw commands for the current frame
-    vkResetCommandBuffer(context->command_buffer, 0);
-
-    //Begin writing to the command buffer
-    VkCommandBufferBeginInfo begin_info = {
-        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .pNext = NULL
-    };
-    VkCommandBuffer buffer = context->command_buffer; //Getting a reference to the command buffer so that don't have to write out full code every time
-    VULKAN_ERROR(vkBeginCommandBuffer(buffer, &begin_info), "Failed to begin command buffer operations");
-
-    //Transition the image to VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
-    BOBi_vk_transition_image_layout(context->images[context->next_swapchain_image_index], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, (VkAccessFlags2){},
-                            VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_IMAGE_ASPECT_COLOR_BIT, buffer);
-
-    //Transition depth image to depth attachment optimal layout
-    BOBi_vk_transition_image_layout(context->depth.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-                            VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                            VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-                            VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-                            VK_IMAGE_ASPECT_DEPTH_BIT, buffer);
-
-    return 1;
-}
-
-//Records draw calls into the general command buffer
-uint8_t BOBi_vk_draw(BOB_Context *context, BOB_Renderer *r) {
-    VkCommandBuffer buffer = context->command_buffer; //Getting a reference to the command buffer so that don't have to write out full code every time
-    VkClearValue clear_color = {.color = {.float32 = {0.0f, 0.0f, 0.0f, 0.0f}}}; //Set the colour the screen gets cleared to
-    VkClearValue clear_depth = {.depthStencil = {.depth = 1.0f, .stencil = 0}}; //Set the depth the screen is cleared at
-
-    VkRenderingAttachmentInfo attachment_info = {
-        .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .pNext = NULL,
-            .imageView = context->views[context->next_swapchain_image_index], //Specifies which view to render to
-        .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, //Specifies what to do with the image during rendering
-        .storeOp = VK_ATTACHMENT_STORE_OP_STORE, //Specifies what to do with the image after rendering
-        .clearValue = clear_color
-    };
-    VkRenderingAttachmentInfo depth_attachment_info = {
-        .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .pNext = NULL,
-        .imageView = context->depth.view,
-        .imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, //Specifies what to do with the image during rendering
-        .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE, //Specifies what to do with the image after rendering
-        .clearValue = clear_depth
-    };
-
-    //Set the rendering info
-    VkRenderingInfo rendering_info = {
-        .sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .pNext = NULL,
-        .renderArea = {.offset = {0, 0}, .extent = context->extent},
-        .layerCount = 1, .colorAttachmentCount = 1, .pColorAttachments = &attachment_info,
-        .pDepthAttachment = &depth_attachment_info
-    };
-
-    size_t index_sz = sizeof(uint32_t) * r->batch.num_indices;
-    size_t vertex_sz = sizeof(BOB_Render_Vertex) * r->batch.num_vertices;
-    //Create the staging buffer
-    if(!BOBi_vk_create_buffer(context, vertex_sz, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                  VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, &context->vert_staging_buf)) return 0;
-    if(!BOBi_vk_create_buffer(context, index_sz, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                  VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, &context->index_staging_buf)) return 0;
-
-    //Map the staging buffer to CPU memory and copy the index data into it
-    VULKAN_ERROR(!BOBi_vk_stream_to_buffer(context->log_device, r->batch.vertex_arena.memory, index_sz, &context->index_staging_buf), "Failed to stream data into a Vulkan Buffer");
-    //Copy the data
-    VkBufferCopy copy_region = {0, 0, index_sz};
-    vkCmdCopyBuffer(buffer, context->index_staging_buf.buffer, r->index_buffer.buffer, 1, &copy_region);
-
-    //Map the staging buffer to CPU memory and copy the vertex data into it
-    VULKAN_ERROR(!BOBi_vk_stream_to_buffer(context->log_device, r->batch.vertex_arena_2.memory, vertex_sz, &context->vert_staging_buf), "Failed to stream data into a Vulkan Buffer");
-    //Create the actual destination buffer and copy the staging buffer data into it
-    copy_region = (VkBufferCopy){0, 0, vertex_sz};
-    vkCmdCopyBuffer(buffer, context->vert_staging_buf.buffer, r->vertex_buffer.buffer, 1, &copy_region);
-
-    // IMPORTANT: synchronize the copies with vertex/index input
-    VkBufferMemoryBarrier2 barriers[2] = {
-        {
-            .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-            .srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT,
-            .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
-
-            .dstStageMask = VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT,
-            .dstAccessMask = VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT,
-
-            .buffer = r->vertex_buffer.buffer,
-            .offset = 0,
-            .size = vertex_sz,
-        },
-
-        {
-            .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-            .srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT,
-            .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
-
-            .dstStageMask = VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT,
-            .dstAccessMask = VK_ACCESS_2_INDEX_READ_BIT,
-
-            .buffer = r->index_buffer.buffer,
-            .offset = 0,
-            .size = index_sz,
-        }
-    };
-
-    VkDependencyInfo dependency_info = { .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .bufferMemoryBarrierCount = 2, .pBufferMemoryBarriers = barriers, };
-
-    vkCmdPipelineBarrier2(buffer, &dependency_info);
-
-    //Begin rendering
-    vkCmdBeginRendering(buffer, &rendering_info);
-
-    VkViewport viewport = { .x = 0.0f, .y = (float)context->extent.height, .width = (float)context->extent.width, .height = -(float)context->extent.height, .minDepth = 0.0f, .maxDepth = 1.0f };
-
-    vkCmdSetViewport(buffer, 0, 1, &viewport);
-
-    VkRect2D scissor = {
-        .offset = {0, 0},
-        .extent = context->extent
-    };
-
-    vkCmdSetScissor(buffer, 0, 1, &scissor);
-
-    uint32_t index;
-    BOBi_get_index_from_handle(r->default_mat, &index);
-    BOB_Material *mat = &context->material_table[index];
-
-    //Bind the vertex buffer to the command buffer
-    vkCmdBindVertexBuffers(buffer, 0, 1, &r->vertex_buffer.buffer, (VkDeviceSize[]){0});
-    //Bind the index buffer to the command buffer
-    vkCmdBindIndexBuffer(buffer, r->index_buffer.buffer, 0, VK_INDEX_TYPE_UINT32);
-
-    uint32_t old_mat = UINT32_MAX, old_tex = UINT32_MAX;
-    for(size_t i = 0; i < r->batch.num_draw_calls; i++) {
-        BOBi_Draw_Call call = BOBi_get_arena_elem(r->batch.draw_call_arena, i, BOBi_Draw_Call);
-        printf("Draw call %zu, Num indicies: %zu, Offset: %zu\n", i, call.num_indices, call.index_offset);
-
-        uint32_t mat_index, tex_index;
-        if(!BOBi_get_index_from_handle(call.mat, &mat_index)) return 0;
-        if(!BOBi_get_index_from_handle(call.tex, &tex_index)) return 0;
-
-        BOB_Material *mat = &context->material_table[mat_index];
-        if(old_mat != mat_index) {
-            BOBi_vk_update_uniform(context, mat);
-            BOBi_vk_write_buffer_descriptor(context, mat->vulkan.uniform_descriptor_set, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 0, mat->vulkan.uniform_buffer, mat->uniforms[mat->uniform_count-1].vulkan.offset + BOBi_std140_size(mat->uniforms[mat->uniform_count-1].type));
-
-            //Bind the graphics pipeline
-            vkCmdBindPipeline(buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, mat->vulkan.pipeline);
-            //Bind correct descriptor set for each frame to the descriptors in the shader
-            vkCmdBindDescriptorSets(buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, mat->vulkan.layout, 0, 1, &mat->vulkan.uniform_descriptor_set, 0, NULL);
-        }
-        if(old_tex != tex_index) {
-            printf("Switching texture\n");
-            //Set the material to use this texture.
-            BOB_Texture *tex = &context->texture_table[tex_index];
-            vkCmdBindDescriptorSets(buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, mat->vulkan.layout, 1, 1, &tex->vulkan.descriptor, 0, NULL);
-        }
-        //Draw to the screen
-        vkCmdDrawIndexed(buffer, call.num_indices, 1, call.index_offset, 0, 0);
-        old_mat = mat_index;
-        old_tex = tex_index;
-    }
-    vkCmdEndRendering(buffer); //End rendering
-    return 1;
-}
-
-//Draws every frame
-uint8_t BOBi_vk_end_frame(BOB_Context *context) {
-    VkCommandBuffer buffer = context->command_buffer; //Getting a reference to the command buffer so that don't have to write out full code every time
-
-    //After rendering, transition the swapchain image to VK_IMAGE_LAYOUT_PRESENT_SRC_KHR so it can be presented to the screen
-    BOBi_vk_transition_image_layout(context->images[context->next_swapchain_image_index], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-                            VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, (VkAccessFlags2){}, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, VK_IMAGE_ASPECT_COLOR_BIT, buffer);
-
-    VULKAN_ERROR(vkEndCommandBuffer(buffer), "Failed to end command buffer");
-
-    //Submit render commands to the graphics queue
-    VkPipelineStageFlagBits wait_dest_stage_mask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    VkSubmitInfo sub_info = {
-        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .pNext = NULL,
-        .waitSemaphoreCount = 1, .pWaitSemaphores = &context->present_complete_semaphore, .pWaitDstStageMask = &wait_dest_stage_mask,
-        .commandBufferCount = 1, .pCommandBuffers = &buffer,
-        .signalSemaphoreCount = 1, .pSignalSemaphores = &context->render_finished_semaphore[context->next_swapchain_image_index]
-    };
-    VULKAN_ERROR(vkQueueSubmit(context->graphics_queue, 1, &sub_info, context->draw_fence), "Failed to Submit render data to the queue");
-
-    //Get the present status
-    VkPresentInfoKHR present_info = {
-        .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .pNext = NULL,
-        .waitSemaphoreCount = 1, .pWaitSemaphores = &context->render_finished_semaphore[context->next_swapchain_image_index],
-        .swapchainCount = 1, .pSwapchains = &context->swapchain, .pImageIndices = &context->next_swapchain_image_index
-    };
-    VkResult res = vkQueuePresentKHR(context->graphics_queue, &present_info);
-
-    //If its invalid, recreate the swapchain
-    if(res == VK_ERROR_OUT_OF_DATE_KHR || res == VK_SUBOPTIMAL_KHR || context->framebuffer_resized) {
-        context->framebuffer_resized = 0;
-        BOBi_vk_recreate_swapchain(context, 0, 0); //TODO: Fix
-        return 1;
-    }
-    VULKAN_ERROR(res, "Failed to acquire swap chain image");
-
-    return 1;
-}
-
-void BOBi_vk_update_rend_dim(BOB_Context *context, BOB_Renderer *r, void *data, size_t data_sz) {
-    //Update the default projection matrix
-    BOB_ortho_vk( 0.0f, r->screen_width, r->screen_height, 0.0f, 0.0f, BOB_MAX_LAYER, &r->projection);
-
-    context->framebuffer_resized = 1;
-}
 
 unsigned char shader_frag_spv[] = {
   0x03, 0x02, 0x23, 0x07, 0x00, 0x00, 0x01, 0x00, 0x0b, 0x00, 0x0d, 0x00,
@@ -2607,40 +934,1575 @@ unsigned char shader_vert_spv[] = {
   0xfd, 0x00, 0x01, 0x00, 0x38, 0x00, 0x01, 0x00
 };
 unsigned int shader_vert_spv_len = 1700;
-uint8_t BOBi_vk_create_default_material(BOB_Context_Handle context, BOB_Renderer *r) {
-    //Update the default projection matrix
-    BOB_ortho_vk( 0.0f, r->screen_width, r->screen_height, 0.0f, 0.0f, BOB_MAX_LAYER, &r->projection);
 
-    return BOB_create_material(context, (BOB_Shader_Data[2]){
+//Validation layers we are using.
+const char *validation_layers[] = {"VK_LAYER_KHRONOS_validation"};
+size_t num_validation_layers = 1;
+//Extensions we are using
+const char *required_device_extensions[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME}; //Need the swapchain extension for drawing surfaces to a window
+size_t num_required_device_extensions = 1;
+
+BOB_Render_Vertex vertices[4] = {
+    (BOB_Render_Vertex){.pos = {-0.5f, -0.5f}},
+    (BOB_Render_Vertex){.pos = {-0.5f,  0.5f}},
+    (BOB_Render_Vertex){.pos = { 0.5f,  0.5f}},
+    (BOB_Render_Vertex){.pos = { 0.5f, -0.5f}},
+};
+size_t num_vertices = 4;
+uint32_t indices[6] = {
+    0,1,3,1,2,3
+};
+size_t num_indices = 6;
+BOBi_Vulkan_Buffer index_buf;
+BOBi_Vulkan_Buffer vertex_buf;
+
+//Not really used ig?
+#ifdef NDEBUG
+#define ENABLE_VALIDATION_LAYERS 0
+#else
+#define ENABLE_VALIDATION_LAYERS 1
+#endif
+
+//Macro to get a list of values from vulkan. Allocates memory which must be freed later
+//func1 must be the vulkan enumeration function with the output list set to NULL and the
+//output size set to some variable
+//func2 must have both values set.
+//size must be the number of elements in the list (obtained from the call to func1)
+//* the size of an individual element
+#define VULKAN_ENUMERATE(func1, func2, enumerator_list, size, failure_string) do {  \
+    if((func1) != VK_SUCCESS) {                                                     \
+        printf("%s\n", (failure_string));                                           \
+        return 0;                                                                   \
+    }                                                                               \
+    (enumerator_list) = malloc((size));                                             \
+    if((func2) != VK_SUCCESS) {                                                     \
+        printf("%s\n", (failure_string));                                           \
+        return 0;                                                                   \
+    }                                                                               \
+} while(0)
+
+//Checks if a vulkan function has succeeded, returns 0, calls the functions to free data, and prints failure if not
+#define VULKAN_ERROR(func, failure_string, ...) do {     \
+    if((func) != VK_SUCCESS) {                           \
+        printf("%s\n", (failure_string));                \
+        __VA_ARGS__;                                     \
+        return 0;                                        \
+    }                                                    \
+} while(0)
+
+//A vertex binding describes the rate at which to load data from memory throughout the vertices
+VkVertexInputBindingDescription BOBi_vk_get_binding_desc() {
+    return (VkVertexInputBindingDescription){.binding = 0, .stride = sizeof(BOB_Render_Vertex), .inputRate = VK_VERTEX_INPUT_RATE_VERTEX};
+}
+
+//Returns the VAO for our Vertex struct
+void BOBi_vk_get_attrib_descs(VkVertexInputAttributeDescription *out_list, size_t *sz) {
+    *sz = 4;
+    out_list[0] = (VkVertexInputAttributeDescription){.location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = offsetof(BOB_Render_Vertex, colour)};
+    out_list[1] = (VkVertexInputAttributeDescription){.location = 1, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(BOB_Render_Vertex, pos)};
+    out_list[2] = (VkVertexInputAttributeDescription){.location = 2, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT, .offset = offsetof(BOB_Render_Vertex, uv)};
+    out_list[3] = (VkVertexInputAttributeDescription){.location = 3, .binding = 0, .format = VK_FORMAT_R8_UINT, .offset = offsetof(BOB_Render_Vertex, flags)};
+}
+
+//Allocates and begins a given command buffer. Should only be used if a command buffer needs to be used once
+uint8_t BOBi_vk_begin_single_time_commands(BOB_Renderer *renderer, VkCommandBuffer *out) {
+    //Allocate the command buffer
+    VkCommandBufferAllocateInfo alloc_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .pNext = NULL,
+        .commandPool = renderer->vulkan.command_pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1
+    };
+    VULKAN_ERROR(vkAllocateCommandBuffers(renderer->vulkan.log_device, &alloc_info, out), "Failed to allocate a command buffer");
+
+    //Begin accepting commands
+    VkCommandBufferBeginInfo begin_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .pNext = NULL,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT
+    };
+    VULKAN_ERROR(vkBeginCommandBuffer(*out, &begin_info), "Failed to start command buffer");
+
+    return 1;
+}
+
+//Ends given command buffer, submits its internal commands to the Vulkan_State
+//struct's graphics_queue and frees the command buffer at the end
+uint8_t BOBi_vk_end_single_time_commands(BOB_Renderer *renderer, VkCommandBuffer buf) {
+    //End the command buffer
+    VULKAN_ERROR(vkEndCommandBuffer(buf), "Failed to end copy command buffer",
+                          vkFreeCommandBuffers(renderer->vulkan.log_device, renderer->vulkan.command_pool, 1, &buf));
+
+    //Submit the command buffer's instructions to the graphics_queue
+    VkSubmitInfo queue_info = {
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .pNext = NULL,
+        .commandBufferCount = 1, .pCommandBuffers = &buf
+    };
+    VULKAN_ERROR(vkQueueSubmit(renderer->vulkan.graphics_queue, 1, &queue_info, VK_NULL_HANDLE), "Failed to submit commands to graphics queue",
+                          vkFreeCommandBuffers(renderer->vulkan.log_device, renderer->vulkan.command_pool, 1, &buf));
+    //Wait until the queue is idle to continue with the program
+    VULKAN_ERROR(vkQueueWaitIdle(renderer->vulkan.graphics_queue), "Failed to wait for commands to complete",
+                          vkFreeCommandBuffers(renderer->vulkan.log_device, renderer->vulkan.command_pool, 1, &buf));
+
+    //Free command buffer memory
+    vkFreeCommandBuffers(renderer->vulkan.log_device, renderer->vulkan.command_pool, 1, &buf);
+
+    return 1;
+}
+
+//Gets the index of the memory type that matches our desired properties
+uint8_t BOBi_vk_find_memory_type(BOB_Renderer *renderer, uint32_t type_filter, VkMemoryPropertyFlags properties, uint32_t *out) {
+    //Getting the properties used on our current physical device
+    VkPhysicalDeviceMemoryProperties mem_properties;
+    vkGetPhysicalDeviceMemoryProperties(renderer->vulkan.phy_device, &mem_properties);
+
+    //Search to find the one that matches our desired properties
+    for(size_t i = 0; i < mem_properties.memoryTypeCount; i++) {
+        if((type_filter & (1 << i)) && (mem_properties.memoryTypes[i].propertyFlags & properties) == properties) {
+            *out = i;
+            return 1;
+        }
+    }
+
+    //Throw an error on failure
+    printf("Failed to find suitable memory type\n");
+    return 0;
+}
+
+void BOBi_vk_destroy_image(BOB_Renderer *renderer, BOBi_Vulkan_Image *tex) {
+    if(tex->view != VK_NULL_HANDLE) {
+        vkDestroyImageView(renderer->vulkan.log_device, tex->view, NULL);
+        tex->view = VK_NULL_HANDLE;
+    }
+    if(tex->image != VK_NULL_HANDLE) {
+        vkDestroyImage(renderer->vulkan.log_device, tex->image, NULL);
+        tex->image = VK_NULL_HANDLE;
+    }
+    if(tex->memory != VK_NULL_HANDLE) {
+        vkFreeMemory(renderer->vulkan.log_device, tex->memory, NULL);
+        tex->memory = VK_NULL_HANDLE;
+    }
+}
+
+//Creates an image and its allocated memory
+uint8_t BOBi_vk_create_image(BOB_Renderer *renderer, uint32_t width, uint32_t height, VkFormat format, VkImageTiling tiling,
+                     VkImageUsageFlags usage, VkMemoryPropertyFlags properties, BOBi_Vulkan_Image *out_image) {
+    //Creating the struct that holds the image properties
+    VkImageCreateInfo image_info = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .pNext = NULL,
+        .imageType = VK_IMAGE_TYPE_2D, .format = format,
+        .extent = {width, height, 1}, .mipLevels = 1, .arrayLayers = 1,
+        .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = tiling,
+        .usage = usage, .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+    };
+    VULKAN_ERROR(vkCreateImage(renderer->vulkan.log_device, &image_info, NULL, &out_image->image), "Failed to create image");
+
+    //Get the memory requirements to store the image
+    VkMemoryRequirements mem_req;
+    vkGetImageMemoryRequirements(renderer->vulkan.log_device, out_image->image, &mem_req);
+
+    //Allocate the memory to store the image data
+    VkMemoryAllocateInfo alloc_info = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = NULL, .allocationSize = mem_req.size };
+    VULKAN_ERROR(!BOBi_vk_find_memory_type(renderer, mem_req.memoryTypeBits, properties, &alloc_info.memoryTypeIndex), "Failed to find memory type",
+                 vkDestroyImage(renderer->vulkan.log_device, out_image->image, NULL); out_image->image = NULL);
+    VULKAN_ERROR(vkAllocateMemory(renderer->vulkan.log_device, &alloc_info, NULL, &out_image->memory), "Failed to create image memory", BOBi_vk_destroy_image(renderer, out_image));
+    //Bind the memory to the image properties
+    VULKAN_ERROR(vkBindImageMemory(renderer->vulkan.log_device, out_image->image, out_image->memory, 0), "Failed to bind image memory", BOBi_vk_destroy_image(renderer, out_image));
+
+    return 1;
+}
+
+//Creates a view for an image
+uint8_t BOBi_vk_create_image_view(BOB_Renderer *renderer, VkImage image, VkFormat format, VkImageAspectFlags aspect_flags, VkImageView *out) {
+    VkImageViewCreateInfo view_info = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .pNext = NULL,
+        .image = image, .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = format,
+        .subresourceRange = {.aspectMask = aspect_flags, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1}
+    };
+    VULKAN_ERROR(vkCreateImageView(renderer->vulkan.log_device, &view_info, NULL, out), "Failed to create image view");
+
+    return 1;
+}
+
+void BOBi_vk_destroy_image_view(BOB_Renderer *renderer, VkImageView *view) {
+    if(*view != VK_NULL_HANDLE) vkDestroyImageView(renderer->vulkan.log_device, *view, NULL);
+    *view = VK_NULL_HANDLE;
+}
+
+//Returns a format that supports our given features from a list of candidates, or throws an error on failure
+uint8_t BOBi_vk_find_supported_format(BOB_Renderer *renderer, VkFormat *candidates, size_t num_candidates, VkImageTiling tiling, VkFormatFeatureFlags features, VkFormat *out) {
+    for(size_t i = 0; i < num_candidates; i++) {
+        VkFormatProperties props;
+        vkGetPhysicalDeviceFormatProperties(renderer->vulkan.phy_device, candidates[i], &props);
+
+        if(((tiling == VK_IMAGE_TILING_LINEAR) && ((props.linearTilingFeatures & features) == features)) ||
+           ((tiling == VK_IMAGE_TILING_OPTIMAL) && ((props.optimalTilingFeatures & features) == features))) {
+            *out = candidates[i];
+            return 1;
+        }
+    }
+
+    printf("Failed to find supported format\n");
+    return 0;
+}
+
+//Returns the format used by our depth image
+uint8_t BOBi_vk_find_depth_format(BOB_Renderer *renderer, VkFormat *out) {
+    return BOBi_vk_find_supported_format(renderer, (VkFormat[3]){VK_FORMAT_D32_SFLOAT, VK_FORMAT_D32_SFLOAT_S8_UINT, VK_FORMAT_D24_UNORM_S8_UINT}, 3, 
+                                 VK_IMAGE_TILING_OPTIMAL, VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT, out);
+}
+
+//Destroys a BOBi_Vulkan_Buffer
+void BOBi_vk_destroy_buffer(VkDevice device, BOBi_Vulkan_Buffer *buf) {
+    if(buf->buffer != VK_NULL_HANDLE) vkDestroyBuffer(device, buf->buffer, NULL);
+    if(buf->memory != VK_NULL_HANDLE) vkFreeMemory(device, buf->memory, NULL);
+    buf->memory = VK_NULL_HANDLE;
+    buf->buffer = VK_NULL_HANDLE;
+}
+
+//Creates buffers in GPU memory
+uint8_t BOBi_vk_create_buffer(BOB_Renderer *renderer, VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, BOBi_Vulkan_Buffer *out_buf) {
+    //Creates the VKBuffer struct that stores the buffer's properties
+    VkBufferCreateInfo buf_info = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .pNext = NULL,
+        .size = size, .usage = usage, .sharingMode = VK_SHARING_MODE_EXCLUSIVE
+    };
+    VULKAN_ERROR(vkCreateBuffer(renderer->vulkan.log_device, &buf_info, NULL, &out_buf->buffer), "Failed to create a buffer");
+
+    //Getting the memory requirements for this buffer
+    VkMemoryRequirements mem_req;
+    vkGetBufferMemoryRequirements(renderer->vulkan.log_device, out_buf->buffer, &mem_req);
+
+    //Allocating the memory region to store this buffer
+    VkMemoryAllocateInfo mem_alloc_info = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = NULL,
+        .allocationSize = mem_req.size,
+    };
+
+    if(!BOBi_vk_find_memory_type(renderer, mem_req.memoryTypeBits, properties, &mem_alloc_info.memoryTypeIndex)) return 0;
+    VULKAN_ERROR(vkAllocateMemory(renderer->vulkan.log_device, &mem_alloc_info, NULL, &out_buf->memory), "Failed to allocate vertex buffer memory",
+                          vkDestroyBuffer(renderer->vulkan.log_device, out_buf->buffer, NULL));
+    //Bind the memory to this buffer properties struct
+    VULKAN_ERROR(vkBindBufferMemory(renderer->vulkan.log_device, out_buf->buffer, out_buf->memory, 0), "Failed to bind buffer memory", 
+                          BOBi_vk_destroy_buffer(renderer->vulkan.log_device, out_buf));
+
+    return 1;
+}
+
+//Streams data into a BOBi_Vulkan_Buffer
+uint8_t BOBi_vk_stream_to_buffer(VkDevice device, const void *src, size_t size, BOBi_Vulkan_Buffer *dst) {
+    void *data;
+    VULKAN_ERROR(vkMapMemory(device, dst->memory, 0, size, 0, &data), "Failed to map GPU memory to CPU memory");
+    memcpy(data, src, size);
+    vkUnmapMemory(device, dst->memory);
+    return 1;
+}
+
+//Copies the data from a buffer to an image's data memory
+void BOBi_vk_copy_buffer_to_image(VkCommandBuffer command_buf, VkBuffer buffer, VkImage image, uint32_t width, uint32_t height) {
+    VkBufferImageCopy region = {
+        .bufferOffset = 0, .bufferRowLength = 0, .bufferImageHeight = 0,
+        .imageSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1},
+        .imageOffset = {0, 0, 0},
+        .imageExtent = {width, height, 1}
+    };
+    vkCmdCopyBufferToImage(command_buf, buffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+}
+
+//Copies a certain amount of data from one buffer to another buffer. Assumes that the copy/sources ranges always start at 0
+uint8_t BOBi_vk_copy_buffer(BOB_Renderer *renderer, VkBuffer src_buf, VkBuffer dst_buf, VkDeviceSize sz) {
+    //Begin a local command buffer
+    VkCommandBuffer command_copy_buffer;
+    if(!BOBi_vk_begin_single_time_commands(renderer, &command_copy_buffer)) return 0;
+
+    //Copy the data
+    VkBufferCopy copy_region = {0, 0, sz};
+    vkCmdCopyBuffer(command_copy_buffer, src_buf, dst_buf, 1, &copy_region);
+
+    //Destroy the local command buffer
+    BOBi_vk_end_single_time_commands(renderer, command_copy_buffer);
+    return 1;
+}
+
+//Checks if a given physical device is suitable to our needs
+//TODO: Add some sort of priority to device selection (e.g. select a dedicated GPU over an integrated one)
+uint8_t BOBi_vk_is_device_suitable(VkPhysicalDevice device) {
+    //Get the properties of the physical device
+    VkPhysicalDeviceProperties dProperties;
+    vkGetPhysicalDeviceProperties(device, &dProperties);
+
+    //Check if the physical device supports Vulkan 1.3 API version
+    uint8_t supports_vulkan_1_3 = dProperties.apiVersion >= VK_API_VERSION_1_3;
+
+    //Check if any of the queue families support graphics operations
+    uint32_t num_queue_families = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(device, &num_queue_families, NULL);
+    VkQueueFamilyProperties *family_properties = malloc(sizeof(VkQueueFamilyProperties) * num_queue_families);
+    vkGetPhysicalDeviceQueueFamilyProperties(device, &num_queue_families, family_properties);
+
+    //Iterate and check if the queue families have the graphics bit set
+    uint8_t supports_graphics = 0;
+    for(size_t i = 0; i < num_queue_families; i++) {
+        if(family_properties[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
+            supports_graphics = 1;
+            break;
+        }
+    }
+    free(family_properties); //Cleanup
+
+    //Get the extensions included in the device
+    uint32_t included_extension_count = 0;
+    VkExtensionProperties *available_extensions;
+    VULKAN_ENUMERATE(vkEnumerateDeviceExtensionProperties(device, NULL, &included_extension_count, NULL),
+                     vkEnumerateDeviceExtensionProperties(device, NULL, &included_extension_count, available_extensions),
+                     available_extensions, included_extension_count * sizeof(VkExtensionProperties), "Failed to enumerate instance extensions");
+
+    //Check if the device supports all of our required extensions
+    uint8_t all_found = 1;
+    for(size_t i = 0; i < num_required_device_extensions; i++) {
+        uint8_t found = 0;
+
+        for(size_t j = 0; j < included_extension_count; j++) {
+            if(!strcmp(required_device_extensions[i], available_extensions[j].extensionName)) { //Use strcmp to compare extension names
+                found = 1;
+                break;
+            }
+        }
+
+        if (!found) {
+            printf("Missing required extension: %s\n", required_device_extensions[i]);
+            all_found = 0;
+            break;
+        }
+    }
+    free(available_extensions); //Cleanup
+
+    //Struct chain to get the features of the device
+    VkPhysicalDeviceExtendedDynamicStateFeaturesEXT extended_dynamic_state = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT,
+        .pNext = NULL,
+    };
+    VkPhysicalDeviceVulkan13Features vulkan_13 = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, .pNext = &extended_dynamic_state
+    };
+    VkPhysicalDeviceFeatures2 features2 = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &vulkan_13
+    };
+    vkGetPhysicalDeviceFeatures2(device, &features2);
+
+    uint8_t supports_required_features = features2.features.samplerAnisotropy && vulkan_13.dynamicRendering
+        && vulkan_13.synchronization2 && extended_dynamic_state.extendedDynamicState;
+
+    return all_found && supports_graphics && supports_vulkan_1_3 && supports_required_features;
+}
+
+//Choose a format that will be used by our swapchain
+uint8_t BOBi_vk_choose_swap_surface_format(VkSurfaceFormatKHR *formats, size_t format_sz, VkSurfaceFormatKHR *out) {
+    if(format_sz == 0) return 0; //Early exit
+
+    size_t index = format_sz;
+    for(size_t i = 0; i < format_sz; i++) {
+        if(formats[i].format == VK_FORMAT_R8G8B8A8_SRGB && formats[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+            index = i;
+            break;
+        }
+    }
+    *out = (index == format_sz) ? formats[0] : formats[index];
+    return 1;
+}
+
+//Choose the present mode used by our swapchain
+uint8_t BOBi_vk_choose_swap_present_mode(VkPresentModeKHR *modes, size_t mode_sz, VkPresentModeKHR *out) {
+    if(mode_sz == 0) return 0; //Early exit
+
+    size_t index = mode_sz;
+    for(size_t i = 0; i < mode_sz; i++) {
+        if(modes[i] == VK_PRESENT_MODE_MAILBOX_KHR) {
+            index = i;
+            break;
+        }
+    }
+
+    //VK_PRESENT_MODE_FIFO_KHR is guaranteed to be on all devices so can default to it if we don't find any other suitable ones
+    *out = (index == mode_sz) ? VK_PRESENT_MODE_FIFO_KHR : modes[index];
+    return 1;
+}
+
+//Returns the clamped version of a number between a given upper and lower bound
+size_t BOBi_clamp(size_t val, size_t min, size_t max) {
+    if(val < min) val = min;
+    if(val > max) val = max;
+
+    return val;
+}
+
+//Get the extent (dimensions) of the images in the swapchain
+VkExtent2D BOBi_vk_choose_swap_extent(VkSurfaceCapabilitiesKHR *capabilities, size_t width, size_t height) {
+    if(capabilities->currentExtent.width != UINT32_MAX) return capabilities->currentExtent; //If we already have it set to some value, just return that one
+
+    //Otherwise clamp the size to the dimensions of the window
+    return (VkExtent2D){BOBi_clamp(width, capabilities->minImageExtent.width, capabilities->maxImageExtent.width),
+                        BOBi_clamp(height, capabilities->minImageExtent.height, capabilities->maxImageExtent.height)};
+}
+
+//Returns the minimum number of images present in the swapchain
+uint32_t BOBi_vk_choose_swap_min_image_count(VkSurfaceCapabilitiesKHR *capabilities) {
+    uint32_t min_image_count = (capabilities->minImageCount < 3) ? capabilities->minImageCount : 3; //Defaults to 3
+
+    //If the max is lower than our min, set our min to the max
+    if((0 < capabilities->maxImageCount) && (capabilities->maxImageCount < min_image_count)) {
+        min_image_count = capabilities->maxImageCount;
+    }
+
+    return min_image_count;
+}
+
+//Transitions a swapchain image
+void BOBi_vk_transition_image_layout(VkImage image, VkImageLayout old_layout, VkImageLayout new_layout, VkAccessFlags2 src_access_mask,
+                             VkAccessFlags2 dst_access_mask, VkPipelineStageFlags2 src_stage_mask, VkPipelineStageFlags2 dst_stage_mask,
+                             VkImageAspectFlags image_aspect_flags, VkCommandBuffer command_buf) {
+    VkImageMemoryBarrier2 barrier = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2, .pNext = NULL,
+        .srcStageMask = src_stage_mask, .srcAccessMask = src_access_mask,
+        .dstStageMask = dst_stage_mask, .dstAccessMask = dst_access_mask,
+        .oldLayout = old_layout, .newLayout = new_layout,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = image,
+        .subresourceRange = (VkImageSubresourceRange){
+            .aspectMask = image_aspect_flags,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1
+        }
+    };
+
+    VkDependencyInfo dep_info = {
+        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .pNext = NULL,
+        .dependencyFlags = 0, .imageMemoryBarrierCount = 1,
+        .pImageMemoryBarriers = &barrier
+    };
+
+    vkCmdPipelineBarrier2(command_buf, &dep_info);
+}
+
+//Transitions a non-swapchain images layout
+uint8_t BOBi_vk_transition_tex_layout(VkCommandBuffer command_buf, VkImage image, VkImageLayout old_layout, VkImageLayout new_layout) {
+    //Deterine the flags for the source and destination changes
+    VkPipelineStageFlags2 src_stage;
+    VkPipelineStageFlags2 dst_stage;
+    VkAccessFlags2 src_access_mask;
+    VkAccessFlags2 dst_access_mask;
+    if(old_layout == VK_IMAGE_LAYOUT_UNDEFINED && new_layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
+        src_access_mask = (VkAccessFlags){0};
+        dst_access_mask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+
+        src_stage = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
+        dst_stage = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+    }
+    else if(old_layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && new_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+        src_access_mask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        dst_access_mask = VK_ACCESS_2_SHADER_READ_BIT;
+
+        src_stage = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+        dst_stage = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+    }
+    else {
+        printf("Unsupported layout transition\n");
+        return 0;
+    }
+
+    //Transition the image
+    BOBi_vk_transition_image_layout(image, old_layout, new_layout, src_access_mask, dst_access_mask, src_stage, dst_stage, VK_IMAGE_ASPECT_COLOR_BIT, command_buf);
+
+    return 1;
+}
+
+//================================ INTIALISATION/RENDERER CREATION FUNCTIONS =================================
+
+uint8_t BOBi_vk_init_vulkan(const char **required_extensions, size_t num_extensions) {
+    VkApplicationInfo app_info = {
+        .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pNext = NULL,
+        .pApplicationName = "", .applicationVersion = VK_MAKE_VERSION(1, 0, 0),
+        .pEngineName = "", .engineVersion = VK_MAKE_VERSION(1, 0, 0), .apiVersion = VK_API_VERSION_1_3,
+    };
+
+    //Check if the required GLFW extensions are supported by the Vulkan implementation
+    uint32_t included_extension_count = 0;
+    VkExtensionProperties *available_extensions;
+    VULKAN_ENUMERATE(vkEnumerateInstanceExtensionProperties(NULL, &included_extension_count, NULL),
+                     vkEnumerateInstanceExtensionProperties(NULL, &included_extension_count, available_extensions),
+                     available_extensions, included_extension_count * sizeof(VkExtensionProperties), "Failed to enumerate instance extensions");
+
+    for(size_t i = 0; i < num_extensions; i++) {
+        uint8_t found = 0;
+
+        for(size_t j = 0; j < included_extension_count; j++) {
+            if(!strcmp(required_extensions[i], available_extensions[j].extensionName)) {
+                found = 1;
+                break;
+            }
+        }
+
+        if (!found) {
+            printf("Missing required extension: %s\n", required_extensions[i]);
+            free(available_extensions);
+            return 0;
+        }
+    }
+    free(available_extensions);
+
+    //Setting up Validation layers
+    const char **required_layers = NULL;
+    if(ENABLE_VALIDATION_LAYERS) {
+        required_layers = validation_layers;
+        uint32_t enabled_layers = 0;
+        VkLayerProperties *properties;
+        VULKAN_ENUMERATE(vkEnumerateInstanceLayerProperties(&enabled_layers, NULL),
+                         vkEnumerateInstanceLayerProperties(&enabled_layers, properties),
+                         properties, enabled_layers * sizeof(VkLayerProperties), "Failed to enumerate instance layers");
+
+        for(size_t i = 0; i < num_validation_layers; i++) {
+            uint8_t found = 0;
+
+            for(size_t j = 0; j < enabled_layers; j++) {
+                if(!strcmp(validation_layers[i], properties[j].layerName)) {
+                    found = 1;
+                    break;
+                }
+            }
+
+            if (!found) {
+                printf("Missing required extension: %s\n", required_extensions[i]);
+                free(properties);
+                return 0;
+            }
+        }
+
+        free(properties);
+    }
+
+    //Creating the instance itself
+    VkInstanceCreateInfo create_info = {
+        .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pNext = NULL, .pApplicationInfo = &app_info,
+        .enabledExtensionCount = num_extensions, .ppEnabledExtensionNames = required_extensions, .ppEnabledLayerNames = required_layers,
+        .enabledLayerCount = ENABLE_VALIDATION_LAYERS ? num_validation_layers : 0
+    };
+    VULKAN_ERROR(vkCreateInstance(&create_info, NULL, &bob_state.instance), "Failed to create a vulkan instance");
+
+    return 1;
+}
+
+//Picks the physical device to use for this application from all available options
+uint8_t BOBi_vk_pick_physical_device(BOB_Renderer *renderer) {
+    //Get all available physical devices
+    uint32_t physical_device_count = 0;
+    VkPhysicalDevice *devices;
+    VULKAN_ENUMERATE(vkEnumeratePhysicalDevices(bob_state.instance, &physical_device_count, NULL),
+                     vkEnumeratePhysicalDevices(bob_state.instance, &physical_device_count, devices),
+                     devices, physical_device_count * sizeof(VkPhysicalDevice), "Failed to enumerate physical devices");
+
+    //Early exit if there aren't any
+    if(physical_device_count == 0) {
+        printf("Failed to find GPUs with Vulkan support\n");
+        free(devices);
+        return 0;
+    }
+
+    //Otherwise pick the first suitable one
+    for(size_t i = 0; i < physical_device_count; i++) {
+        if(BOBi_vk_is_device_suitable(devices[i])) {
+            renderer->vulkan.phy_device = devices[i];
+            free(devices);
+            return 1;
+        }
+    }
+    free(devices);
+
+    printf("Failed to find a suitable GPU\n");
+    return 0;
+}
+
+//Create a virtual device representation to liase with the physical hardware
+uint8_t BOBi_vk_create_logical_device(BOB_Renderer *renderer) {
+    //Get all of the queue families present on the physical device
+    uint32_t num_queue_families = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(renderer->vulkan.phy_device, &num_queue_families, NULL);
+    VkQueueFamilyProperties *family_properties = malloc(sizeof(VkQueueFamilyProperties) * num_queue_families);
+    vkGetPhysicalDeviceQueueFamilyProperties(renderer->vulkan.phy_device, &num_queue_families, family_properties);
+
+    //Check if any of the queue families support graphics operations
+    renderer->vulkan.queue_family = num_queue_families;
+    for(size_t i = 0; i < num_queue_families; i++) {
+        uint32_t res;
+        VULKAN_ERROR(vkGetPhysicalDeviceSurfaceSupportKHR(renderer->vulkan.phy_device, i, renderer->vulkan.surface, &res), "Could not get device surface support");
+        if(family_properties[i].queueFlags & VK_QUEUE_GRAPHICS_BIT && res) {
+            renderer->vulkan.queue_family = i;
+            break;
+        }
+    }
+    free(family_properties);
+
+    if(renderer->vulkan.queue_family == num_queue_families) { //Early exit if no condition is met
+        printf("No device queue supports graphics operations\n");
+        return 0;
+    }
+
+    //Info for creating the graphics queue
+    float queue_priority = 0.5f;
+    VkDeviceQueueCreateInfo device_queue_create_info = {
+        .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .pNext = NULL,
+        .queueFamilyIndex = renderer->vulkan.queue_family, .queueCount = 1,
+        .pQueuePriorities = &queue_priority
+    };
+
+    //Create a chain of feature structures:
+    //Enable extended dynamic state from the extension
+    VkPhysicalDeviceExtendedDynamicStateFeaturesEXT extendedDynamicStateFeatures = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT,
+        .pNext = NULL,
+        .extendedDynamicState = VK_TRUE,
+    };
+
+    //Enable dynamic rendering from Vulkan 1.3
+    VkPhysicalDeviceVulkan13Features vulkan13Features = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+        .pNext = &extendedDynamicStateFeatures,
+        .synchronization2 = VK_TRUE, .dynamicRendering = VK_TRUE,
+    };
+
+    //Enable shader draw parameters from Vulkan 1.1
+    VkPhysicalDeviceVulkan11Features vulkan11Features = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
+        .pNext = &vulkan13Features,
+        .shaderDrawParameters = VK_TRUE,
+    };
+
+    //Empty for now
+    VkPhysicalDeviceFeatures2 features2 = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+        .pNext = &vulkan11Features,
+        .features = {.samplerAnisotropy = VK_TRUE},
+    };
+
+    //Create the logical device
+    VkDeviceCreateInfo device_create_info = {
+        .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+        .pNext = &features2,
+        .queueCreateInfoCount = 1,
+        .pQueueCreateInfos = &device_queue_create_info,
+        .enabledExtensionCount = num_required_device_extensions,
+        .ppEnabledExtensionNames = required_device_extensions
+    };
+    VULKAN_ERROR(vkCreateDevice(renderer->vulkan.phy_device, &device_create_info, NULL, &renderer->vulkan.log_device), "Failed to create logical device");
+    vkGetDeviceQueue(renderer->vulkan.log_device, renderer->vulkan.queue_family, 0, &renderer->vulkan.graphics_queue); //Get the reference to the graphics queue
+
+    return 1;
+}
+
+//Create the swapchain used to render images to the screen
+uint8_t BOBi_vk_create_swapchain(BOB_Renderer *renderer, size_t width, size_t height) {
+    //Get the surface capabilities
+    VkSurfaceCapabilitiesKHR sur_cap;
+    VULKAN_ERROR(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(renderer->vulkan.phy_device, renderer->vulkan.surface, &sur_cap), "Could not get surface capabilities");
+
+    //Get swapchain properties
+    renderer->vulkan.extent = BOBi_vk_choose_swap_extent(&sur_cap, width, height);
+    uint32_t min_image_count = BOBi_vk_choose_swap_min_image_count(&sur_cap);
+
+    //Get the available surface formats
+    uint32_t surface_format_count = 0;
+    VkSurfaceFormatKHR *surface_formats;
+    VULKAN_ENUMERATE(vkGetPhysicalDeviceSurfaceFormatsKHR(renderer->vulkan.phy_device, renderer->vulkan.surface, &surface_format_count, NULL),
+                     vkGetPhysicalDeviceSurfaceFormatsKHR(renderer->vulkan.phy_device, renderer->vulkan.surface, &surface_format_count, surface_formats),
+                     surface_formats, surface_format_count * sizeof(VkSurfaceFormatKHR), "Failed to get surface formats\n");
+    //Pick the swapchain surface format we will use
+    if(!BOBi_vk_choose_swap_surface_format(surface_formats, surface_format_count, &renderer->vulkan.format)) {
+        printf("Failed to choose the swap chain surface format\n");
+        free(surface_formats);
+        return 0;
+    }
+
+    //Get the available present modes
+    uint32_t available_present_modes = 0;
+    VkPresentModeKHR *present_modes;
+    VULKAN_ENUMERATE(vkGetPhysicalDeviceSurfacePresentModesKHR(renderer->vulkan.phy_device, renderer->vulkan.surface, &available_present_modes, NULL),
+                     vkGetPhysicalDeviceSurfacePresentModesKHR(renderer->vulkan.phy_device, renderer->vulkan.surface, &available_present_modes, present_modes),
+                     present_modes, available_present_modes * sizeof(VkPresentModeKHR), "Failed to get surface modes\n");
+    //Get the present mode we will use
+    VkPresentModeKHR chosen_mode;
+    if(!BOBi_vk_choose_swap_present_mode(present_modes, available_present_modes, &chosen_mode)) {
+        printf("Failed to choose a present mode\n");
+        free(present_modes);
+        return 0;
+    }
+
+    //Cleanup
+    free(surface_formats);
+    free(present_modes);
+
+    //Create the swapchain
+    VkSwapchainCreateInfoKHR swapchain_create_info = {
+        .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR, .pNext = NULL,
+        .surface = renderer->vulkan.surface, .minImageCount = min_image_count,
+        .imageFormat = renderer->vulkan.format.format,
+        .imageColorSpace = renderer->vulkan.format.colorSpace,
+        .imageExtent = renderer->vulkan.extent,
+        .imageArrayLayers = 1, //Specifies num layers each image consists of. Always 1 unless making a stereoscopic 3D app
+        .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, //Specifies what kind of operations we use the images in the swap chain for
+        .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE, //Specifies how to handle swap chain images that might be used across multiple queue families
+        .preTransform = sur_cap.currentTransform, //Can specify that certain transforms can be applied to images in the swap chain
+        .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR, //Specifies if the alpha channel should be used for blending with other windows
+        .presentMode = chosen_mode,
+        .clipped = 1, .oldSwapchain = VK_NULL_HANDLE,
+    };
+    VULKAN_ERROR(vkCreateSwapchainKHR(renderer->vulkan.log_device, &swapchain_create_info, NULL, &renderer->vulkan.swapchain), "Failed to create swapchain");
+
+    //Get a reference to the swapchain images
+    VULKAN_ENUMERATE(vkGetSwapchainImagesKHR(renderer->vulkan.log_device, renderer->vulkan.swapchain, &renderer->vulkan.num_images, NULL),
+                     vkGetSwapchainImagesKHR(renderer->vulkan.log_device, renderer->vulkan.swapchain, &renderer->vulkan.num_images, renderer->vulkan.images),
+                     renderer->vulkan.images, renderer->vulkan.num_images * sizeof(VkImage), "Failed to get the swapchain images");
+
+
+    return 1;
+}
+
+//Creates views for the swapchain images
+uint8_t BOBi_vk_create_image_views(BOB_Renderer *renderer) {
+    renderer->vulkan.views = malloc(sizeof(VkImageView) * renderer->vulkan.num_images);
+
+    for(size_t i = 0; i < renderer->vulkan.num_images; i++) {
+        if(!BOBi_vk_create_image_view(renderer, renderer->vulkan.images[i], renderer->vulkan.format.format, VK_IMAGE_ASPECT_COLOR_BIT, &renderer->vulkan.views[i])) return 0;
+    }
+
+    return 1;
+}
+
+//Creates a command pool
+uint8_t BOBi_vk_create_command_pool(BOB_Renderer *renderer) {
+    VkCommandPoolCreateInfo pool_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .pNext = NULL,
+        .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, .queueFamilyIndex = renderer->vulkan.queue_family
+    };
+    VULKAN_ERROR(vkCreateCommandPool(renderer->vulkan.log_device, &pool_info, NULL, &renderer->vulkan.command_pool), "Failed to create command pool");
+    return 1;
+}
+
+//Creates the resources used to do depth culling
+uint8_t BOBi_vk_create_depth_resources(BOB_Renderer *renderer) {
+    VkFormat depth_format;
+    if(!BOBi_vk_find_depth_format(renderer, &depth_format)) return 0;
+
+    if(!BOBi_vk_create_image(renderer, renderer->vulkan.extent.width, renderer->vulkan.extent.height, depth_format, VK_IMAGE_TILING_OPTIMAL,
+                 VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &renderer->vulkan.depth)) return 0;
+    if(!BOBi_vk_create_image_view(renderer, renderer->vulkan.depth.image, depth_format, VK_IMAGE_ASPECT_DEPTH_BIT, &renderer->vulkan.depth.view)) return 0;
+
+    return 1;
+}
+
+//Creates the descriptor pools that hold the information on the data we send to the GPU
+uint8_t BOBi_vk_create_descriptor_pool(BOB_Renderer *renderer) {
+    VkDescriptorPoolSize pool_size[2] = {
+        {.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 1},
+        {.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1}
+    };
+
+    VkDescriptorPoolCreateInfo pool_info = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .pNext = NULL,
+        .flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, 
+        .maxSets = BOB_MAX_MATERIAL_CAPACITY, .poolSizeCount = 2,
+        .pPoolSizes = pool_size
+    };
+
+    VULKAN_ERROR(vkCreateDescriptorPool(renderer->vulkan.log_device, &pool_info, NULL, &renderer->vulkan.descriptor_pool), "Failed to create descriptor pool");
+    return 1;
+}
+
+//Creates a texture sampler for the one texture we are using to be sent to the GPU
+uint8_t BOBi_vk_create_texture_sampler(BOB_Renderer *renderer, VkSampler *sampler) {
+    VkPhysicalDeviceProperties properties;
+    vkGetPhysicalDeviceProperties(renderer->vulkan.phy_device, &properties);
+    VkSamplerCreateInfo sampler_info = {
+        .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .pNext = NULL,
+        .magFilter = VK_FILTER_LINEAR, .minFilter = VK_FILTER_LINEAR,
+        .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
+        .mipLodBias = 0.0f, .minLod = 0.0f, .maxLod = 0.0f,
+        .addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        .addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        .addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        .anisotropyEnable = VK_TRUE,
+        .maxAnisotropy = properties.limits.maxSamplerAnisotropy,
+        .compareEnable = VK_FALSE,
+        .compareOp = VK_COMPARE_OP_ALWAYS,
+        .borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK,
+        .unnormalizedCoordinates = VK_FALSE,
+    };
+    VULKAN_ERROR(vkCreateSampler(renderer->vulkan.log_device, &sampler_info, NULL, sampler), "Failed to create texture sampler");
+    return 1;
+}
+
+//Creates the general command buffers used to generate draw calls
+uint8_t BOBi_vk_create_command_buffer(BOB_Renderer *renderer, VkCommandBuffer *command_buf) {
+    VkCommandBufferAllocateInfo alloc_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .pNext = NULL,
+        .commandPool = renderer->vulkan.command_pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1
+    };
+        VULKAN_ERROR(vkAllocateCommandBuffers(renderer->vulkan.log_device, &alloc_info, command_buf), "Failed to allocate command buffers");
+    return 1;
+}
+
+//Creates the semaphores and fences required to synchronise operations
+uint8_t BOBi_vk_create_sync_objects(BOB_Renderer *renderer) {
+    VkSemaphoreCreateInfo sem_info = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, .pNext = NULL, .flags = 0 };
+
+    VkFenceCreateInfo fence_info = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, .pNext = NULL, .flags = VK_FENCE_CREATE_SIGNALED_BIT};
+    renderer->vulkan.render_finished_semaphore = malloc(sizeof(VkSemaphore) * renderer->vulkan.num_images);
+    for(size_t i = 0; i < renderer->vulkan.num_images; i++) {
+        VULKAN_ERROR(vkCreateSemaphore(renderer->vulkan.log_device, &sem_info, NULL, &renderer->vulkan.render_finished_semaphore[i]), "Failed to create a semaphore");
+    }
+    VULKAN_ERROR(vkCreateSemaphore(renderer->vulkan.log_device, &sem_info, NULL, &renderer->vulkan.present_complete_semaphore), "Failed to create a semaphore");
+    VULKAN_ERROR(vkCreateFence(renderer->vulkan.log_device, &fence_info, NULL, &renderer->vulkan.draw_fence), "Failed to create a fence");
+
+    return 1;
+}
+
+//===================================== MATERIAL CREATION =========================================
+
+//Creates a shader module object from a buffer filled with SPIR-V sharder bytecode
+//The buffer must be aligned to 4 bytes
+uint8_t BOBi_vk_create_shader_module(uint8_t *buf, size_t buf_sz, VkShaderModule *shader_module, VkDevice log_device) {
+    //Alignment check
+    if(buf_sz % 4 != 0) {
+        printf("Byte data not aligned to 4 bytes\n");
+        return 0;
+    }
+    //Create the shader module
+    VkShaderModuleCreateInfo create_info = {.codeSize = buf_sz, .pCode = (uint32_t *)buf, .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .pNext = NULL};
+    VULKAN_ERROR(vkCreateShaderModule(log_device, &create_info, NULL, shader_module), "Failed to create shader module");
+
+    return 1;
+}
+
+int BOBi_vk_convert_shader_type(BOB_Shader_Type type) {
+    switch (type) {
+        case BOB_VERTEX_SHADER: return VK_SHADER_STAGE_VERTEX_BIT;
+        case BOB_FRAGMENT_SHADER: return VK_SHADER_STAGE_FRAGMENT_BIT;
+        default: return 0;
+    }
+}
+
+//Creates our graphics pipeline
+uint8_t BOBi_vk_create_graphics_pipeline(BOB_Renderer *renderer, BOB_Material *mat, BOB_Shader_Data *data, size_t num_shaders) {
+    VkPipelineShaderStageCreateInfo *shader_stages = malloc(sizeof(VkPipelineShaderStageCreateInfo) * num_shaders);
+
+    for(size_t i = 0; i < num_shaders; i++) {
+        if(data[i].type != BOB_VERTEX_SHADER && data[i].type != BOB_FRAGMENT_SHADER) {
+            printf("Shader type not supported");
+            return 0;
+        }
+
+        //Create the shader module to hold the shader
+        VkShaderModule shader_module;
+        if(!BOBi_vk_create_shader_module((uint8_t *)data[i].shader_code, data[i].code_buf_sz, &shader_module, renderer->vulkan.log_device)) {
+            return 0;
+        }
+        //Telling the pipleine what shader stages we are using
+        shader_stages[i] = (VkPipelineShaderStageCreateInfo){
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .pNext = NULL,
+            .stage = BOBi_vk_convert_shader_type(data[i].type), .module = shader_module, .pName = data[i].entrypoint_name
+        };
+    }
+
+    //Can tell the pipeline what stages we want to be able to change at runtime without having to recreate the whole program
+    VkDynamicState dynamic_states[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dynamic_state = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .pNext = NULL,
+                                                    .dynamicStateCount = 2, .pDynamicStates = dynamic_states};
+
+    //Get the binding and attribute descriptions
+    VkVertexInputBindingDescription binding_desc = BOBi_vk_get_binding_desc();
+    VkVertexInputAttributeDescription attrib_descs[4];
+    size_t num_attrib_descs;
+    BOBi_vk_get_attrib_descs(attrib_descs, &num_attrib_descs);
+
+    //Get the data on the vertex input
+    VkPipelineVertexInputStateCreateInfo vertexInputInfo = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO, .pNext = NULL,
+        .vertexBindingDescriptionCount = 1, .pVertexBindingDescriptions = &binding_desc,
+        .vertexAttributeDescriptionCount = num_attrib_descs, .pVertexAttributeDescriptions = attrib_descs
+    };
+
+    //Tell the shader we will be outputting triangle data
+    VkPipelineInputAssemblyStateCreateInfo input_assembly = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, .pNext = NULL,
+        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST
+    };
+
+    VkViewport viewport = {0.0f, 0.0f, renderer->vulkan.extent.width, renderer->vulkan.extent.height, 0.0f, 1.0f}; //Viewport rectangle
+    VkRect2D scissor = {(VkOffset2D){0, 0}, renderer->vulkan.extent}; //Scissor rectangle
+    VkPipelineViewportStateCreateInfo viewport_state = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .pNext = NULL, .viewportCount = 1, .scissorCount = 1};
+
+    //TODO: CHECK THAT THE OLD VERSION WORKS
+    VkPipelineRasterizationStateCreateInfo rasteriser = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .depthClampEnable = VK_FALSE,
+        .rasterizerDiscardEnable = VK_FALSE,
+        .polygonMode = VK_POLYGON_MODE_FILL,
+        .cullMode = VK_CULL_MODE_NONE,
+        .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+        .depthBiasEnable = VK_FALSE,
+        .lineWidth = 1.0f
+    };
+    // VkPipelineRasterizationStateCreateInfo rasteriser = {
+    //     .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, .pNext = NULL,
+    //     .depthClampEnable = VK_FALSE, //If set to true, fragments beyond near and far planes are clamped to them instead of discarded
+    //     .rasterizerDiscardEnable = VK_FALSE, //If set to true, then geometry never passes through rasteriser stage. Disables output to framebuffer
+    //     .polygonMode = VK_POLYGON_MODE_FILL, //Determines how fragments are generated for geometry. Can also be drawn as lines or points
+    //     .cullMode = VK_CULL_MODE_BACK_BIT, //Determines what kind of face culling to use
+    //     .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE, //Determines the vertex order for the faces to be considered front facing and can be clockwise or counter-clockwise
+    //     .depthBiasEnable = VK_FALSE, //Rasteriser can alter the depth values by adding a constant value or biasing them based on a fragments slope. Not necessary
+    //     .lineWidth = 1.0}; //Determines the thickness of lines in terms of fragments
+
+    //Configure Multisampling
+    VkPipelineMultisampleStateCreateInfo multisampling = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, .pNext = NULL,
+        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT, .sampleShadingEnable = VK_FALSE
+    };
+
+    //Configuring Colour Blending
+    VkPipelineColorBlendAttachmentState colour_blend_attachment = {
+        .blendEnable = VK_TRUE,
+        .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
+        .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+        .colorBlendOp = VK_BLEND_OP_ADD,
+        .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+        .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+        .alphaBlendOp = VK_BLEND_OP_ADD,
+        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT
+    };
+
+    VkPipelineColorBlendStateCreateInfo colour_blending = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, .pNext = NULL,
+        .logicOpEnable = VK_FALSE, .logicOp = VK_LOGIC_OP_COPY, .attachmentCount = 1, .pAttachments = &colour_blend_attachment
+    };
+
+    //Creating the pipeline layout
+    VkPipelineLayoutCreateInfo pipeline_layout_info = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .pNext = NULL,
+        .setLayoutCount = 2, .pSetLayouts = (VkDescriptorSetLayout[2]){mat->vulkan.uniform_set_layout, renderer->vulkan.default_tex_layout}, .pushConstantRangeCount = 0
+    };
+    VULKAN_ERROR(vkCreatePipelineLayout(renderer->vulkan.log_device, &pipeline_layout_info, NULL, &mat->vulkan.layout), "Failed to create pipeline layout",
+                 for(size_t i = 0; i < num_shaders; i++) { vkDestroyShaderModule(renderer->vulkan.log_device, shader_stages[i].module, NULL); } free(shader_stages););
+
+    VkPipelineDepthStencilStateCreateInfo depth_stencil = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO, .pNext = NULL,
+        .depthTestEnable = VK_TRUE,
+        .depthWriteEnable = VK_TRUE,
+        .depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL,
+        .depthBoundsTestEnable = VK_FALSE,
+        .stencilTestEnable = VK_FALSE
+    };
+    VkPipelineRenderingCreateInfo pipeline_rendering_create_info = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .pNext = NULL,
+        .colorAttachmentCount = 1,
+        .pColorAttachmentFormats = &renderer->vulkan.format.format,
+        .depthAttachmentFormat = VK_FORMAT_UNDEFINED,
+        .stencilAttachmentFormat = VK_FORMAT_UNDEFINED
+    };
+    VULKAN_ERROR(!BOBi_vk_find_depth_format(renderer, &pipeline_rendering_create_info.depthAttachmentFormat), "Failed to create pipeline layout",
+                 for(size_t i = 0; i < num_shaders; i++) { vkDestroyShaderModule(renderer->vulkan.log_device, shader_stages[i].module, NULL); } free(shader_stages););
+
+    //Creating the graphics pipeline
+    VkGraphicsPipelineCreateInfo graphics_create_info = {
+        .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &pipeline_rendering_create_info,
+        .stageCount = num_shaders, .pStages = shader_stages, .pVertexInputState = &vertexInputInfo,
+        .pInputAssemblyState = &input_assembly, .pViewportState = &viewport_state,
+        .pRasterizationState = &rasteriser, .pMultisampleState = &multisampling,
+        .pColorBlendState = &colour_blending, .pDynamicState = &dynamic_state,
+        .layout = mat->vulkan.layout, .renderPass = NULL, .pDepthStencilState = &depth_stencil
+    };
+
+    VULKAN_ERROR(vkCreateGraphicsPipelines(renderer->vulkan.log_device, VK_NULL_HANDLE, 1, &graphics_create_info, NULL, &mat->vulkan.pipeline), "Failed to create graphics pipeline",
+                 for(size_t i = 0; i < num_shaders; i++) { vkDestroyShaderModule(renderer->vulkan.log_device, shader_stages[i].module, NULL); } free(shader_stages););
+
+    for(size_t i = 0; i < num_shaders; i++) {
+        vkDestroyShaderModule(renderer->vulkan.log_device, shader_stages[i].module, NULL);
+    }
+    free(shader_stages);
+
+    return 1;
+}
+
+uint8_t BOBi_std140_alignment(BOB_Uniform_Type type) {
+    switch (type) {
+        case BOB_UNIFORM_FLOAT:
+        case BOB_UNIFORM_UNSIGNED_INT:
+        case BOB_UNIFORM_SIGNED_INT: return 4;
+        case BOB_UNIFORM_VEC2: return 8;
+        case BOB_UNIFORM_VEC3:
+        case BOB_UNIFORM_VEC4: return 16;
+        case BOB_UNIFORM_MAT4: return 16;
+    }
+}
+
+uint8_t BOBi_std140_size(BOB_Uniform_Type type) {
+    switch (type) {
+        case BOB_UNIFORM_FLOAT:
+        case BOB_UNIFORM_UNSIGNED_INT:
+        case BOB_UNIFORM_SIGNED_INT: return 4;
+        case BOB_UNIFORM_VEC2: return 8;
+        case BOB_UNIFORM_VEC3:
+        case BOB_UNIFORM_VEC4: return 16;
+        case BOB_UNIFORM_MAT4: return 64;
+    }
+}
+
+//Creates a layout for the descriptor set for the data we will be sending to our shader
+uint8_t BOBi_vk_create_descriptor_layout(BOB_Renderer *renderer, VkDescriptorSetLayout *layout, VkDescriptorType *type, VkShaderStageFlags *stages, size_t *bindings, size_t num_layouts) {
+    VkDescriptorSetLayoutBinding layouts[BOB_MAX_UNIFORMS];
+    for(size_t i = 0; i < num_layouts; i++) {
+        layouts[i] = (VkDescriptorSetLayoutBinding){
+            .binding = bindings[i], .descriptorType = type[i], .descriptorCount = 1, .stageFlags = stages[i]
+        };
+    }
+
+    //Create the descriptor set layout
+    VkDescriptorSetLayoutCreateInfo layout_info = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .pNext = NULL,
+        .bindingCount = num_layouts, .pBindings = layouts
+    };
+    VULKAN_ERROR(vkCreateDescriptorSetLayout(renderer->vulkan.log_device, &layout_info, NULL, layout), "Failed to create descriptor set layout");
+    return 1;
+}
+
+uint8_t BOBi_vk_create_descriptor_sets(BOB_Renderer *renderer, VkDescriptorSet *set, VkDescriptorSetLayout *layouts, size_t num_sets) {
+    VkDescriptorSetAllocateInfo alloc_info = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .pNext = NULL,
+        .descriptorPool = renderer->vulkan.descriptor_pool,
+        .descriptorSetCount = num_sets, .pSetLayouts = layouts
+    };
+
+    VULKAN_ERROR(vkAllocateDescriptorSets(renderer->vulkan.log_device, &alloc_info, set), "Failed to allocate descriptor sets");
+
+    return 1;
+}
+
+void BOBi_vk_destroy_material(BOB_Renderer *renderer, uint32_t index) {
+    BOB_Material *mat = &renderer->material_table[index];
+    if(mat->vulkan.uniform_descriptor_set != VK_NULL_HANDLE) {vkFreeDescriptorSets(renderer->vulkan.log_device, renderer->vulkan.descriptor_pool, 1, &mat->vulkan.uniform_descriptor_set); mat->vulkan.uniform_descriptor_set = VK_NULL_HANDLE;}
+    if(mat->vulkan.uniform_set_layout != VK_NULL_HANDLE) {vkDestroyDescriptorSetLayout(renderer->vulkan.log_device, mat->vulkan.uniform_set_layout, NULL); mat->vulkan.uniform_set_layout = VK_NULL_HANDLE;}
+    BOBi_vk_destroy_buffer(renderer->vulkan.log_device, &mat->vulkan.uniform_buffer);
+    if(mat->vulkan.layout!= VK_NULL_HANDLE) {vkDestroyPipelineLayout(renderer->vulkan.log_device, mat->vulkan.layout, NULL); mat->vulkan.layout = VK_NULL_HANDLE;}
+    if(mat->vulkan.pipeline!= VK_NULL_HANDLE) {vkDestroyPipeline(renderer->vulkan.log_device, mat->vulkan.pipeline, NULL); mat->vulkan.pipeline = VK_NULL_HANDLE;}
+}
+
+uint8_t BOBi_vk_create_material(BOB_Renderer *renderer, uint32_t index, BOB_Shader_Data *data, size_t num_shaders) {
+    BOB_Material *mat = &renderer->material_table[index];
+
+    size_t offset = 0;
+    VkShaderStageFlags uniform_stages = 0;
+
+    //Set the uniform data
+    for(size_t i = 0; i < mat->uniform_count; i++) {
+        BOB_Uniform *uniform = &mat->uniforms[i];
+        uniform->vulkan.offset = BOBi_align_up(offset, BOBi_std140_alignment(uniform->type));
+        offset = uniform->vulkan.offset + BOBi_std140_size(uniform->type);
+        uniform_stages |= uniform->vulkan.stage;
+    }
+
+    //Create the descriptor sets and the pipeline
+    VULKAN_ERROR(!BOBi_vk_create_descriptor_layout(renderer, &mat->vulkan.uniform_set_layout,
+                                        (VkDescriptorType[1]){VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER},
+                                        (VkShaderStageFlagBits[1]){uniform_stages}, (size_t[1]){0}, 1),
+                 "Failed to create descriptor sets");
+    VULKAN_ERROR(!BOBi_vk_create_descriptor_sets(renderer, &mat->vulkan.uniform_descriptor_set, &mat->vulkan.uniform_set_layout, 1),
+                 "Failed to create descriptor layouts");
+    VULKAN_ERROR(!BOBi_vk_create_graphics_pipeline(renderer, mat, data, num_shaders), "Failed to create graphics pipeline", BOBi_vk_destroy_material(renderer, index));
+
+    //Create the uniform buffer to hold the data:
+    VULKAN_ERROR(!BOBi_vk_create_buffer(renderer, offset, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                &mat->vulkan.uniform_buffer), "Failed to create uniform buffer", BOBi_vk_destroy_material(renderer, index));
+
+    VULKAN_ERROR(vkMapMemory(renderer->vulkan.log_device, mat->vulkan.uniform_buffer.memory, 0, offset, 0, &mat->vulkan.uniform_buffer_mapped),
+                 "Failed to map uniform buffer memory", BOBi_vk_destroy_material(renderer, index));
+
+    return 1;
+}
+
+void BOBi_vk_write_image_descriptor(BOB_Renderer *renderer, VkDescriptorSet set, VkDescriptorType type, size_t binding, uint32_t index) {
+    VkDescriptorImageInfo descriptor_images = (VkDescriptorImageInfo) {
+        .sampler = renderer->vulkan.sampler, .imageView = renderer->texture_table[index].vulkan.view,
+        .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+    };
+    VkWriteDescriptorSet descriptor_writes = (VkWriteDescriptorSet){
+        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .pNext = NULL,
+        .dstSet = set, .dstBinding = binding,
+        .descriptorCount = 1, .descriptorType = type,
+        .pImageInfo = &descriptor_images
+    };
+    //Create the descriptor to hold the uniforms
+    vkUpdateDescriptorSets(renderer->vulkan.log_device, 1, &descriptor_writes, 0, NULL);
+}
+
+void BOBi_vk_write_buffer_descriptor(BOB_Renderer *renderer, VkDescriptorSet set, VkDescriptorType type, size_t binding, BOBi_Vulkan_Buffer buf, VkDeviceSize range) {
+    VkDescriptorBufferInfo descriptor_buffer = (VkDescriptorBufferInfo) {
+        .buffer = buf.buffer, .offset = 0, .range = range
+    };
+    VkWriteDescriptorSet descriptor_writes = (VkWriteDescriptorSet){
+        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .pNext = NULL,
+        .dstSet = set, .dstBinding = binding,
+        .descriptorCount = 1, .descriptorType = type,
+        .pBufferInfo = &descriptor_buffer,
+    };
+    //Create the descriptor to hold the uniforms
+    vkUpdateDescriptorSets(renderer->vulkan.log_device, 1, &descriptor_writes, 0, NULL);
+}
+
+//Updates the uniform buffer with new texture position
+void BOBi_vk_update_uniform(BOB_Renderer *renderer, BOB_Material *mat) {
+    for(size_t i = 0; i < mat->uniform_count; i++) {
+        BOB_Uniform *uniform = &mat->uniforms[i];
+        //Copying data
+        switch (uniform->type) {
+            case BOB_UNIFORM_FLOAT: memcpy(mat->vulkan.uniform_buffer_mapped + uniform->vulkan.offset, &uniform->f, sizeof(float)); break;
+            case BOB_UNIFORM_UNSIGNED_INT:memcpy(mat->vulkan.uniform_buffer_mapped + uniform->vulkan.offset, &uniform->u32, sizeof(uint32_t)); break;
+            case BOB_UNIFORM_SIGNED_INT: memcpy(mat->vulkan.uniform_buffer_mapped + uniform->vulkan.offset, &uniform->i32, sizeof(int32_t)); break;
+            case BOB_UNIFORM_VEC2: memcpy(mat->vulkan.uniform_buffer_mapped + uniform->vulkan.offset, &uniform->vec2, sizeof(BOB_Vector2)); break;
+            case BOB_UNIFORM_VEC3: memcpy(mat->vulkan.uniform_buffer_mapped + uniform->vulkan.offset, &uniform->vec3, sizeof(BOB_Vector3)); break;
+            case BOB_UNIFORM_VEC4: memcpy(mat->vulkan.uniform_buffer_mapped + uniform->vulkan.offset, &uniform->vec4, sizeof(BOB_Vector4)); break;
+            case BOB_UNIFORM_MAT4: memcpy(mat->vulkan.uniform_buffer_mapped + uniform->vulkan.offset, &uniform->mat4, sizeof(BOB_Mat4)); break;
+        }
+    }
+}
+
+//Initialises vulkan
+uint8_t BOBi_vk_init_vulkan_renderer(BOB_Renderer *renderer, size_t width, size_t height, size_t index_buf_sz, size_t vert_buf_sz, BOB_vk_create_surface surface_func) {
+    VULKAN_ERROR(!surface_func(bob_state.instance, &renderer->vulkan.surface), "Didn't create surface");
+    VULKAN_ERROR(!BOBi_vk_pick_physical_device(renderer), "Didn't pick physical device");
+    VULKAN_ERROR(!BOBi_vk_create_logical_device(renderer), "Didn't create logical device");
+    VULKAN_ERROR(!BOBi_vk_create_swapchain(renderer, width, height), "Didn't create swapchain");
+    VULKAN_ERROR(!BOBi_vk_create_image_views(renderer), "Didn't create swapchain images");
+    VULKAN_ERROR(!BOBi_vk_create_command_pool(renderer), "Didn't create command pool");
+    VULKAN_ERROR(!BOBi_vk_create_depth_resources(renderer), "Didn't create depth resources");
+    VULKAN_ERROR(!BOBi_vk_create_descriptor_pool(renderer), "Didn't create descriptor pool");
+    VULKAN_ERROR(!BOBi_vk_create_descriptor_layout(renderer, &renderer->vulkan.default_tex_layout, 
+                (VkDescriptorType[1]){VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER}, (VkShaderStageFlags[1]){VK_SHADER_STAGE_FRAGMENT_BIT},
+                (size_t[1]){0}, 1), "Failed to create texture descriptor layout");
+    VULKAN_ERROR(!BOBi_vk_create_texture_sampler(renderer, &renderer->vulkan.sampler), "Didn't create texture sampler");
+    VULKAN_ERROR(!BOBi_vk_create_command_buffer(renderer, &renderer->vulkan.command_buffer), "Failed to creation command buffer");
+    VULKAN_ERROR(!BOBi_vk_create_sync_objects(renderer), "Failed to create sync objects");
+
+    //Create the vertex buffer
+    VULKAN_ERROR(!BOBi_vk_create_buffer(renderer, vert_buf_sz, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                                &renderer->vulkan.vertex_buffer), "Failed to create vertex buffer");
+    //Create the index buffer
+    VULKAN_ERROR(!BOBi_vk_create_buffer(renderer, index_buf_sz, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,  &renderer->vulkan.index_buffer), "Failed to create index buffer");
+    return 1;
+}
+
+uint8_t BOB_create_vulkan_renderer(size_t atlas_capacity, size_t pixelbuf_capacity, size_t tex_capacity, size_t mat_capacity,
+                            size_t font_capacity, size_t width, size_t height, size_t width_px, size_t height_px, size_t vertex_capacity,
+                            size_t index_capacity, size_t draw_call_capacity, BOB_vk_create_surface surface_func, BOB_Renderer_Handle *r) {
+    if(!BOBi_create_renderer(BOB_VULKAN_RENDERER, atlas_capacity, pixelbuf_capacity, tex_capacity, mat_capacity, font_capacity, vertex_capacity, index_capacity, draw_call_capacity, width, height, r)) return 0;
+
+    BOB_Renderer *intrn_renderer;
+    BOBi_get_renderer(*r, &intrn_renderer);
+
+    //Vulkan specific initialisation
+    if(!BOBi_vk_init_vulkan_renderer(intrn_renderer, width_px, height_px, sizeof(uint32_t) * index_capacity, sizeof(BOB_Render_Vertex) * vertex_capacity, surface_func)) {
+        BOB_destroy_renderer(r);
+        return 0;
+    }
+
+    //Create the default texture used
+    if(!BOB_create_texture(*r, 1, 1, (uint8_t[4]){255, 255, 255, 255}, BOB_RGBA, &intrn_renderer->default_tex)) {
+        BOB_destroy_renderer(r);
+        return 0;
+    }
+
+    //Update the default projection matrix
+    BOB_ortho_vk( 0.0f, intrn_renderer->screen_width, intrn_renderer->screen_height, 0.0f, 0.0f, BOB_MAX_LAYER, &intrn_renderer->projection);
+
+    if(!BOB_create_material(*r, (BOB_Shader_Data[2]){
         (BOB_Shader_Data){.shader_code = (const char *)shader_vert_spv, .code_buf_sz = shader_vert_spv_len, .entrypoint_name = "main", .type = BOB_VERTEX_SHADER},
         (BOB_Shader_Data){.shader_code = (const char *)shader_frag_spv, .code_buf_sz = shader_frag_spv_len, .entrypoint_name = "main", .type = BOB_FRAGMENT_SHADER},
     }, 2,
     (BOB_Uniform[1]){
-        (BOB_Uniform){.name = "uProjection", .type = BOB_UNIFORM_MAT4, .mat4 = r->projection, .vulkan = {.stage = VK_SHADER_STAGE_VERTEX_BIT}},
+        (BOB_Uniform){.name = "uProjection", .type = BOB_UNIFORM_MAT4, .mat4 = intrn_renderer->projection, .vulkan = {.stage = VK_SHADER_STAGE_VERTEX_BIT}},
     }, 1,
-    &r->default_mat);
+    &intrn_renderer->default_mat)) {
+        BOB_destroy_renderer(r);
+        return 0;
+    }
+    return 1;
+}
+
+void BOBi_vk_destroy_renderer(BOB_Renderer *renderer) {
+    BOBi_vk_destroy_buffer(renderer->vulkan.log_device, &renderer->vulkan.vertex_buffer);
+    BOBi_vk_destroy_buffer(renderer->vulkan.log_device, &renderer->vulkan.index_buffer);
+
+    for(size_t i = 0; i < renderer->vulkan.num_images; i++) {
+        vkDestroyImageView(renderer->vulkan.log_device, renderer->vulkan.views[i], NULL);
+    }
+
+    free(renderer->vulkan.views);
+    free(renderer->vulkan.images);
+
+    vkFreeCommandBuffers(renderer->vulkan.log_device, renderer->vulkan.command_pool, 1, &renderer->vulkan.command_buffer);
+    for(size_t i = 0; i < renderer->vulkan.num_images; i++) {
+        vkDestroySemaphore(renderer->vulkan.log_device, renderer->vulkan.render_finished_semaphore[i], NULL);
+    }
+    free(renderer->vulkan.render_finished_semaphore);
+    vkDestroySemaphore(renderer->vulkan.log_device, renderer->vulkan.present_complete_semaphore, NULL);
+    vkDestroyFence(renderer->vulkan.log_device, renderer->vulkan.draw_fence, NULL);
+
+    vkDestroySampler(renderer->vulkan.log_device, renderer->vulkan.sampler, NULL);
+    vkDestroyDescriptorPool(renderer->vulkan.log_device, renderer->vulkan.descriptor_pool, NULL);
+    vkDestroyCommandPool(renderer->vulkan.log_device, renderer->vulkan.command_pool, NULL);
+    vkDestroySwapchainKHR(renderer->vulkan.log_device, renderer->vulkan.swapchain, NULL);
+    vkDestroyDevice(renderer->vulkan.log_device, NULL);
+    vkDestroySurfaceKHR(bob_state.instance, renderer->vulkan.surface, NULL);
+}
+
+// ================================= TEXTURE FUNCTIONS ===========================================
+void BOBi_vk_destroy_texture(BOB_Renderer *renderer, uint32_t tex_index) {
+    BOBi_Vulkan_Image *tex = &renderer->texture_table[tex_index].vulkan;
+
+    if(tex->view != VK_NULL_HANDLE) vkDestroyImageView(renderer->vulkan.log_device, tex->view, NULL);
+    if(tex->memory != VK_NULL_HANDLE) vkFreeMemory(renderer->vulkan.log_device, tex->memory, NULL);
+    if(tex->image != VK_NULL_HANDLE) vkDestroyImage(renderer->vulkan.log_device, tex->image, NULL);
+    if(tex->descriptor != VK_NULL_HANDLE) vkFreeDescriptorSets(renderer->vulkan.log_device, renderer->vulkan.descriptor_pool, 1, &tex->descriptor);
+}
+
+VkFormat BOBi_vk_convert_format(BOB_Format format) {
+    switch (format) {
+        case BOB_RED: return VK_FORMAT_R8_UNORM;
+        case BOB_RG: return VK_FORMAT_R8G8_UNORM;
+        case BOB_RGB: return VK_FORMAT_R8G8B8_UNORM;
+        case BOB_RGBA: return VK_FORMAT_R8G8B8A8_UNORM;
+    }
+}
+
+//TODO: Merge BOBi_vk_create_image and BOBi_vk_create_view into this, and parse the BOB_Format into a vulkan format instead of hardcoding it
+//      Also let user set the flags? Would need to make BOB API equivalents
+//      This would let us simplify this and BOBi_vk_create_depth_resources
+uint8_t BOBi_vk_create_texture(BOB_Renderer *renderer, uint32_t index, size_t width, size_t height, uint8_t *data, BOB_Format format) {
+    BOBi_Vulkan_Image *tex = &renderer->texture_table[index].vulkan;
+
+    //Create the staging buffer
+    BOBi_Vulkan_Buffer staging_buf;
+    if(!BOBi_vk_create_buffer(renderer, width * height * (format + 1), VK_BUFFER_USAGE_TRANSFER_SRC_BIT,  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &staging_buf)) return 0;
+
+    //Map the staging buffer memory into CPU memory and copy the pixel data into it
+    VULKAN_ERROR(!BOBi_vk_stream_to_buffer(renderer->vulkan.log_device, data, width * height * (format + 1), &staging_buf), "Failed to stream data into a Vulkan Buffer");
+
+    //Create the image
+    if(!BOBi_vk_create_image(renderer, width, height, BOBi_vk_convert_format(format), VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, tex)) return 0;
+
+    VkCommandBuffer command_buf;
+    VULKAN_ERROR(!BOBi_vk_begin_single_time_commands(renderer, &command_buf), "Failed to begin command buffer",
+        BOBi_vk_destroy_buffer(renderer->vulkan.log_device, &staging_buf);
+    );
+    VULKAN_ERROR(!BOBi_vk_transition_tex_layout(command_buf, tex->image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL), "Failed to transition layout",
+        BOBi_vk_destroy_buffer(renderer->vulkan.log_device, &staging_buf);
+    );
+    BOBi_vk_copy_buffer_to_image(command_buf, staging_buf.buffer, tex->image, width, height);
+    VULKAN_ERROR(!BOBi_vk_transition_tex_layout(command_buf, tex->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
+        "Failed to transition layout", BOBi_vk_destroy_buffer(renderer->vulkan.log_device, &staging_buf);
+    );
+    VULKAN_ERROR(!BOBi_vk_end_single_time_commands(renderer, command_buf), "Failed to end command buffer",
+        BOBi_vk_destroy_buffer(renderer->vulkan.log_device, &staging_buf);
+    );
+
+    BOBi_vk_destroy_buffer(renderer->vulkan.log_device, &staging_buf);
+
+    //Create view for the image
+    VULKAN_ERROR(!BOBi_vk_create_image_view(renderer, tex->image, BOBi_vk_convert_format(format),  VK_IMAGE_ASPECT_COLOR_BIT, &tex->view),
+                 "Failed to create view", BOBi_vk_destroy_image(renderer, tex));
+
+    //Create the descriptor set for the image
+    VULKAN_ERROR(!BOBi_vk_create_descriptor_sets(renderer, &tex->descriptor, &renderer->vulkan.default_tex_layout, 1),
+                 "Failed to create texture descriptor set", BOBi_vk_destroy_image(renderer, tex));
+
+    BOBi_vk_write_image_descriptor(renderer, tex->descriptor, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 0, index);
+    return 1;
+}
+
+// ============================================ DESTRUCTION FUNCTIONS ========================================
+
+//Destroys existing memory used by the swapchain
+void BOBi_vk_cleanup_swapchain(BOB_Renderer *renderer) {
+    for(size_t i = 0; i < renderer->vulkan.num_images; i++) {
+        vkDestroyImageView(renderer->vulkan.log_device, renderer->vulkan.views[i], NULL);
+    }
+    free(renderer->vulkan.views);
+    free(renderer->vulkan.images);
+    vkDestroySwapchainKHR(renderer->vulkan.log_device, renderer->vulkan.swapchain, NULL);
+}
+
+//Rebuilds the swapchain on framebuffer resize
+uint8_t BOBi_vk_recreate_swapchain(BOB_Renderer *renderer, size_t width, size_t height) {
+    VULKAN_ERROR(vkDeviceWaitIdle(renderer->vulkan.log_device), "Failed to wait for signal");
+    BOBi_vk_cleanup_swapchain(renderer);
+    vkDestroyImageView(renderer->vulkan.log_device, renderer->vulkan.depth.view, NULL);
+    vkFreeMemory(renderer->vulkan.log_device, renderer->vulkan.depth.memory, NULL);
+    vkDestroyImage(renderer->vulkan.log_device, renderer->vulkan.depth.image, NULL);
+    return BOBi_vk_create_swapchain(renderer, width, height) && BOBi_vk_create_image_views(renderer) && BOBi_vk_create_depth_resources(renderer);
+}
+
+// ===================================== DRAWING FUNCTIONS =========================================
+
+uint8_t BOBi_vk_draw(BOB_Renderer *renderer, float colour[4]) {
+    //Wait until operations from previous frame have completed
+    VULKAN_ERROR(vkWaitForFences(renderer->vulkan.log_device, 1, &renderer->vulkan.draw_fence, VK_TRUE, UINT64_MAX), "Failed to wait for fence");
+    BOBi_vk_destroy_buffer(renderer->vulkan.log_device, &renderer->vulkan.vert_staging_buf);
+    BOBi_vk_destroy_buffer(renderer->vulkan.log_device, &renderer->vulkan.index_staging_buf);
+
+    //Get the next swapchain image
+    VkResult res = vkAcquireNextImageKHR(renderer->vulkan.log_device, renderer->vulkan.swapchain, UINT64_MAX,
+                                         renderer->vulkan.present_complete_semaphore, VK_NULL_HANDLE, &renderer->vulkan.next_swapchain_image_index);
+    //If the swapchain data is invalid, remake it
+    if(res == VK_ERROR_OUT_OF_DATE_KHR) {
+        BOBi_vk_recreate_swapchain(renderer, 0, 0); //TODO: Fix
+        return 1;
+    }
+    //If we haven't been able to get a valid image, throw an error
+    else if(res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR) {
+        assert(res == VK_TIMEOUT || res == VK_NOT_READY);
+        printf("Failed to acquire swap chain image\n");
+        return 0;
+    }
+    vkResetFences(renderer->vulkan.log_device, 1, &renderer->vulkan.draw_fence);
+
+    //CLear the command buffer and record the draw commands for the current frame
+    vkResetCommandBuffer(renderer->vulkan.command_buffer, 0);
+
+    //Begin writing to the command buffer
+    VkCommandBufferBeginInfo begin_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .pNext = NULL
+    };
+    VkCommandBuffer buffer = renderer->vulkan.command_buffer; //Getting a reference to the command buffer so that don't have to write out full code every time
+    VULKAN_ERROR(vkBeginCommandBuffer(buffer, &begin_info), "Failed to begin command buffer operations");
+
+    //Transition the image to VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+    BOBi_vk_transition_image_layout(renderer->vulkan.images[renderer->vulkan.next_swapchain_image_index], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, (VkAccessFlags2){},
+                            VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_IMAGE_ASPECT_COLOR_BIT, buffer);
+
+    //Transition depth image to depth attachment optimal layout
+    BOBi_vk_transition_image_layout(renderer->vulkan.depth.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                            VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                            VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                            VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                            VK_IMAGE_ASPECT_DEPTH_BIT, buffer);
+
+//     return 1;
+// }
+//
+// //Records draw calls into the general command buffer
+// uint8_t BOBi_vk_draw(BOB_Renderer *renderer) {
+//     VkCommandBuffer buffer = renderer->vulkan.command_buffer; //Getting a reference to the command buffer so that don't have to write out full code every time
+    VkClearValue clear_color = {.color = {.float32 = {0.0f, 0.0f, 0.0f, 0.0f}}}; //Set the colour the screen gets cleared to
+    VkClearValue clear_depth = {.depthStencil = {.depth = 1.0f, .stencil = 0}}; //Set the depth the screen is cleared at
+
+    VkRenderingAttachmentInfo attachment_info = {
+        .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .pNext = NULL,
+            .imageView = renderer->vulkan.views[renderer->vulkan.next_swapchain_image_index], //Specifies which view to render to
+        .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, //Specifies what to do with the image during rendering
+        .storeOp = VK_ATTACHMENT_STORE_OP_STORE, //Specifies what to do with the image after rendering
+        .clearValue = clear_color
+    };
+    VkRenderingAttachmentInfo depth_attachment_info = {
+        .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .pNext = NULL,
+        .imageView = renderer->vulkan.depth.view,
+        .imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, //Specifies what to do with the image during rendering
+        .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE, //Specifies what to do with the image after rendering
+        .clearValue = clear_depth
+    };
+
+    //Set the rendering info
+    VkRenderingInfo rendering_info = {
+        .sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .pNext = NULL,
+        .renderArea = {.offset = {0, 0}, .extent = renderer->vulkan.extent},
+        .layerCount = 1, .colorAttachmentCount = 1, .pColorAttachments = &attachment_info,
+        .pDepthAttachment = &depth_attachment_info
+    };
+
+    size_t index_sz = sizeof(uint32_t) * renderer->batch.num_indices;
+    size_t vertex_sz = sizeof(BOB_Render_Vertex) * renderer->batch.num_vertices;
+    //Create the staging buffer
+    if(!BOBi_vk_create_buffer(renderer, vertex_sz, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                  VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, &renderer->vulkan.vert_staging_buf)) return 0;
+    if(!BOBi_vk_create_buffer(renderer, index_sz, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                  VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, &renderer->vulkan.index_staging_buf)) return 0;
+
+    //Map the staging buffer to CPU memory and copy the index data into it
+    VULKAN_ERROR(!BOBi_vk_stream_to_buffer(renderer->vulkan.log_device, renderer->batch.vertex_arena.memory, index_sz, &renderer->vulkan.index_staging_buf), "Failed to stream data into a Vulkan Buffer");
+    //Copy the data
+    VkBufferCopy copy_region = {0, 0, index_sz};
+    vkCmdCopyBuffer(buffer, renderer->vulkan.index_staging_buf.buffer, renderer->vulkan.index_buffer.buffer, 1, &copy_region);
+
+    //Map the staging buffer to CPU memory and copy the vertex data into it
+    VULKAN_ERROR(!BOBi_vk_stream_to_buffer(renderer->vulkan.log_device, renderer->batch.vertex_arena_2.memory, vertex_sz, &renderer->vulkan.vert_staging_buf), "Failed to stream data into a Vulkan Buffer");
+    //Create the actual destination buffer and copy the staging buffer data into it
+    copy_region = (VkBufferCopy){0, 0, vertex_sz};
+    vkCmdCopyBuffer(buffer, renderer->vulkan.vert_staging_buf.buffer, renderer->vulkan.vertex_buffer.buffer, 1, &copy_region);
+
+    // IMPORTANT: synchronize the copies with vertex/index input
+    VkBufferMemoryBarrier2 barriers[2] = {
+        {
+            .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+            .srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT,
+            .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+
+            .dstStageMask = VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT,
+            .dstAccessMask = VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT,
+
+            .buffer = renderer->vulkan.vertex_buffer.buffer,
+            .offset = 0,
+            .size = vertex_sz,
+        },
+
+        {
+            .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+            .srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT,
+            .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+
+            .dstStageMask = VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT,
+            .dstAccessMask = VK_ACCESS_2_INDEX_READ_BIT,
+
+            .buffer = renderer->vulkan.index_buffer.buffer,
+            .offset = 0,
+            .size = index_sz,
+        }
+    };
+
+    VkDependencyInfo dependency_info = { .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .bufferMemoryBarrierCount = 2, .pBufferMemoryBarriers = barriers, };
+
+    vkCmdPipelineBarrier2(buffer, &dependency_info);
+
+    //Begin rendering
+    vkCmdBeginRendering(buffer, &rendering_info);
+
+    VkViewport viewport = { .x = 0.0f, .y = (float)renderer->vulkan.extent.height, .width = (float)renderer->vulkan.extent.width, .height = -(float)renderer->vulkan.extent.height, .minDepth = 0.0f, .maxDepth = 1.0f };
+
+    vkCmdSetViewport(buffer, 0, 1, &viewport);
+
+    VkRect2D scissor = {
+        .offset = {0, 0},
+        .extent = renderer->vulkan.extent
+    };
+
+    vkCmdSetScissor(buffer, 0, 1, &scissor);
+
+    uint32_t index;
+    BOBi_get_index_from_handle(renderer->default_mat, &index);
+    BOB_Material *mat = &renderer->material_table[index];
+
+    //Bind the vertex buffer to the command buffer
+    vkCmdBindVertexBuffers(buffer, 0, 1, &renderer->vulkan.vertex_buffer.buffer, (VkDeviceSize[]){0});
+    //Bind the index buffer to the command buffer
+    vkCmdBindIndexBuffer(buffer, renderer->vulkan.index_buffer.buffer, 0, VK_INDEX_TYPE_UINT32);
+
+    uint32_t old_mat = UINT32_MAX, old_tex = UINT32_MAX;
+    for(size_t i = 0; i < renderer->batch.num_draw_calls; i++) {
+        BOBi_Draw_Call call = BOBi_get_arena_elem(renderer->batch.draw_call_arena, i, BOBi_Draw_Call);
+        printf("Draw call %zu, Num indicies: %zu, Offset: %zu\n", i, call.num_indices, call.index_offset);
+
+        uint32_t mat_index, tex_index;
+        if(!BOBi_get_index_from_handle(call.mat, &mat_index)) return 0;
+        if(!BOBi_get_index_from_handle(call.tex, &tex_index)) return 0;
+
+        BOB_Material *mat = &renderer->material_table[mat_index];
+        if(old_mat != mat_index) {
+            BOBi_vk_update_uniform(renderer, mat);
+            BOBi_vk_write_buffer_descriptor(renderer, mat->vulkan.uniform_descriptor_set, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 0, mat->vulkan.uniform_buffer, mat->uniforms[mat->uniform_count-1].vulkan.offset + BOBi_std140_size(mat->uniforms[mat->uniform_count-1].type));
+
+            //Bind the graphics pipeline
+            vkCmdBindPipeline(buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, mat->vulkan.pipeline);
+            //Bind correct descriptor set for each frame to the descriptors in the shader
+            vkCmdBindDescriptorSets(buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, mat->vulkan.layout, 0, 1, &mat->vulkan.uniform_descriptor_set, 0, NULL);
+        }
+        if(old_tex != tex_index) {
+            printf("Switching texture\n");
+            //Set the material to use this texture.
+            BOB_Texture *tex = &renderer->texture_table[tex_index];
+            vkCmdBindDescriptorSets(buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, mat->vulkan.layout, 1, 1, &tex->vulkan.descriptor, 0, NULL);
+        }
+        //Draw to the screen
+        vkCmdDrawIndexed(buffer, call.num_indices, 1, call.index_offset, 0, 0);
+        old_mat = mat_index;
+        old_tex = tex_index;
+    }
+    vkCmdEndRendering(buffer); //End rendering
+//     return 1;
+// }
+//
+// //Draws every frame
+// uint8_t BOBi_vk_end_frame(BOB_Renderer *renderer) {
+//     VkCommandBuffer buffer = renderer->vulkan.command_buffer; //Getting a reference to the command buffer so that don't have to write out full code every time
+
+    //After rendering, transition the swapchain image to VK_IMAGE_LAYOUT_PRESENT_SRC_KHR so it can be presented to the screen
+    BOBi_vk_transition_image_layout(renderer->vulkan.images[renderer->vulkan.next_swapchain_image_index], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                            VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, (VkAccessFlags2){}, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, VK_IMAGE_ASPECT_COLOR_BIT, buffer);
+
+    VULKAN_ERROR(vkEndCommandBuffer(buffer), "Failed to end command buffer");
+
+    //Submit render commands to the graphics queue
+    VkPipelineStageFlagBits wait_dest_stage_mask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    VkSubmitInfo sub_info = {
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .pNext = NULL,
+        .waitSemaphoreCount = 1, .pWaitSemaphores = &renderer->vulkan.present_complete_semaphore, .pWaitDstStageMask = &wait_dest_stage_mask,
+        .commandBufferCount = 1, .pCommandBuffers = &buffer,
+        .signalSemaphoreCount = 1, .pSignalSemaphores = &renderer->vulkan.render_finished_semaphore[renderer->vulkan.next_swapchain_image_index]
+    };
+    VULKAN_ERROR(vkQueueSubmit(renderer->vulkan.graphics_queue, 1, &sub_info, renderer->vulkan.draw_fence), "Failed to Submit render data to the queue");
+
+    //Get the present status
+    VkPresentInfoKHR present_info = {
+        .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .pNext = NULL,
+        .waitSemaphoreCount = 1, .pWaitSemaphores = &renderer->vulkan.render_finished_semaphore[renderer->vulkan.next_swapchain_image_index],
+        .swapchainCount = 1, .pSwapchains = &renderer->vulkan.swapchain, .pImageIndices = &renderer->vulkan.next_swapchain_image_index
+    };
+    res = vkQueuePresentKHR(renderer->vulkan.graphics_queue, &present_info);
+
+    //If its invalid, recreate the swapchain
+    if(res == VK_ERROR_OUT_OF_DATE_KHR || res == VK_SUBOPTIMAL_KHR || renderer->vulkan.framebuffer_resized) {
+        renderer->vulkan.framebuffer_resized = 0;
+        BOBi_vk_recreate_swapchain(renderer, 0, 0); //TODO: Fix
+        return 1;
+    }
+    VULKAN_ERROR(res, "Failed to acquire swap chain image");
+
+    return 1;
+}
+
+void BOBi_vk_update_rend_dim(BOB_Renderer *renderer, void *data, size_t data_sz) {
+    //Update the default projection matrix
+    BOB_ortho_vk( 0.0f, renderer->screen_width, renderer->screen_height, 0.0f, 0.0f, BOB_MAX_LAYER, &renderer->projection);
+
+    renderer->vulkan.framebuffer_resized = 1;
 }
 
 #endif
 
-typedef uint8_t (*BOBi_back_create_tex_func)(BOB_Context *context, uint32_t tex_index, size_t width, size_t height, uint8_t * data, BOB_Format format);
-typedef uint8_t (*BOBi_back_create_mat_func)(BOB_Context *context, uint32_t mat_index, BOB_Shader_Data *shader_data, size_t num_shaders);
-typedef uint8_t (*BOBi_back_create_pb_func)(BOB_Context *context, uint32_t pb_index);
-typedef void (*BOBi_back_destr_obj_func)(BOB_Context *context, uint32_t obj_index);
-typedef uint8_t (*BOBi_back_begin_frame_func)(BOB_Context *context, BOB_Vector4 colour);
-typedef uint8_t (*BOBi_back_end_frame_func)(BOB_Context *context);
-typedef uint8_t (*BOBi_back_init_renderer_func)(BOB_Context *context, BOB_Renderer *r, size_t vert_buf_sz, size_t index_buf_sz);
-typedef void (*BOBi_back_destroy_renderer_func)(BOB_Context *context, BOB_Renderer *r);
-typedef uint8_t (*BOBi_back_create_default_mat_func)(BOB_Context_Handle context, BOB_Renderer *r);
-typedef uint8_t (*BOBi_back_draw_func)(BOB_Context *context, BOB_Renderer *r);
-typedef void (*BOBi_back_copy_data_tex_func)(BOB_Context *context, uint32_t atlas_index, BOB_Format format, BOB_Quad dest_rect, uint8_t *data);
-typedef uint8_t (*BOBi_back_bind_mem_func)(BOB_Context *context, uint32_t pb_index);
-typedef void (*BOBi_back_unbind_mem_func)(BOB_Context *context);
-typedef void (*BOBi_back_copy_into_buf_func)(BOB_Context *context, uint8_t *data, size_t sz);
-typedef void (*BOBi_back_copy_from_buf_func)(BOB_Context *context, uint8_t *dest, size_t sz);
-typedef void (*BOBi_back_update_tex_from_buf_func)(BOB_Context *context, uint32_t pb_index);
-typedef void (*BOBi_back_update_renderer_dimensions_func)(BOB_Context *context, BOB_Renderer *r, void *data, size_t sz);
-typedef void (*BOBi_back_destroy_context_func)(BOB_Context *context);
+typedef uint8_t (*BOBi_back_create_tex_func)(BOB_Renderer *renderer, uint32_t tex_index, size_t width, size_t height, uint8_t * data, BOB_Format format);
+typedef uint8_t (*BOBi_back_create_mat_func)(BOB_Renderer *renderer, uint32_t mat_index, BOB_Shader_Data *shader_data, size_t num_shaders);
+typedef uint8_t (*BOBi_back_create_pb_func)(BOB_Renderer *renderer, uint32_t pb_index);
+typedef void (*BOBi_back_destr_obj_func)(BOB_Renderer *renderer, uint32_t obj_index);
+typedef void (*BOBi_back_destroy_renderer_func)(BOB_Renderer *renderer);
+typedef uint8_t (*BOBi_back_create_default_mat_func)(BOB_Renderer_Handle renderer);
+typedef uint8_t (*BOBi_back_draw_func)(BOB_Renderer *renderer, float colour[4]);
+typedef void (*BOBi_back_copy_data_tex_func)(BOB_Renderer *renderer, uint32_t atlas_index, BOB_Format format, BOB_Quad dest_rect, uint8_t *data);
+typedef uint8_t (*BOBi_back_bind_mem_func)(BOB_Renderer *renderer, uint32_t pb_index);
+typedef void (*BOBi_back_unbind_mem_func)(BOB_Renderer *renderer);
+typedef void (*BOBi_back_copy_into_buf_func)(BOB_Renderer *renderer, uint8_t *data, size_t sz);
+typedef void (*BOBi_back_copy_from_buf_func)(BOB_Renderer *renderer, uint8_t *dest, size_t sz);
+typedef void (*BOBi_back_update_tex_from_buf_func)(BOB_Renderer *renderer, uint32_t pb_index);
+typedef void (*BOBi_back_update_renderer_dimensions_func)(BOB_Renderer *renderer, void *data, size_t sz);
 
 typedef struct {
     BOBi_back_destr_obj_func destroy_texture;
@@ -2649,9 +2511,6 @@ typedef struct {
     BOBi_back_create_tex_func create_texture;
     BOBi_back_create_mat_func create_material;
     BOBi_back_create_pb_func create_pixelbuffer;
-    BOBi_back_begin_frame_func begin_frame;
-    BOBi_back_end_frame_func end_frame;
-    BOBi_back_init_renderer_func init_renderer;
     BOBi_back_destroy_renderer_func destroy_renderer;
     BOBi_back_create_default_mat_func create_default_mat;
     BOBi_back_draw_func draw;
@@ -2662,11 +2521,10 @@ typedef struct {
     BOBi_back_copy_from_buf_func copy_from_buf;
     BOBi_back_update_tex_from_buf_func update_tex_from_buf;
     BOBi_back_update_renderer_dimensions_func update_rend_dim;
-    BOBi_back_destroy_context_func destroy_context;
-    BOB_Context_Type type;
+    BOB_Renderer_Type type;
 } BOBi_Backend_Vtable;
 
-BOBi_Backend_Vtable context_functions[BOB_NUM_CONTEXTS] = {
+BOBi_Backend_Vtable renderer_functions[BOB_NUM_RENDERER_TYPES] = {
     #ifdef BOB_INCLUDE_GLAD
     (BOBi_Backend_Vtable) {
         .destroy_texture = &BOBi_gl_delete_texture,
@@ -2675,11 +2533,8 @@ BOBi_Backend_Vtable context_functions[BOB_NUM_CONTEXTS] = {
         .create_texture = &BOBi_gl_create_tex,
         .create_material = &BOBi_gl_create_material,
         .create_pixelbuffer = &BOBi_gl_create_pbo,
-        .begin_frame = &BOBi_gl_clear_color,
-        .end_frame = &BOBi_gl_end_frame,
-        .init_renderer = &BOBi_gl_init_gpu_renderer_mem,
-        .destroy_renderer = &BOBi_gl_destroy_renderer_mem,
         .create_default_mat = &BOBi_gl_create_default_material,
+        .destroy_renderer = &BOBi_gl_destroy_renderer_mem,
         .draw = &BOBi_gl_draw,
         .copy_data_to_tex = &BOBi_gl_copy_data_tex,
         .bind_memory = &BOBi_gl_bind_pbo_mem,
@@ -2688,8 +2543,7 @@ BOBi_Backend_Vtable context_functions[BOB_NUM_CONTEXTS] = {
         .copy_from_buf = &BOBi_gl_get_pbo_data,
         .update_tex_from_buf = &BOBi_gl_upload_pbo_data,
         .update_rend_dim = &BOBi_gl_copy_buffer_data,
-        .destroy_context = &BOBi_gl_destroy_context,
-        .type = BOB_OPENGL_CONTEXT,
+        .type = BOB_OPENGL_RENDERER,
     },
     #endif //BOB_INCLUDE_GLAD
 
@@ -2701,10 +2555,6 @@ BOBi_Backend_Vtable context_functions[BOB_NUM_CONTEXTS] = {
         .create_texture = &BOBi_vk_create_texture,
         .create_material = &BOBi_vk_create_material,
         .create_pixelbuffer = NULL,
-        .begin_frame = &BOBi_vk_begin_frame,
-        .end_frame = *BOBi_vk_end_frame,
-        .init_renderer = &BOBi_vk_create_renderer,
-        .destroy_renderer = &BOBi_vk_destroy_renderer,
         .create_default_mat = &BOBi_vk_create_default_material,
         .draw = &BOBi_vk_draw,
         .copy_data_to_tex = NULL,
@@ -2714,41 +2564,39 @@ BOBi_Backend_Vtable context_functions[BOB_NUM_CONTEXTS] = {
         .copy_from_buf = NULL,
         .update_tex_from_buf = NULL,
         .update_rend_dim = &BOBi_vk_update_rend_dim,
-        .destroy_context = &BOBi_vk_destroy_context,
-        .type = BOB_VULKAN_CONTEXT,
+        .destroy_renderer = &BOBi_vk_destroy_renderer,
     },
     #endif //BOB_INCLUDE_VULKAN
 };
 
 //================================================= INTERNAL HELPER FUNCTIONS ===================================================
 
-uint8_t BOBi_create_context(BOB_Context_Type type, size_t atlas_capacity, size_t pixelbuf_capacity, size_t tex_capacity, size_t mat_capacity,
-                            size_t font_capacity, size_t width, size_t height, BOB_Context_Handle *context) {
-    if(bob_state.context_count >= bob_state.context_capcity) {
-        printf("ERROR: Exceeded context capacity\n");
+uint8_t BOBi_create_renderer(BOB_Renderer_Type type, size_t atlas_capacity, size_t pixelbuf_capacity, size_t tex_capacity, size_t mat_capacity, size_t font_capacity, size_t vertex_capacity, size_t index_capacity, size_t draw_call_capacity, size_t width, size_t height, BOB_Renderer_Handle *renderer) {
+    if(bob_state.renderer_count >= bob_state.renderer_capcity) {
+        printf("ERROR: Exceeded renderer capacity\n");
         return 0;
     }
 
     uint32_t index;
-    if(bob_state.next_context_slot == UINT32_MAX) {
-        index = bob_state.context_count;
+    if(bob_state.next_renderer_slot == UINT32_MAX) {
+        index = bob_state.renderer_count;
     }
     else {
-        index = bob_state.next_context_slot;
+        index = bob_state.next_renderer_slot;
 
         //Linearly searching to find the next empty slot. Yes I know that this is slow
-        for (bob_state.next_context_slot = index + 1; bob_state.next_context_slot < bob_state.context_count; bob_state.next_context_slot++) {
-            //Use the allocation status of the context's memory region as an initialisation tell
-            //Relies on setting pointer to NULL on context destruction and zeroing memory on creating the BOB instance
-            if (bob_state.contexts[bob_state.next_context_slot].context_memory.memory == NULL)
+        for (bob_state.next_renderer_slot = index + 1; bob_state.next_renderer_slot < bob_state.renderer_count; bob_state.next_renderer_slot++) {
+            //Use the allocation status of the renderer's memory region as an initialisation tell
+            //Relies on setting pointer to NULL on renderer destruction and zeroing memory on creating the BOB instance
+            if (bob_state.renderers[bob_state.next_renderer_slot].renderer_memory.memory == NULL)
                 break;
         }
 
-        if (bob_state.next_context_slot >= bob_state.context_count)
-            bob_state.next_context_slot = UINT32_MAX;
+        if (bob_state.next_renderer_slot >= bob_state.renderer_count)
+            bob_state.next_renderer_slot = UINT32_MAX;
     }
 
-    BOB_Context *intrn_context = &bob_state.contexts[index];
+    BOB_Renderer *intrn_renderer = &bob_state.renderers[index];
 
     //Calculating the size of the memory regions each buffer will end up using
     size_t atlas_sz = atlas_capacity * sizeof(BOB_Atlas);
@@ -2773,43 +2621,58 @@ uint8_t BOBi_create_context(BOB_Context_Type type, size_t atlas_capacity, size_t
     size_t total = (size_t)p;
 
     //Allocating the memory used for the object buffers and checking the allocation
-    if(!BOB_init_arena(&intrn_context->context_memory, total)) return 0;
-    memset(intrn_context->context_memory.memory, 0, total);
+    if(!BOB_init_arena(&intrn_renderer->renderer_memory, total)) return 0;
+    memset(intrn_renderer->renderer_memory.memory, 0, total);
 
     //Assigning the start pointers from the general memory buffer
-    intrn_context->atlas_table = BOB_arena_alloc(&intrn_context->context_memory, atlas_sz, alignof(BOB_Atlas));
-    intrn_context->pixelbuffer_table = BOB_arena_alloc(&intrn_context->context_memory, pixelbuf_sz, alignof(BOB_PixelBuffer));
-    intrn_context->texture_table = BOB_arena_alloc(&intrn_context->context_memory, tex_sz, alignof(BOB_Texture));
-    intrn_context->material_table = BOB_arena_alloc(&intrn_context->context_memory, mat_sz, alignof(BOB_Material));
-    intrn_context->font_table = BOB_arena_alloc(&intrn_context->context_memory, font_sz, alignof(BOB_Font));
+    intrn_renderer->atlas_table = BOB_arena_alloc(&intrn_renderer->renderer_memory, atlas_sz, alignof(BOB_Atlas));
+    intrn_renderer->pixelbuffer_table = BOB_arena_alloc(&intrn_renderer->renderer_memory, pixelbuf_sz, alignof(BOB_PixelBuffer));
+    intrn_renderer->texture_table = BOB_arena_alloc(&intrn_renderer->renderer_memory, tex_sz, alignof(BOB_Texture));
+    intrn_renderer->material_table = BOB_arena_alloc(&intrn_renderer->renderer_memory, mat_sz, alignof(BOB_Material));
+    intrn_renderer->font_table = BOB_arena_alloc(&intrn_renderer->renderer_memory, font_sz, alignof(BOB_Font));
 
     //Assiging the capacity values
-    intrn_context->atlas_capacity = atlas_capacity;
-    intrn_context->pixelbuffer_capacity = pixelbuf_capacity;
-    intrn_context->texture_capacity = tex_capacity;
-    intrn_context->material_capacity = mat_capacity;
-    intrn_context->font_capacity = font_capacity;
+    intrn_renderer->atlas_capacity = atlas_capacity;
+    intrn_renderer->pixelbuffer_capacity = pixelbuf_capacity;
+    intrn_renderer->texture_capacity = tex_capacity;
+    intrn_renderer->material_capacity = mat_capacity;
+    intrn_renderer->font_capacity = font_capacity;
 
     //Setting the sizes to be 0
-    intrn_context->num_atlases = 0;
-    intrn_context->num_pixelbuffers = 0;
-    intrn_context->num_textures = 0;
-    intrn_context->num_materials = 0;
-    intrn_context->num_fonts = 0;
+    intrn_renderer->num_atlases = 0;
+    intrn_renderer->num_pixelbuffers = 0;
+    intrn_renderer->num_textures = 0;
+    intrn_renderer->num_materials = 0;
+    intrn_renderer->num_fonts = 0;
 
     //Setting the next free slot to point to the first one
-    intrn_context->next_atlas_slot = UINT32_MAX;
-    intrn_context->next_pixelbuf_slot = UINT32_MAX;
-    intrn_context->next_tex_slot = UINT32_MAX;
-    intrn_context->next_mat_slot = UINT32_MAX;
-    intrn_context->next_font_slot = UINT32_MAX;
+    intrn_renderer->next_atlas_slot = UINT32_MAX;
+    intrn_renderer->next_pixelbuf_slot = UINT32_MAX;
+    intrn_renderer->next_tex_slot = UINT32_MAX;
+    intrn_renderer->next_mat_slot = UINT32_MAX;
+    intrn_renderer->next_font_slot = UINT32_MAX;
 
     //Set it to null so that no strange errors from uninitialised pointers
-    intrn_context->mapped_mem_ptr = NULL;
+    intrn_renderer->mapped_mem_ptr = NULL;
 
-    intrn_context->type = type;
+    intrn_renderer->type = type;
 
-    *context = index;
+    size_t vert_buf_sz = vertex_capacity * sizeof(BOB_Render_Vertex);
+    size_t index_buf_sz = index_capacity * sizeof(uint32_t);
+
+    intrn_renderer->screen_height = height;
+    intrn_renderer->screen_width = width;
+
+    //Initialise the stack of clip rects
+    intrn_renderer->stack = malloc(sizeof(BOBi_Clip_Stack));
+    intrn_renderer->stack->elems = malloc(sizeof(BOBi_Clip_Rect) * INIT_STACK_CAPACITY);
+    intrn_renderer->stack->capacity = INIT_STACK_CAPACITY;
+    intrn_renderer->stack->size = 0;
+
+    BOB_init_arena(&intrn_renderer->batch.vertex_arena, (vert_buf_sz > index_buf_sz) ? vert_buf_sz : index_buf_sz); //Since this dual use need to take the max of the two
+    BOB_init_arena(&intrn_renderer->batch.vertex_arena_2, vert_buf_sz);
+    BOB_init_arena(&intrn_renderer->batch.draw_call_arena, draw_call_capacity * sizeof(BOBi_Draw_Call));
+    *renderer = index;
     return 1;
 }
 
@@ -3228,25 +3091,29 @@ size_t BOBi_triangulate_ec(BOB_Vector2 *poly_points, size_t poly_size, uint32_t 
     return triangle_count;
 }
 
-void BOBi_flush_draw_calls(BOB_Renderer *r) {
+void BOBi_flush_draw_calls(BOB_Renderer_Handle r) {
     BOB_renderer_end(r);
-    BOB_renderer_begin(r);
+    BOB_renderer_begin(r, NULL);
 }
 
-void BOBi_check_draw_capacity(BOB_Renderer *r, uint32_t num_vertices, uint32_t num_indices) {
+void BOBi_check_draw_capacity(BOB_Renderer_Handle renderer, uint32_t num_vertices, uint32_t num_indices) {
+    BOB_Renderer *r;
+    BOBi_get_renderer(renderer, &r);
     if(num_indices + r->batch.num_indices >= BOB_MAX_INDEX_CAPACITY ||
        num_vertices + r->batch.num_vertices >= BOB_MAX_VERTEX_CAPACITY ||
        r->batch.num_draw_calls + 1 >= BOB_MAX_DRAW_CALL_CAPACITY) {
-        BOBi_flush_draw_calls(r);
+        BOBi_flush_draw_calls(renderer);
         r->batch.num_draw_calls = 0;
         r->batch.num_indices = 0;
         r->batch.num_vertices = 0;
     }
 }
 
-void BOBi_create_draw_call(BOB_Renderer *r, BOB_Vector3 *vertices, size_t vertex_count, BOB_Vector2 *uv, size_t index_count, BOB_Vector4 colour, BOB_Texture_Handle tex, BOB_Material_Handle mat, uint8_t channel, BOBi_Draw_Type type) {
-    BOBi_check_draw_capacity(r, vertex_count, index_count);
+void BOBi_create_draw_call(BOB_Renderer_Handle renderer, BOB_Vector3 *vertices, size_t vertex_count, BOB_Vector2 *uv, size_t index_count, BOB_Vector4 colour, BOB_Texture_Handle tex, BOB_Material_Handle mat, uint8_t channel, BOBi_Draw_Type type) {
+    BOBi_check_draw_capacity(renderer, vertex_count, index_count);
 
+    BOB_Renderer *r;
+    BOBi_get_renderer(renderer, &r);
     BOBi_Draw_Call *dc = (BOBi_Draw_Call *)BOB_arena_alloc(&r->batch.draw_call_arena, sizeof(BOBi_Draw_Call), alignof(BOBi_Draw_Call));
     BOB_Render_Vertex *alloc_vertices = (BOB_Render_Vertex *)BOB_arena_alloc(&r->batch.vertex_arena, sizeof(BOB_Render_Vertex) * vertex_count, alignof(BOB_Render_Vertex));
     dc->num_indices = index_count;
@@ -3315,19 +3182,19 @@ void BOBi_rotate_polygon(BOB_Vector2 *poly_points, size_t poly_size, float rotat
     }
 }
 
-void BOBi_texture_free(BOB_Context *context, uint32_t index) {
-    context_functions[context->type].destroy_texture(context, index);
-    context->texture_table[index] = (BOB_Texture){0}; //Clear the data
+void BOBi_texture_free(BOB_Renderer *renderer, uint32_t index) {
+    renderer_functions[renderer->type].destroy_texture(renderer, index);
+    renderer->texture_table[index] = (BOB_Texture){0}; //Clear the data
 }
-void BOBi_pixelbuffer_free(BOB_Context *context, uint32_t index) {
-    context_functions[context->type].destroy_pixelbuffer(context, index);
-    BOB_texture_free(&context->pixelbuffer_table[index].pixel_tex);
-    context->pixelbuffer_table[index] = (BOB_PixelBuffer){0}; //Clear the data
+void BOBi_pixelbuffer_free(BOB_Renderer *renderer, uint32_t index) {
+    renderer_functions[renderer->type].destroy_pixelbuffer(renderer, index);
+    BOB_texture_free(&renderer->pixelbuffer_table[index].pixel_tex);
+    renderer->pixelbuffer_table[index] = (BOB_PixelBuffer){0}; //Clear the data
 }
-void BOBi_material_free(BOB_Context *context, uint32_t index) {
-    context_functions[context->type].destroy_material(context, index);
-    free(context->material_table[index].uniforms);
-    context->material_table[index] = (BOB_Material){0}; //Clear the data
+void BOBi_material_free(BOB_Renderer *renderer, uint32_t index) {
+    renderer_functions[renderer->type].destroy_material(renderer, index);
+    free(renderer->material_table[index].uniforms);
+    renderer->material_table[index] = (BOB_Material){0}; //Clear the data
 }
 
 #define BOBi_HASHMAP_DUMMY UINT64_MAX
@@ -3491,51 +3358,60 @@ void BOBi_hashmap_free(BOBi_Hashmap *h) {
     h->values = NULL;
 }
 
-void BOBi_font_free(BOB_Context *context, uint32_t index) {
-    if(context->font_table[index].glyphs) free(context->font_table[index].glyphs);
-    if(context->font_table[index].kernings) free(context->font_table[index].kernings);
-    if(context->font_table[index].glyph_map) {
-        BOBi_hashmap_free(context->font_table[index].glyph_map);
-        free(context->font_table[index].glyph_map);
+void BOBi_font_free(BOB_Renderer *renderer, uint32_t index) {
+    if(renderer->font_table[index].glyphs) free(renderer->font_table[index].glyphs);
+    if(renderer->font_table[index].kernings) free(renderer->font_table[index].kernings);
+    if(renderer->font_table[index].glyph_map) {
+        BOBi_hashmap_free(renderer->font_table[index].glyph_map);
+        free(renderer->font_table[index].glyph_map);
     }
-    if(context->font_table[index].kerning_map) {
-        BOBi_hashmap_free(context->font_table[index].kerning_map);
-        free(context->font_table[index].kerning_map);
+    if(renderer->font_table[index].kerning_map) {
+        BOBi_hashmap_free(renderer->font_table[index].kerning_map);
+        free(renderer->font_table[index].kerning_map);
     }
-    context->font_table[index] = (BOB_Font){0}; //Clear the data
+    renderer->font_table[index] = (BOB_Font){0}; //Clear the data
 }
 
-void BOBi_destroy_context(uint32_t index) {
-    BOB_Context *context = &bob_state.contexts[index];
+void BOBi_destroy_renderer(uint32_t index) {
+    BOB_Renderer *renderer = &bob_state.renderers[index];
 
     //Free all of the object memory
-    for(size_t i = 0; i < context->texture_capacity; i++) {
-        if(context->texture_table[i].init)
-            BOBi_texture_free(context, i);
+    for(size_t i = 0; i < renderer->texture_capacity; i++) {
+        if(renderer->texture_table[i].init)
+            BOBi_texture_free(renderer, i);
     }
-    for(size_t i = 0; i < context->material_capacity; i++) {
-        if(context->material_table[i].init)
-            BOBi_material_free(context, i);
+    for(size_t i = 0; i < renderer->material_capacity; i++) {
+        if(renderer->material_table[i].init)
+            BOBi_material_free(renderer, i);
     }
-    for(size_t i = 0; i < context->pixelbuffer_capacity; i++) {
-        if(context->pixelbuffer_table[i].init)
-            BOBi_pixelbuffer_free(context, i);
+    for(size_t i = 0; i < renderer->pixelbuffer_capacity; i++) {
+        if(renderer->pixelbuffer_table[i].init)
+            BOBi_pixelbuffer_free(renderer, i);
     }
-    for(size_t i = 0; i < context->font_capacity; i++) {
-        if(context->font_table[i].init)
-            BOBi_font_free(context, i);
+    for(size_t i = 0; i < renderer->font_capacity; i++) {
+        if(renderer->font_table[i].init)
+            BOBi_font_free(renderer, i);
     }
-    BOB_destroy_arena(&context->context_memory);
-    context_functions[context->type].destroy_context(context);
+    BOB_destroy_arena(&renderer->renderer_memory);
 
-    *context = (BOB_Context){0}; //Clear all of the data
+    free(renderer->stack->elems);
+    renderer->stack->elems = NULL;
+    free(renderer->stack);
+    renderer->stack = NULL;
+
+    BOB_destroy_arena(&renderer->batch.vertex_arena);
+    BOB_destroy_arena(&renderer->batch.vertex_arena_2);
+    BOB_destroy_arena(&renderer->batch.draw_call_arena);
+
+    renderer_functions[renderer->type].destroy_renderer(renderer);
+    *renderer = (BOB_Renderer){0}; //Clear all of the data
 }
 
-void BOB_destroy_context(BOB_Context_Handle *context) {
-    if(*(context) & BOBi_MSB) return; //DO not work with already invalid handles
-    BOBi_destroy_context(*context);
-    if(*(context) < bob_state.next_context_slot) bob_state.next_context_slot = *(context);
-    *(context) |= *(context) & (~BOBi_MSB); //Set the MSB to indicate this is an invalid handle
+void BOB_destroy_renderer(BOB_Renderer_Handle *renderer) {
+    if(*(renderer) & BOBi_MSB) return; //DO not work with already invalid handles
+    BOBi_destroy_renderer(*renderer);
+    if(*(renderer) < bob_state.next_renderer_slot) bob_state.next_renderer_slot = *(renderer);
+    *(renderer) |= *(renderer) & (~BOBi_MSB); //Set the MSB to indicate this is an invalid handle
 }
 
 // ==================================== MISCELLANEOUS FUNCTIONS ========================================
@@ -3585,18 +3461,6 @@ void BOB_ortho_vk(float left, float right, float bottom, float top, float nearZ,
     dest->m[3][3] = 1.0f;
 }
 
-void BOB_begin_frame(BOB_Context_Handle handle, BOB_Vector4 colour) {
-    BOB_Context *context;
-    BOBi_get_context_from_handle(handle, &context);
-    context_functions[context->type].begin_frame(context, colour);
-}
-
-void BOB_end_frame(BOB_Context_Handle handle) {
-    BOB_Context *context;
-    BOBi_get_context_from_handle(handle, &context);
-    context_functions[context->type].end_frame(context);
-}
-
 //Converts an angle in degrees to radians
 float BOB_degrees_to_radians(float angle) {
     return angle * (M_PI / 180);
@@ -3606,7 +3470,7 @@ float BOB_degrees_to_radians(float angle) {
 
 #ifdef BOB_INCLUDE_GLAD
 #ifdef BOB_INCLUDE_VULKAN
-uint8_t BOB_init(GLADloadproc proc, const char **required_extensions, size_t num_extensions, size_t num_contexts, size_t num_renderers) {
+uint8_t BOB_init(GLADloadproc proc, const char **required_extensions, size_t num_extensions, size_t num_renderers) {
     //Loading GLAD
     if(!gladLoadGLLoader(proc)) {
         printf("Failed to initialise GLAD");
@@ -3616,7 +3480,7 @@ uint8_t BOB_init(GLADloadproc proc, const char **required_extensions, size_t num
     //Loading Vulkan:
     if(!BOBi_vk_init_vulkan(required_extensions, num_extensions)) return 0;
 #else
-uint8_t BOB_init(GLADloadproc proc, size_t num_contexts, size_t num_renderers) {
+uint8_t BOB_init(GLADloadproc proc, size_t num_renderers) {
     //Loading GLAD
     if(!gladLoadGLLoader(proc)) {
         printf("Failed to initialise GLAD");
@@ -3624,84 +3488,37 @@ uint8_t BOB_init(GLADloadproc proc, size_t num_contexts, size_t num_renderers) {
     }
 #endif //BOB_INCLUDE_VULKAN
 #else
-uint8_t BOB_init(const char **required_extensions, size_t num_extensions, size_t num_contexts, size_t num_renderers) {
+uint8_t BOB_init(const char **required_extensions, size_t num_extensions, size_t num_renderers) {
     //Loading Vulkan:
     if(!BOBi_vk_init_vulkan(required_extensions, num_extensions)) return 0;
 #endif //BOB_INCLUDE_GLAD
-    bob_state.contexts = malloc(sizeof(BOB_Context) * num_contexts);
-    memset(bob_state.contexts, 0, sizeof(BOB_Context) * num_contexts);
-    bob_state.context_count = 0;
-    bob_state.next_context_slot = UINT32_MAX;
-    bob_state.context_capcity = num_contexts;
+    bob_state.renderers = malloc(sizeof(BOB_Renderer) * num_renderers);
+    memset(bob_state.renderers, 0, sizeof(BOB_Renderer) * num_renderers);
+    bob_state.renderer_count = 0;
+    bob_state.next_renderer_slot = UINT32_MAX;
+    bob_state.renderer_capcity = num_renderers;
 
     return 1;
 }
 
 void BOB_terminate() {
-    for(size_t i = 0; i < bob_state.context_capcity; i++) {
-        if(bob_state.contexts[i].context_memory.memory != NULL) {
-            BOBi_destroy_context(i);
+    for(size_t i = 0; i < bob_state.renderer_capcity; i++) {
+        if(bob_state.renderers[i].renderer_memory.memory != NULL) {
+            BOBi_destroy_renderer(i);
         }
     }
 
-    free(bob_state.contexts);
+    free(bob_state.renderers);
     bob_state = (BOBi_Internal_State){0};
 }
 
-
 //========================================================== RENDERER FUNCTIONS ===========================================
 
-//Initialises the pixel renderer
-uint8_t BOB_renderer_init(BOB_Context_Handle context, size_t width, size_t height, size_t vertex_capacity, size_t index_capacity, size_t draw_call_capacity, BOB_Renderer *out) {
-    if(context & BOBi_MSB) return 0;
-
-    BOB_Context *intrn_context;
-    if(!BOBi_get_context_from_handle(context, &intrn_context)) return 0;
-
-    size_t vert_buf_sz = vertex_capacity * sizeof(BOB_Render_Vertex);
-    size_t index_buf_sz = index_capacity * sizeof(uint32_t);
-
-    out->screen_height = height;
-    out->screen_width = width;
-
-    context_functions[intrn_context->type].init_renderer(intrn_context, out, vert_buf_sz, index_buf_sz);
-
-    //Creating the default material
-    if(!context_functions[intrn_context->type].create_default_mat(context, out)) return 0;
-
-    //Initialise the stack of clip rects
-    out->stack = malloc(sizeof(BOBi_Clip_Stack));
-    out->stack->elems = malloc(sizeof(BOBi_Clip_Rect) * INIT_STACK_CAPACITY);
-    out->stack->capacity = INIT_STACK_CAPACITY;
-    out->stack->size = 0;
-    out->context = context;
-
-    BOB_init_arena(&out->batch.vertex_arena, (vert_buf_sz > index_buf_sz) ? vert_buf_sz : index_buf_sz); //Since this dual use need to take the max of the two
-    BOB_init_arena(&out->batch.vertex_arena_2, vert_buf_sz);
-    BOB_init_arena(&out->batch.draw_call_arena, draw_call_capacity * sizeof(BOBi_Draw_Call));
-
-    return 1;
-}
-
-//Frees a pixel renderer
-void BOB_renderer_free(BOB_Renderer *r) {
-    BOB_Context *intrn_context;
-    if(BOBi_get_context(r->context, &intrn_context)) return;
-
-    context_functions[intrn_context->type].destroy_renderer(intrn_context, r);
-
-    free(r->stack->elems);
-    r->stack->elems = NULL;
-    free(r->stack);
-    r->stack = NULL;
-
-    BOB_destroy_arena(&r->batch.vertex_arena);
-    BOB_destroy_arena(&r->batch.vertex_arena_2);
-    BOB_destroy_arena(&r->batch.draw_call_arena);
-}
-
 //Sets up the variables for renderering to the pbo from the BOB_Renderer
-void BOB_renderer_begin(BOB_Renderer *r) {
+void BOB_renderer_begin(BOB_Renderer_Handle renderer, float colour[4]) {
+    BOB_Renderer *r;
+    if(!BOBi_get_renderer(renderer, &r)) return;
+
     BOB_arena_clear(&r->batch.vertex_arena);
     BOB_arena_clear(&r->batch.vertex_arena_2);
     BOB_arena_clear(&r->batch.draw_call_arena);
@@ -3712,7 +3529,11 @@ void BOB_renderer_begin(BOB_Renderer *r) {
 }
 
 //Ends rendering to the current pixel frame
-void BOB_renderer_end(BOB_Renderer *r) {
+void BOB_renderer_end(BOB_Renderer_Handle renderer) {
+    //TODO: THIS SHOULD THROW A MASSIVE ERROR
+    BOB_Renderer *r;
+    if(!BOBi_get_renderer(renderer, &r)) return;
+
     //Sort the draw calls
     BOBi_quicksort_draw_calls(r, 0, r->batch.num_draw_calls-1);
 
@@ -3813,22 +3634,20 @@ void BOB_renderer_end(BOB_Renderer *r) {
 
     r->batch.num_draw_calls = num_unique_calls;
 
-    //TODO: THIS SHOULD THROW A MASSIVE ERROR
-    BOB_Context *context = &bob_state.contexts[r->context];
-    if(context->context_memory.memory == NULL) return;
-
-    context_functions[context->type].draw(context, r);
+    renderer_functions[r->type].draw(r, NULL);
 }
 
 //Updates the dimensions of the screen that the renderer renders to.
 //Updates projection matrix
 //NOTE: Not 100% sure that this works
-void BOB_renderer_update_dimensions(BOB_Renderer *r, uint32_t width, uint32_t height) {
-    BOB_Context *context;
-    if(!BOBi_get_context(r->context, &context)) return;
+void BOB_renderer_update_dimensions(BOB_Renderer_Handle renderer, uint32_t width, uint32_t height, uint32_t width_px, uint32_t height_px) {
+    BOB_Renderer *r;
+    if(!BOBi_get_renderer(renderer, &r)) return;
 
     r->screen_width = width;
     r->screen_height = height;
+    r->screen_width_px = width_px;
+    r->screen_height_px = height_px;
 
     //Update the uv coordinates of the texture the renderer is rendering to
     float quadVertices[] = {
@@ -3838,74 +3657,74 @@ void BOB_renderer_update_dimensions(BOB_Renderer *r, uint32_t width, uint32_t he
         width, 0.0f,         1.0f, 0.0f
     };
 
-    context_functions->update_rend_dim(context, r, quadVertices, sizeof(quadVertices));
+    renderer_functions->update_rend_dim(r, quadVertices, sizeof(quadVertices));
 }
 
 //================================================== TEXTURE FUNCTIONS ================================================
 
 //Creates a new texture on the gpu
-uint8_t BOB_create_texture(BOB_Context_Handle context, uint32_t width, uint32_t height, uint8_t *data, BOB_Format format, BOB_Texture_Handle *tex) {
-    BOB_Context *intrn_context;
-    if(!BOBi_get_context(context, &intrn_context)) return 0;
+uint8_t BOB_create_texture(BOB_Renderer_Handle renderer, uint32_t width, uint32_t height, uint8_t *data, BOB_Format format, BOB_Texture_Handle *tex) {
+    BOB_Renderer *intrn_renderer;
+    if(!BOBi_get_renderer(renderer, &intrn_renderer)) return 0;
 
-    if(intrn_context->num_textures >= intrn_context->texture_capacity) {
+    if(intrn_renderer->num_textures >= intrn_renderer->texture_capacity) {
         printf("ERROR: Exceeded Texture Capacity");
         *tex |= BOBi_MSB;
         return 0;
     }
 
     uint32_t index;
-    if (intrn_context->next_tex_slot == UINT32_MAX) {
-        index = intrn_context->num_textures;
+    if (intrn_renderer->next_tex_slot == UINT32_MAX) {
+        index = intrn_renderer->num_textures;
     }
     else {
-        index = intrn_context->next_tex_slot;
+        index = intrn_renderer->next_tex_slot;
 
         //Linearly searching to find the next empty slot. Yes I know that this is slow
-        for (intrn_context->next_tex_slot = index + 1; intrn_context->next_tex_slot < intrn_context->num_textures; intrn_context->next_tex_slot++) {
-            if (!intrn_context->texture_table[intrn_context->next_tex_slot].init)
+        for (intrn_renderer->next_tex_slot = index + 1; intrn_renderer->next_tex_slot < intrn_renderer->num_textures; intrn_renderer->next_tex_slot++) {
+            if (!intrn_renderer->texture_table[intrn_renderer->next_tex_slot].init)
                 break;
         }
 
-        if (intrn_context->next_tex_slot >= intrn_context->num_textures)
-            intrn_context->next_tex_slot = UINT32_MAX;
+        if (intrn_renderer->next_tex_slot >= intrn_renderer->num_textures)
+            intrn_renderer->next_tex_slot = UINT32_MAX;
     }
 
-    if(!context_functions[intrn_context->type].create_texture(intrn_context, index, width, height, data, format)) {
+    if(!renderer_functions[intrn_renderer->type].create_texture(intrn_renderer, index, width, height, data, format)) {
         *tex |= BOBi_MSB;
         return 0;
     }
 
-    intrn_context->texture_table[index].init = 1; //Setting the value to be initialised
-    intrn_context->texture_table[index].width = width;
-    intrn_context->texture_table[index].height = height;
-    intrn_context->texture_table[index].format = format;
+    intrn_renderer->texture_table[index].init = 1; //Setting the value to be initialised
+    intrn_renderer->texture_table[index].width = width;
+    intrn_renderer->texture_table[index].height = height;
+    intrn_renderer->texture_table[index].format = format;
 
-    intrn_context->num_textures++;
-    *tex = ((uint64_t)context << 32) | index;
+    intrn_renderer->num_textures++;
+    *tex = ((uint64_t)renderer << 32) | index;
     return 1;
 }
 
 void BOB_texture_free(BOB_Texture_Handle *tex) {
     if(*(tex) & BOBi_MSB) return; //Do not work with already invalid handles
 
-    BOB_Context *context;
+    BOB_Renderer *renderer;
     uint32_t index;
-    if(!BOBi_get_handle_data(*tex, &context, &index)) return;
-    if(index < context->next_tex_slot) context->next_tex_slot = index;
+    if(!BOBi_get_handle_data(*tex, &renderer, &index)) return;
+    if(index < renderer->next_tex_slot) renderer->next_tex_slot = index;
     *(tex) |= BOBi_MSB; //Setting the MSB to indicate this is an invalid handle
 
-    BOBi_texture_free(context, index);
+    BOBi_texture_free(renderer, index);
 }
 
 BOB_Texture *BOB_get_tex_ref(BOB_Texture_Handle tex) {
     if(tex & BOBi_MSB) return NULL; //Do not work with already invalid handles
 
-    BOB_Context *context;
+    BOB_Renderer *renderer;
     uint32_t index;
-    if(!BOBi_get_handle_data(tex, &context, &index)) return NULL;
+    if(!BOBi_get_handle_data(tex, &renderer, &index)) return NULL;
 
-    return &context->texture_table[index];
+    return &renderer->texture_table[index];
 }
 
 //====================================== MATERIAL FUNCTIONS ======================================
@@ -3913,11 +3732,11 @@ BOB_Texture *BOB_get_tex_ref(BOB_Texture_Handle tex) {
 uint8_t get_uniform(BOB_Material_Handle mat, char *name, BOB_Uniform_Handle *uniform) {
     if(*uniform & BOBi_MSB) return 0;
 
-    BOB_Context *context;
+    BOB_Renderer *renderer;
     uint32_t index;
-    if(!BOBi_get_handle_data(mat, &context, &index)) return 0;
+    if(!BOBi_get_handle_data(mat, &renderer, &index)) return 0;
 
-    BOB_Material m = context->material_table[index];
+    BOB_Material m = renderer->material_table[index];
     for(size_t i = 0; i < m.uniform_count; i++) {
         if(!strcmp(name, m.uniforms[i].name)){
             *uniform = i;
@@ -3929,30 +3748,30 @@ uint8_t get_uniform(BOB_Material_Handle mat, char *name, BOB_Uniform_Handle *uni
     return 0;
 }
 
-uint8_t BOB_create_material(BOB_Context_Handle context, BOB_Shader_Data *data, size_t num_shaders, BOB_Uniform *uniforms, size_t num_uniforms, BOB_Material_Handle *mat) {
-    BOB_Context *intrn_context;
-    if(!BOBi_get_context(context, &intrn_context)) return 0;
+uint8_t BOB_create_material(BOB_Renderer_Handle renderer, BOB_Shader_Data *data, size_t num_shaders, BOB_Uniform *uniforms, size_t num_uniforms, BOB_Material_Handle *mat) {
+    BOB_Renderer *intrn_renderer;
+    if(!BOBi_get_renderer(renderer, &intrn_renderer)) return 0;
 
-    if(intrn_context->num_materials >= intrn_context->material_capacity) {
+    if(intrn_renderer->num_materials >= intrn_renderer->material_capacity) {
         printf("ERROR: Exceeded Material Capacity\n");
         *mat |= BOBi_MSB;
         return 0;
     }
 
     uint32_t index;
-    if (intrn_context->next_mat_slot == UINT32_MAX) {
-        index = intrn_context->num_materials;
+    if (intrn_renderer->next_mat_slot == UINT32_MAX) {
+        index = intrn_renderer->num_materials;
     }
     else {
-        index = intrn_context->next_mat_slot;
+        index = intrn_renderer->next_mat_slot;
 
-        for (intrn_context->next_mat_slot = index + 1; intrn_context->next_mat_slot < intrn_context->num_materials; intrn_context->next_mat_slot++) {
-            if (!intrn_context->material_table[intrn_context->next_mat_slot].init)
+        for (intrn_renderer->next_mat_slot = index + 1; intrn_renderer->next_mat_slot < intrn_renderer->num_materials; intrn_renderer->next_mat_slot++) {
+            if (!intrn_renderer->material_table[intrn_renderer->next_mat_slot].init)
                 break;
         }
 
-        if (intrn_context->next_mat_slot >= intrn_context->num_materials)
-            intrn_context->next_mat_slot = UINT32_MAX;
+        if (intrn_renderer->next_mat_slot >= intrn_renderer->num_materials)
+            intrn_renderer->next_mat_slot = UINT32_MAX;
     }
 
     //TODO: Make an arena for this. Currently need to do this since cannot have references to stack memory in heap memory
@@ -3960,221 +3779,221 @@ uint8_t BOB_create_material(BOB_Context_Handle context, BOB_Shader_Data *data, s
     BOB_Uniform *temp = malloc(sizeof(BOB_Uniform) * num_uniforms);
     memcpy(temp, uniforms, num_uniforms * sizeof(BOB_Uniform));
 
-    intrn_context->material_table[index] = (BOB_Material){.uniforms = temp, .uniform_count = num_uniforms};
+    intrn_renderer->material_table[index] = (BOB_Material){.uniforms = temp, .uniform_count = num_uniforms};
 
-    if(!context_functions[intrn_context->type].create_material(intrn_context, index, data, num_shaders)) {
+    if(!renderer_functions[intrn_renderer->type].create_material(intrn_renderer, index, data, num_shaders)) {
         *mat |= BOBi_MSB;
-        intrn_context->material_table[index].init = 0;
-        free(intrn_context->material_table[index].uniforms); //TODO: Change this to be arena based
+        intrn_renderer->material_table[index].init = 0;
+        free(intrn_renderer->material_table[index].uniforms); //TODO: Change this to be arena based
         return 0;
     }
 
-    intrn_context->material_table[index].init = 1;
+    intrn_renderer->material_table[index].init = 1;
 
-    intrn_context->num_materials++;
-    *mat = ((uint64_t)context << 32) | index;
+    intrn_renderer->num_materials++;
+    *mat = ((uint64_t)renderer << 32) | index;
     return 1;
 }
 
 void BOB_material_free(BOB_Material_Handle *mat) {
     if(*(mat) & BOBi_MSB) return; //Do not work with already invalid handles
-    BOB_Context *context;
+    BOB_Renderer *renderer;
     uint32_t index;
-    BOBi_get_handle_data(*mat, &context, &index);
-    if(index < context->next_mat_slot) context->next_mat_slot = index;
+    BOBi_get_handle_data(*mat, &renderer, &index);
+    if(index < renderer->next_mat_slot) renderer->next_mat_slot = index;
     *(mat) |= BOBi_MSB; //Setting the MSB to indicate this is an invalid handle
 
-    BOBi_material_free(context, index);
+    BOBi_material_free(renderer, index);
 }
 
 BOB_Material *BOB_get_mat_ref(BOB_Material_Handle mat) {
     if(mat & BOBi_MSB) return NULL; //Do not work with already invalid handles
-    BOB_Context *context;
+    BOB_Renderer *renderer;
     uint32_t index;
-    if(!BOBi_get_handle_data(mat, &context, &index)) return NULL;
+    if(!BOBi_get_handle_data(mat, &renderer, &index)) return NULL;
 
-    return &context->material_table[index];
+    return &renderer->material_table[index];
 }
 
 uint8_t BOB_set_material_float(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, float value) {
     if(mat & BOBi_MSB || uniform & BOBi_MSB) return 0; //Do not work with already invalid handles
 
-    BOB_Context *context;
+    BOB_Renderer *renderer;
     uint32_t index;
-    if(!BOBi_get_handle_data(mat, &context, &index)) return 0;
+    if(!BOBi_get_handle_data(mat, &renderer, &index)) return 0;
 
-    if(context->material_table[index].uniforms[uniform].type == BOB_UNIFORM_FLOAT) {
-        context->material_table[index].uniforms[uniform].f = value;
-        context->material_table[index].uniforms[uniform].is_reference = 0;
+    if(renderer->material_table[index].uniforms[uniform].type == BOB_UNIFORM_FLOAT) {
+        renderer->material_table[index].uniforms[uniform].f = value;
+        renderer->material_table[index].uniforms[uniform].is_reference = 0;
     }
     return 1;
 }
 uint8_t BOB_set_material_unsigned_int(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, uint32_t value) {
     if(mat & BOBi_MSB || uniform & BOBi_MSB) return 0; //Do not work with already invalid handles
 
-    BOB_Context *context;
+    BOB_Renderer *renderer;
     uint32_t index;
-    if(!BOBi_get_handle_data(mat, &context, &index)) return 0;
+    if(!BOBi_get_handle_data(mat, &renderer, &index)) return 0;
 
-    if(context->material_table[index].uniforms[uniform].type == BOB_UNIFORM_UNSIGNED_INT) {
-        context->material_table[index].uniforms[uniform].u32 = value;
-        context->material_table[index].uniforms[uniform].is_reference = 0;
+    if(renderer->material_table[index].uniforms[uniform].type == BOB_UNIFORM_UNSIGNED_INT) {
+        renderer->material_table[index].uniforms[uniform].u32 = value;
+        renderer->material_table[index].uniforms[uniform].is_reference = 0;
     }
     return 1;
 }
 uint8_t BOB_set_material_signed_int(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, int32_t value) {
     if(mat & BOBi_MSB || uniform & BOBi_MSB) return 0; //Do not work with already invalid handles
 
-    BOB_Context *context;
+    BOB_Renderer *renderer;
     uint32_t index;
-    if(!BOBi_get_handle_data(mat, &context, &index)) return 0;
+    if(!BOBi_get_handle_data(mat, &renderer, &index)) return 0;
 
-    if(context->material_table[index].uniforms[uniform].type == BOB_UNIFORM_SIGNED_INT) {
-        context->material_table[index].uniforms[uniform].i32 = value;
-        context->material_table[index].uniforms[uniform].is_reference = 0;
+    if(renderer->material_table[index].uniforms[uniform].type == BOB_UNIFORM_SIGNED_INT) {
+        renderer->material_table[index].uniforms[uniform].i32 = value;
+        renderer->material_table[index].uniforms[uniform].is_reference = 0;
     }
     return 1;
 }
 uint8_t BOB_set_material_vector2(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, BOB_Vector2 value) {
     if(mat & BOBi_MSB || uniform & BOBi_MSB) return 0; //Do not work with already invalid handles
 
-    BOB_Context *context;
+    BOB_Renderer *renderer;
     uint32_t index;
-    if(!BOBi_get_handle_data(mat, &context, &index)) return 0;
+    if(!BOBi_get_handle_data(mat, &renderer, &index)) return 0;
 
-    if(context->material_table[index].uniforms[uniform].type == BOB_UNIFORM_VEC2) {
-        context->material_table[index].uniforms[uniform].vec2 = value;
-        context->material_table[index].uniforms[uniform].is_reference = 0;
+    if(renderer->material_table[index].uniforms[uniform].type == BOB_UNIFORM_VEC2) {
+        renderer->material_table[index].uniforms[uniform].vec2 = value;
+        renderer->material_table[index].uniforms[uniform].is_reference = 0;
     }
     return 1;
 }
 uint8_t BOB_set_material_vector3(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, BOB_Vector3 value) {
     if(mat & BOBi_MSB || uniform & BOBi_MSB) return 0; //Do not work with already invalid handles
 
-    BOB_Context *context;
+    BOB_Renderer *renderer;
     uint32_t index;
-    if(!BOBi_get_handle_data(mat, &context, &index)) return 0;
+    if(!BOBi_get_handle_data(mat, &renderer, &index)) return 0;
 
-    if(context->material_table[index].uniforms[uniform].type == BOB_UNIFORM_VEC3) {
-        context->material_table[index].uniforms[uniform].vec3 = value;
-        context->material_table[index].uniforms[uniform].is_reference = 0;
+    if(renderer->material_table[index].uniforms[uniform].type == BOB_UNIFORM_VEC3) {
+        renderer->material_table[index].uniforms[uniform].vec3 = value;
+        renderer->material_table[index].uniforms[uniform].is_reference = 0;
     }
     return 1;
 }
 uint8_t BOB_set_material_vector4(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, BOB_Vector4 value) {
     if(mat & BOBi_MSB || uniform & BOBi_MSB) return 0; //Do not work with already invalid handles
 
-    BOB_Context *context;
+    BOB_Renderer *renderer;
     uint32_t index;
-    if(!BOBi_get_handle_data(mat, &context, &index)) return 0;
+    if(!BOBi_get_handle_data(mat, &renderer, &index)) return 0;
 
-    if(context->material_table[index].uniforms[uniform].type == BOB_UNIFORM_VEC4) {
-        context->material_table[index].uniforms[uniform].vec4 = value;
-        context->material_table[index].uniforms[uniform].is_reference = 0;
+    if(renderer->material_table[index].uniforms[uniform].type == BOB_UNIFORM_VEC4) {
+        renderer->material_table[index].uniforms[uniform].vec4 = value;
+        renderer->material_table[index].uniforms[uniform].is_reference = 0;
     }
     return 1;
 }
 uint8_t BOB_set_material_mat4(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, BOB_Mat4 value) {
     if(mat & BOBi_MSB || uniform & BOBi_MSB) return 0; //Do not work with already invalid handles
 
-    BOB_Context *context;
+    BOB_Renderer *renderer;
     uint32_t index;
-    if(!BOBi_get_handle_data(mat, &context, &index)) return 0;
+    if(!BOBi_get_handle_data(mat, &renderer, &index)) return 0;
 
-    if(context->material_table[index].uniforms[uniform].type == BOB_UNIFORM_MAT4) {
-        context->material_table[index].uniforms[uniform].mat4 = value;
-        context->material_table[index].uniforms[uniform].is_reference = 0;
+    if(renderer->material_table[index].uniforms[uniform].type == BOB_UNIFORM_MAT4) {
+        renderer->material_table[index].uniforms[uniform].mat4 = value;
+        renderer->material_table[index].uniforms[uniform].is_reference = 0;
     }
     return 1;
 }
 uint8_t BOB_set_material_float_ref(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, float *value) {
     if(mat & BOBi_MSB || uniform & BOBi_MSB) return 0; //Do not work with already invalid handles
 
-    BOB_Context *context;
+    BOB_Renderer *renderer;
     uint32_t index;
-    if(!BOBi_get_handle_data(mat, &context, &index)) return 0;
+    if(!BOBi_get_handle_data(mat, &renderer, &index)) return 0;
 
-    if(context->material_table[index].uniforms[uniform].type == BOB_UNIFORM_FLOAT) {
-        context->material_table[index].uniforms[uniform].ptr = value;
-        context->material_table[index].uniforms[uniform].is_reference = 1;
+    if(renderer->material_table[index].uniforms[uniform].type == BOB_UNIFORM_FLOAT) {
+        renderer->material_table[index].uniforms[uniform].ptr = value;
+        renderer->material_table[index].uniforms[uniform].is_reference = 1;
     }
     return 1;
 }
 uint8_t BOB_set_material_unsigned_int_ref(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, uint32_t *value) {
     if(mat & BOBi_MSB || uniform & BOBi_MSB) return 0; //Do not work with already invalid handles
 
-    BOB_Context *context;
+    BOB_Renderer *renderer;
     uint32_t index;
-    if(!BOBi_get_handle_data(mat, &context, &index)) return 0;
+    if(!BOBi_get_handle_data(mat, &renderer, &index)) return 0;
 
-    if(context->material_table[index].uniforms[uniform].type == BOB_UNIFORM_UNSIGNED_INT) {
-        context->material_table[index].uniforms[uniform].ptr = value;
-        context->material_table[index].uniforms[uniform].is_reference = 1;
+    if(renderer->material_table[index].uniforms[uniform].type == BOB_UNIFORM_UNSIGNED_INT) {
+        renderer->material_table[index].uniforms[uniform].ptr = value;
+        renderer->material_table[index].uniforms[uniform].is_reference = 1;
     }
     return 1;
 }
 uint8_t BOB_set_material_signed_int_ref(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, int32_t *value) {
     if(mat & BOBi_MSB || uniform & BOBi_MSB) return 0; //Do not work with already invalid handles
 
-    BOB_Context *context;
+    BOB_Renderer *renderer;
     uint32_t index;
-    if(!BOBi_get_handle_data(mat, &context, &index)) return 0;
+    if(!BOBi_get_handle_data(mat, &renderer, &index)) return 0;
 
-    if(context->material_table[index].uniforms[uniform].type == BOB_UNIFORM_SIGNED_INT) {
-        context->material_table[index].uniforms[uniform].ptr = value;
-        context->material_table[index].uniforms[uniform].is_reference = 1;
+    if(renderer->material_table[index].uniforms[uniform].type == BOB_UNIFORM_SIGNED_INT) {
+        renderer->material_table[index].uniforms[uniform].ptr = value;
+        renderer->material_table[index].uniforms[uniform].is_reference = 1;
     }
     return 1;
 }
 uint8_t BOB_set_material_vector2_ref(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, BOB_Vector2 *value) {
     if(mat & BOBi_MSB || uniform & BOBi_MSB) return 0; //Do not work with already invalid handles
 
-    BOB_Context *context;
+    BOB_Renderer *renderer;
     uint32_t index;
-    if(!BOBi_get_handle_data(mat, &context, &index)) return 0;
+    if(!BOBi_get_handle_data(mat, &renderer, &index)) return 0;
 
-    if(context->material_table[index].uniforms[uniform].type == BOB_UNIFORM_VEC2) {
-        context->material_table[index].uniforms[uniform].ptr = value;
-        context->material_table[index].uniforms[uniform].is_reference = 1;
+    if(renderer->material_table[index].uniforms[uniform].type == BOB_UNIFORM_VEC2) {
+        renderer->material_table[index].uniforms[uniform].ptr = value;
+        renderer->material_table[index].uniforms[uniform].is_reference = 1;
     }
     return 1;
 }
 uint8_t BOB_set_material_vector3_ref(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, BOB_Vector3 *value) {
     if(mat & BOBi_MSB || uniform & BOBi_MSB) return 0; //Do not work with already invalid handles
 
-    BOB_Context *context;
+    BOB_Renderer *renderer;
     uint32_t index;
-    if(!BOBi_get_handle_data(mat, &context, &index)) return 0;
+    if(!BOBi_get_handle_data(mat, &renderer, &index)) return 0;
 
-    if(context->material_table[index].uniforms[uniform].type == BOB_UNIFORM_VEC3) {
-        context->material_table[index].uniforms[uniform].ptr = value;
-        context->material_table[index].uniforms[uniform].is_reference = 1;
+    if(renderer->material_table[index].uniforms[uniform].type == BOB_UNIFORM_VEC3) {
+        renderer->material_table[index].uniforms[uniform].ptr = value;
+        renderer->material_table[index].uniforms[uniform].is_reference = 1;
     }
     return 1;
 }
 uint8_t BOB_set_material_vector4_ref(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, BOB_Vector4 *value) {
     if(mat & BOBi_MSB || uniform & BOBi_MSB) return 0; //Do not work with already invalid handles
 
-    BOB_Context *context;
+    BOB_Renderer *renderer;
     uint32_t index;
-    if(!BOBi_get_handle_data(mat, &context, &index)) return 0;
+    if(!BOBi_get_handle_data(mat, &renderer, &index)) return 0;
 
-    if(context->material_table[index].uniforms[uniform].type == BOB_UNIFORM_VEC4) {
-        context->material_table[index].uniforms[uniform].ptr = value;
-        context->material_table[index].uniforms[uniform].is_reference = 1;
+    if(renderer->material_table[index].uniforms[uniform].type == BOB_UNIFORM_VEC4) {
+        renderer->material_table[index].uniforms[uniform].ptr = value;
+        renderer->material_table[index].uniforms[uniform].is_reference = 1;
     }
     return 1;
 }
 uint8_t BOB_set_material_mat4_ref(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, BOB_Mat4 *value) {
     if(mat & BOBi_MSB || uniform & BOBi_MSB) return 0; //Do not work with already invalid handles
 
-    BOB_Context *context;
+    BOB_Renderer *renderer;
     uint32_t index;
-    if(!BOBi_get_handle_data(mat, &context, &index)) return 0;
+    if(!BOBi_get_handle_data(mat, &renderer, &index)) return 0;
 
-    if(context->material_table[index].uniforms[uniform].type == BOB_UNIFORM_MAT4) {
-        context->material_table[index].uniforms[uniform].ptr = value;
-        context->material_table[index].uniforms[uniform].is_reference = 1;
+    if(renderer->material_table[index].uniforms[uniform].type == BOB_UNIFORM_MAT4) {
+        renderer->material_table[index].uniforms[uniform].ptr = value;
+        renderer->material_table[index].uniforms[uniform].is_reference = 1;
     }
     return 1;
 }
@@ -4182,108 +4001,108 @@ uint8_t BOB_set_material_mat4_ref(BOB_Material_Handle mat, BOB_Uniform_Handle un
 //================================================== TEXTURE ATLAS FUNCTIONS ========================================
 
 //Initialises a texture atlas
-uint8_t BOB_atlas_init(BOB_Context_Handle context, uint32_t width, uint32_t height, BOB_Format format, BOB_Atlas_Handle *a) {
-    BOB_Context *intrn_context;
-    if(!BOBi_get_context(context, &intrn_context)) return 0;
+uint8_t BOB_atlas_init(BOB_Renderer_Handle renderer, uint32_t width, uint32_t height, BOB_Format format, BOB_Atlas_Handle *a) {
+    BOB_Renderer *intrn_renderer;
+    if(!BOBi_get_renderer(renderer, &intrn_renderer)) return 0;
 
-    if(intrn_context->num_atlases >= intrn_context->atlas_capacity) {
+    if(intrn_renderer->num_atlases >= intrn_renderer->atlas_capacity) {
         printf("ERROR: Exceeded Atlas Capacity");
         *a |= BOBi_MSB;
         return 0;
     }
 
     uint32_t index;
-    if (intrn_context->next_atlas_slot == UINT32_MAX) {
-        index = intrn_context->num_atlases;
+    if (intrn_renderer->next_atlas_slot == UINT32_MAX) {
+        index = intrn_renderer->num_atlases;
     }
     else {
-        index = intrn_context->next_atlas_slot;
+        index = intrn_renderer->next_atlas_slot;
 
         //Linearly searching to find the next empty slot. Yes I know that this is slow
-        for (intrn_context->next_atlas_slot = index + 1; intrn_context->next_atlas_slot < intrn_context->num_atlases; intrn_context->next_atlas_slot++) {
-            if (!intrn_context->atlas_table[intrn_context->next_atlas_slot].init)
+        for (intrn_renderer->next_atlas_slot = index + 1; intrn_renderer->next_atlas_slot < intrn_renderer->num_atlases; intrn_renderer->next_atlas_slot++) {
+            if (!intrn_renderer->atlas_table[intrn_renderer->next_atlas_slot].init)
                 break;
         }
 
-        if (intrn_context->next_atlas_slot >= intrn_context->num_atlases)
-            intrn_context->next_atlas_slot = UINT32_MAX;
+        if (intrn_renderer->next_atlas_slot >= intrn_renderer->num_atlases)
+            intrn_renderer->next_atlas_slot = UINT32_MAX;
     }
 
-    if(!BOB_create_texture(context, width, height, NULL, format, &intrn_context->atlas_table[index].texture)) {
-        intrn_context->atlas_table[index] = (BOB_Atlas){0};
+    if(!BOB_create_texture(renderer, width, height, NULL, format, &intrn_renderer->atlas_table[index].texture)) {
+        intrn_renderer->atlas_table[index] = (BOB_Atlas){0};
         *a |= BOBi_MSB;
         return 0;
     }
 
-    intrn_context->atlas_table[index].init = 1; //Setting the value to be initialised
-    intrn_context->atlas_table[index].format = format;
-    intrn_context->num_atlases++;
-    *a = ((uint64_t)context << 32) | index;
+    intrn_renderer->atlas_table[index].init = 1; //Setting the value to be initialised
+    intrn_renderer->atlas_table[index].format = format;
+    intrn_renderer->num_atlases++;
+    *a = ((uint64_t)renderer << 32) | index;
     return 1;
 }
 
 void BOB_atlas_free(BOB_Atlas_Handle *a) {
     if(*a & BOBi_MSB) return; //Do not work with already invalid handles
 
-    BOB_Context *context;
+    BOB_Renderer *renderer;
     uint32_t index;
-    if(!BOBi_get_handle_data(*a, &context, &index)) return;
+    if(!BOBi_get_handle_data(*a, &renderer, &index)) return;
 
-    if(index < context->next_atlas_slot) context->next_atlas_slot = index;
+    if(index < renderer->next_atlas_slot) renderer->next_atlas_slot = index;
     *(a) |= BOBi_MSB; //Setting the MSB to indicate this is an invalid handle
 
-    BOB_texture_free(&context->atlas_table[index].texture);
-    context->atlas_table[index] = (BOB_Atlas){0}; //Clear the data
+    BOB_texture_free(&renderer->atlas_table[index].texture);
+    renderer->atlas_table[index] = (BOB_Atlas){0}; //Clear the data
 }
 
 BOB_Atlas *BOB_get_atlas_ref(BOB_Atlas_Handle a) {
     if(a & BOBi_MSB) return NULL; //Do not work with already invalid handles
 
-    BOB_Context *context;
+    BOB_Renderer *renderer;
     uint32_t index;
-    if(!BOBi_get_handle_data(a, &context, &index)) return NULL;
+    if(!BOBi_get_handle_data(a, &renderer, &index)) return NULL;
 
-    return &context->atlas_table[index];
+    return &renderer->atlas_table[index];
 }
 
 //Returns the UV rect where the texture was placed
 //pixel_size must be either 3 or 4. If it does not match the pixel size of the atlas,
 //an empty quad will returned as the pixel formats are different
 uint8_t BOB_atlas_pack(BOB_Atlas_Handle a, uint8_t* pixels, size_t w, size_t h, BOB_Quad *out_quad) {
-    BOB_Context *context;
+    BOB_Renderer *renderer;
     uint32_t index;
-    if(!BOBi_get_handle_data(a, &context, &index)) return 0;
+    if(!BOBi_get_handle_data(a, &renderer, &index)) return 0;
 
-    if((a & BOBi_MSB) || (context->atlas_table[index].texture & BOBi_MSB)) return 0; //Do not work with already invalid handles
-    BOB_Texture tex = context->texture_table[context->atlas_table[index].texture];
-    if(context->atlas_table[index].cursor_y + h > tex.height) return 0; //Early exit if we can't fit the texture in
+    if((a & BOBi_MSB) || (renderer->atlas_table[index].texture & BOBi_MSB)) return 0; //Do not work with already invalid handles
+    BOB_Texture tex = renderer->texture_table[renderer->atlas_table[index].texture];
+    if(renderer->atlas_table[index].cursor_y + h > tex.height) return 0; //Early exit if we can't fit the texture in
 
     //Move to next row if this texture doesn't fit
-    if(context->atlas_table[index].cursor_x + w > tex.width) {
-       context->atlas_table[index].cursor_y += context->atlas_table[index].row_height;
-       context->atlas_table[index].cursor_x = 0;
-       context->atlas_table[index].row_height = 0;
+    if(renderer->atlas_table[index].cursor_x + w > tex.width) {
+       renderer->atlas_table[index].cursor_y += renderer->atlas_table[index].row_height;
+       renderer->atlas_table[index].cursor_x = 0;
+       renderer->atlas_table[index].row_height = 0;
     }
 
     BOB_Quad unnormalised = {
-        (float)context->atlas_table[index].cursor_x / tex.width,
-        (float)context->atlas_table[index].cursor_y / tex.height,
+        (float)renderer->atlas_table[index].cursor_x / tex.width,
+        (float)renderer->atlas_table[index].cursor_y / tex.height,
         (float) w,
         (float) h
     };
 
-    context_functions[context->type].copy_data_to_tex(context, index, context->atlas_table[index].format, unnormalised, pixels);
+    renderer_functions[renderer->type].copy_data_to_tex(renderer, index, renderer->atlas_table[index].format, unnormalised, pixels);
 
     //Compute normalised UVs
     BOB_Quad uv = {
-        (float)context->atlas_table[index].cursor_x / tex.width,
-        (float)context->atlas_table[index].cursor_y / tex.height,
+        (float)renderer->atlas_table[index].cursor_x / tex.width,
+        (float)renderer->atlas_table[index].cursor_y / tex.height,
         (float) w / tex.width,
         (float) h / tex.height
     };
 
-    context->atlas_table[index].cursor_x += w;
-    if(h > context->atlas_table[index].row_height) context->atlas_table[index].row_height = h;
+    renderer->atlas_table[index].cursor_x += w;
+    if(h > renderer->atlas_table[index].row_height) renderer->atlas_table[index].row_height = h;
 
     *out_quad = uv;
     return 1;
@@ -4294,37 +4113,37 @@ uint8_t BOB_atlas_pack(BOB_Atlas_Handle a, uint8_t* pixels, size_t w, size_t h, 
 //Creates a pixel buffer to hold the pixels representing
 //a texture of size width * height
 //Pixel size should be either 3 or 4 (rgb/rgba)
-uint8_t BOB_pixelbuffer_init(BOB_Context_Handle context, size_t width, size_t height, BOB_Format format, BOB_PixelBuffer_Handle *pb) {
-    BOB_Context *intrn_context;
-    if(!BOBi_get_context(context, &intrn_context)) return 0;
+uint8_t BOB_pixelbuffer_init(BOB_Renderer_Handle renderer, size_t width, size_t height, BOB_Format format, BOB_PixelBuffer_Handle *pb) {
+    BOB_Renderer *intrn_renderer;
+    if(!BOBi_get_renderer(renderer, &intrn_renderer)) return 0;
 
-    if(intrn_context->num_pixelbuffers >= BOB_MAX_PIXELBUFFER_CAPACITY) {
+    if(intrn_renderer->num_pixelbuffers >= BOB_MAX_PIXELBUFFER_CAPACITY) {
         printf("ERROR: Exceeded PixelBuffer Capacity");
         *pb |= BOBi_MSB;
         return 0;
     }
 
     uint32_t index;
-    if (intrn_context->next_pixelbuf_slot == UINT32_MAX) {
-        index = intrn_context->num_pixelbuffers;
+    if (intrn_renderer->next_pixelbuf_slot == UINT32_MAX) {
+        index = intrn_renderer->num_pixelbuffers;
     }
     else {
-        index = intrn_context->next_pixelbuf_slot;
+        index = intrn_renderer->next_pixelbuf_slot;
 
         //Linearly searching to find the next empty slot. Yes I know that this is slow
-        for (intrn_context->next_pixelbuf_slot = index + 1; intrn_context->next_pixelbuf_slot < intrn_context->num_pixelbuffers; intrn_context->next_pixelbuf_slot++) {
-            if (!intrn_context->pixelbuffer_table[intrn_context->next_pixelbuf_slot].init)
+        for (intrn_renderer->next_pixelbuf_slot = index + 1; intrn_renderer->next_pixelbuf_slot < intrn_renderer->num_pixelbuffers; intrn_renderer->next_pixelbuf_slot++) {
+            if (!intrn_renderer->pixelbuffer_table[intrn_renderer->next_pixelbuf_slot].init)
                 break;
         }
 
-        if (intrn_context->next_pixelbuf_slot >= intrn_context->num_pixelbuffers)
-            intrn_context->next_pixelbuf_slot = UINT32_MAX;
+        if (intrn_renderer->next_pixelbuf_slot >= intrn_renderer->num_pixelbuffers)
+            intrn_renderer->next_pixelbuf_slot = UINT32_MAX;
     }
 
 
     //Setting up the texture for the pixel simulations:
-    if(!BOB_create_texture(context, width, height, NULL, format, &intrn_context->pixelbuffer_table[index].pixel_tex)) {
-        intrn_context->pixelbuffer_table[index] = (BOB_PixelBuffer){0};
+    if(!BOB_create_texture(renderer, width, height, NULL, format, &intrn_renderer->pixelbuffer_table[index].pixel_tex)) {
+        intrn_renderer->pixelbuffer_table[index] = (BOB_PixelBuffer){0};
         return 0;
     }
 
@@ -4337,158 +4156,176 @@ uint8_t BOB_pixelbuffer_init(BOB_Context_Handle context, size_t width, size_t he
         case BOB_RGBA: pixel_size = 4; break;
     }
 
-    intrn_context->pixelbuffer_table[index].buf_sz = width * height * pixel_size;
+    intrn_renderer->pixelbuffer_table[index].buf_sz = width * height * pixel_size;
 
     //Setting up the pbo for the pixel simulations
-    if(!context_functions[intrn_context->type].create_pixelbuffer(intrn_context, index)) {
+    if(!renderer_functions[intrn_renderer->type].create_pixelbuffer(intrn_renderer, index)) {
         *pb |= BOBi_MSB;
         return 0;
     }
 
-    intrn_context->pixelbuffer_table[index].init = 1; //Setting the value to be initialised
+    intrn_renderer->pixelbuffer_table[index].init = 1; //Setting the value to be initialised
 
-    intrn_context->num_pixelbuffers++;
-    *pb = ((uint64_t)context << 32) | index;
+    intrn_renderer->num_pixelbuffers++;
+    *pb = ((uint64_t)renderer << 32) | index;
     return 1;
 }
 //Frees the data used by a pixel buffer
 void BOB_pixelbuffer_free(BOB_PixelBuffer_Handle *pb) {
     if(*(pb) & BOBi_MSB) return; //Do not work with already invalid handles
 
-    BOB_Context *context;
+    BOB_Renderer *renderer;
     uint32_t index;
-    if(!BOBi_get_handle_data(*pb, &context, &index)) return;
+    if(!BOBi_get_handle_data(*pb, &renderer, &index)) return;
 
-    if(index < context->next_pixelbuf_slot) context->next_pixelbuf_slot = index;
+    if(index < renderer->next_pixelbuf_slot) renderer->next_pixelbuf_slot = index;
     *(pb) |= BOBi_MSB; //Setting the MSB to indicate this is an invalid handle
 
-    BOBi_pixelbuffer_free(context, index);
+    BOBi_pixelbuffer_free(renderer, index);
 }
 
 BOB_PixelBuffer *BOB_get_pixelbuf_ref(BOB_PixelBuffer_Handle pb) {
     if(pb & BOBi_MSB) return NULL; //Do not work with already invalid handles
 
-    BOB_Context *context;
+    BOB_Renderer *renderer;
     uint32_t index;
-    if(!BOBi_get_handle_data(pb, &context, &index)) return NULL;
+    if(!BOBi_get_handle_data(pb, &renderer, &index)) return NULL;
 
-    return &context->pixelbuffer_table[index];
+    return &renderer->pixelbuffer_table[index];
 }
 
 //Binds the pixelbuffers gpu memory to cpu memory. This can currently only be done by one pixelbuffer at a time
 uint8_t BOB_bind_pixelbuffer_memory(BOB_PixelBuffer_Handle pb) {
     if(pb & BOBi_MSB) return 0; //Do not work with already invalid handles
-    BOB_Context *context;
+    BOB_Renderer *renderer;
     uint32_t index;
-    if(!BOBi_get_handle_data(pb, &context, &index)) return 0;
+    if(!BOBi_get_handle_data(pb, &renderer, &index)) return 0;
 
-    return context_functions[context->type].bind_memory(context, index);
+    return renderer_functions[renderer->type].bind_memory(renderer, index);
 }
 //Unbinds the pixelbuffer's gpu memory from cpu space
 void BOB_unbind_pixelbuffer_memory(BOB_PixelBuffer_Handle pb) {
     if(pb & BOBi_MSB) return; //Do not work with already invalid handles
-    BOB_Context *context;
-    if(!BOBi_get_context_from_handle(pb, &context)) return;
-    return context_functions[context->type].unbind_memory(context);
+    BOB_Renderer *renderer;
+    if(!BOBi_get_renderer_from_handle(pb, &renderer)) return;
+    return renderer_functions[renderer->type].unbind_memory(renderer);
 }
 //Updates the pixel data stored in a pixelbuffer
 void BOB_pixelbuffer_send_data(BOB_PixelBuffer_Handle pb, uint8_t *data, size_t data_sz) {
     if(pb & BOBi_MSB) return; //Do not work with already invalid handles
-    BOB_Context *context;
-    if(!BOBi_get_context_from_handle(pb, &context)) return;
+    BOB_Renderer *renderer;
+    if(!BOBi_get_renderer_from_handle(pb, &renderer)) return;
 
-    context_functions[context->type].copy_into_buf(context, data, data_sz);
+    renderer_functions[renderer->type].copy_into_buf(renderer, data, data_sz);
 }
 //Gets the pixel data from a PixelBuffer
 void BOB_pixelbuffer_get_data(BOB_PixelBuffer_Handle pb, uint8_t *dest, size_t data_sz) {
     if(pb & BOBi_MSB) return; //Do not work with already invalid handles
-    BOB_Context *context;
-    if(!BOBi_get_context_from_handle(pb, &context)) return;
+    BOB_Renderer *renderer;
+    if(!BOBi_get_renderer_from_handle(pb, &renderer)) return;
 
-    context_functions[context->type].copy_from_buf(context, dest, data_sz);
+    renderer_functions[renderer->type].copy_from_buf(renderer, dest, data_sz);
 }
 //Uploads the pixel data from the pixelbuffer into its associated texture
 void BOB_pixelbuffer_updload(BOB_PixelBuffer_Handle pb) {
     if(pb & BOBi_MSB) return; //Do not work with already invalid handles
-    BOB_Context *context;
+    BOB_Renderer *renderer;
     uint32_t index;
-    if(!BOBi_get_handle_data(pb, &context, &index)) return;
+    if(!BOBi_get_handle_data(pb, &renderer, &index)) return;
 
-    context_functions[context->type].update_tex_from_buf(context, index);
+    renderer_functions[renderer->type].update_tex_from_buf(renderer, index);
 }
 
 //============================================================= DRAWING FUNCTIONS ===========================================
 
-uint8_t BOB_draw_texture(BOB_Renderer *r, BOB_Texture_Handle texture, BOB_Quad screen_quad, BOB_Quad tex_sub_rect, BOB_Vector4 colour, uint16_t layer, float rotation) {
-    return BOB_draw_texture_channel(r, texture, screen_quad, tex_sub_rect, colour, layer, rotation, r->default_mat, 0);
+uint8_t BOB_draw_texture(BOB_Texture_Handle texture, BOB_Quad screen_quad, BOB_Quad tex_sub_rect, BOB_Vector4 colour, uint16_t layer, float rotation) {
+    BOB_Renderer *r;
+    BOBi_get_renderer_from_handle(texture, &r);
+    return BOB_draw_texture_channel(texture, screen_quad, tex_sub_rect, colour, layer, rotation, r->default_mat, 0);
 }
 
 //Draws an atlas quad
-uint8_t BOB_draw_atlas_quad(BOB_Renderer *r, BOB_Quad screen_quad, BOB_Quad tex_sub_rect, BOB_Vector4 colour, BOB_Atlas_Handle atlas, uint16_t layer, float rotation) {
+uint8_t BOB_draw_atlas_quad(BOB_Quad screen_quad, BOB_Quad tex_sub_rect, BOB_Vector4 colour, BOB_Atlas_Handle atlas, uint16_t layer, float rotation) {
     if(atlas & BOBi_MSB) return 0; //Do not work with already invalid handles
-    BOB_Context *context;
+    BOB_Renderer *r;
     uint32_t index;
-    if(!BOBi_get_handle_data(atlas, &context, &index)) return 0;
-    return BOB_draw_atlas_quad_channel(r, screen_quad, tex_sub_rect, colour, context->atlas_table[index].texture, layer, rotation, r->default_mat, 0);
+    if(!BOBi_get_handle_data(atlas, &r, &index)) return 0;
+    return BOB_draw_atlas_quad_channel(screen_quad, tex_sub_rect, colour, r->atlas_table[index].texture, layer, rotation, r->default_mat, 0);
 }
 
-uint8_t BOB_draw_pixel_buffer(BOB_Renderer *r, BOB_PixelBuffer_Handle pb, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, uint16_t layer, float rotation) {
-    return BOB_draw_pixel_buffer_channel(r, pb, dimensions, uv_dimensions, colour, layer, rotation, r->default_mat, 0);
+uint8_t BOB_draw_pixel_buffer(BOB_PixelBuffer_Handle pb, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, uint16_t layer, float rotation) {
+    BOB_Renderer *r;
+    BOBi_get_renderer_from_handle(pb, &r);
+    return BOB_draw_pixel_buffer_channel(pb, dimensions, uv_dimensions, colour, layer, rotation, r->default_mat, 0);
 }
 
-uint8_t BOB_draw_line(BOB_Renderer *r, BOB_Vector2 start_pos, BOB_Vector2 end_pos, float thickness, BOB_Vector4 colour, uint16_t layer) {
-    return BOB_draw_line_mat(r, start_pos, end_pos, thickness, colour, layer, r->default_mat);
+uint8_t BOB_draw_line(BOB_Renderer_Handle r, BOB_Vector2 start_pos, BOB_Vector2 end_pos, float thickness, BOB_Vector4 colour, uint16_t layer) {
+    BOB_Renderer *renderer;
+    BOBi_get_renderer(r, &renderer);
+    return BOB_draw_line_mat(r, start_pos, end_pos, thickness, colour, layer, renderer->default_mat);
 }
 
-uint8_t BOB_draw_quad(BOB_Renderer *r, BOB_Quad quad, BOB_Vector4 colour, uint16_t layer, float rotation) {
-    return BOB_draw_quad_mat(r, quad, colour, layer, rotation, r->default_mat);
+uint8_t BOB_draw_quad(BOB_Renderer_Handle r, BOB_Quad quad, BOB_Vector4 colour, uint16_t layer, float rotation) {
+    BOB_Renderer *renderer;
+    BOBi_get_renderer(r, &renderer);
+    return BOB_draw_quad_mat(r, quad, colour, layer, rotation, renderer->default_mat);
 }
 
-uint8_t BOB_draw_unfilled_quad(BOB_Renderer *r, BOB_Quad quad, float thickness, BOB_Vector4 colour, uint16_t layer, float rotation) {
-    return BOB_draw_unfilled_quad_mat(r, quad, thickness, colour, layer, rotation, r->default_mat);
+uint8_t BOB_draw_unfilled_quad(BOB_Renderer_Handle r, BOB_Quad quad, float thickness, BOB_Vector4 colour, uint16_t layer, float rotation) {
+    BOB_Renderer *renderer;
+    BOBi_get_renderer(r, &renderer);
+    return BOB_draw_unfilled_quad_mat(r, quad, thickness, colour, layer, rotation, renderer->default_mat);
 }
 
-uint8_t BOB_draw_polygon(BOB_Renderer *r, BOB_Vector2* poly_points, size_t poly_size, BOB_Vector4 colour, uint16_t layer, float rotation) {
-    return BOB_draw_polygon_mat(r, poly_points, poly_size, colour, layer, rotation, r->default_mat);
+uint8_t BOB_draw_polygon(BOB_Renderer_Handle r, BOB_Vector2* poly_points, size_t poly_size, BOB_Vector4 colour, uint16_t layer, float rotation) {
+    BOB_Renderer *renderer;
+    BOBi_get_renderer(r, &renderer);
+    return BOB_draw_polygon_mat(r, poly_points, poly_size, colour, layer, rotation, renderer->default_mat);
 }
 
 //Draws an unfilled polygon
-uint8_t BOB_draw_unfilled_polygon(BOB_Renderer *r, BOB_Vector2* poly_points, size_t poly_size, BOB_Vector4 colour, float thickness, uint16_t layer, float rotation) {
-    return BOB_draw_unfilled_polygon_mat(r, poly_points, poly_size, colour, thickness, layer, rotation, r->default_mat);
+uint8_t BOB_draw_unfilled_polygon(BOB_Renderer_Handle r, BOB_Vector2* poly_points, size_t poly_size, BOB_Vector4 colour, float thickness, uint16_t layer, float rotation) {
+    BOB_Renderer *renderer;
+    BOBi_get_renderer(r, &renderer);
+    return BOB_draw_unfilled_polygon_mat(r, poly_points, poly_size, colour, thickness, layer, rotation, renderer->default_mat);
 }
 
-uint8_t BOB_draw_circle(BOB_Renderer *r, BOB_Vector2 centre, float radius, BOB_Vector4 colour, uint16_t layer) {
-    return BOB_draw_circle_mat(r, centre, radius, colour, layer, r->default_mat);
+uint8_t BOB_draw_circle(BOB_Renderer_Handle r, BOB_Vector2 centre, float radius, BOB_Vector4 colour, uint16_t layer) {
+    BOB_Renderer *renderer;
+    BOBi_get_renderer(r, &renderer);
+    return BOB_draw_circle_mat(r, centre, radius, colour, layer, renderer->default_mat);
 }
 
-uint8_t BOB_draw_unfilled_circle(BOB_Renderer *r, BOB_Vector2 centre, float radius, float thickness, BOB_Vector4 colour, uint16_t layer) {
-    return BOB_draw_unfilled_circle_mat(r, centre, radius, thickness, colour, layer, r->default_mat);
+uint8_t BOB_draw_unfilled_circle(BOB_Renderer_Handle r, BOB_Vector2 centre, float radius, float thickness, BOB_Vector4 colour, uint16_t layer) {
+    BOB_Renderer *renderer;
+    BOBi_get_renderer(r, &renderer);
+    return BOB_draw_unfilled_circle_mat(r, centre, radius, thickness, colour, layer, renderer->default_mat);
 }
 
 //Draws a dynamically allocated texture with a specified material
-uint8_t BOB_draw_texture_mat(BOB_Renderer *r, BOB_Texture_Handle texture, BOB_Quad screen_quad, BOB_Quad tex_sub_rect, BOB_Vector4 colour, uint16_t layer, float rotation, BOB_Material_Handle mat) {
-    return BOB_draw_texture_channel(r, texture, screen_quad, tex_sub_rect, colour, layer, rotation, mat, 0);
+uint8_t BOB_draw_texture_mat(BOB_Texture_Handle texture, BOB_Quad screen_quad, BOB_Quad tex_sub_rect, BOB_Vector4 colour, uint16_t layer, float rotation, BOB_Material_Handle mat) {
+    return BOB_draw_texture_channel(texture, screen_quad, tex_sub_rect, colour, layer, rotation, mat, 0);
 }
 
 //Draws a quad with a specified material
-uint8_t BOB_draw_atlas_quad_mat(BOB_Renderer *r, BOB_Quad screen_quad, BOB_Quad tex_sub_rect, BOB_Vector4 colour, BOB_Atlas_Handle atlas, uint16_t layer, float rotation, BOB_Material_Handle mat) {
+uint8_t BOB_draw_atlas_quad_mat(BOB_Quad screen_quad, BOB_Quad tex_sub_rect, BOB_Vector4 colour, BOB_Atlas_Handle atlas, uint16_t layer, float rotation, BOB_Material_Handle mat) {
     if(atlas & BOBi_MSB) return 0; //Do not work with already invalid handles
-    BOB_Context *context;
+    BOB_Renderer *renderer;
     uint32_t index;
-    if(!BOBi_get_handle_data(atlas, &context, &index)) return 0;
-    return BOB_draw_atlas_quad_channel(r, screen_quad, tex_sub_rect, colour, context->atlas_table[index].texture, layer, rotation, mat, 0);
+    if(!BOBi_get_handle_data(atlas, &renderer, &index)) return 0;
+    return BOB_draw_atlas_quad_channel(screen_quad, tex_sub_rect, colour, renderer->atlas_table[index].texture, layer, rotation, mat, 0);
 }
 
 //Draws a pixel buffer with a specified material
-uint8_t BOB_draw_pixel_buffer_mat(BOB_Renderer *r, BOB_PixelBuffer_Handle pb, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, uint16_t layer, float rotation, BOB_Material_Handle mat) {
-    return BOB_draw_pixel_buffer_channel(r, pb, dimensions, uv_dimensions, colour, layer, rotation, mat, 0);
+uint8_t BOB_draw_pixel_buffer_mat(BOB_PixelBuffer_Handle pb, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, uint16_t layer, float rotation, BOB_Material_Handle mat) {
+    return BOB_draw_pixel_buffer_channel(pb, dimensions, uv_dimensions, colour, layer, rotation, mat, 0);
 }
 
 //Draws a filled circle with a specified material
-uint8_t BOB_draw_circle_mat(BOB_Renderer *r, BOB_Vector2 centre, float radius, BOB_Vector4 colour, uint16_t layer, BOB_Material_Handle mat) {
+uint8_t BOB_draw_circle_mat(BOB_Renderer_Handle r, BOB_Vector2 centre, float radius, BOB_Vector4 colour, uint16_t layer, BOB_Material_Handle mat) {
     if(mat & BOBi_MSB) return 0; //Do not work with already invalid handles
-    BOB_Context *context;
-    if(!BOBi_get_context(r->context, &context)) return 0;
+    BOB_Renderer *renderer;
+    if(!BOBi_get_renderer(r, &renderer)) return 0;
 
     float angle_step = 2.0f * M_PI / BOB_CIRCLE_LINE_SEGMENTS;
     BOB_Vector2 vertices[BOB_CIRCLE_LINE_SEGMENTS];
@@ -4508,7 +4345,7 @@ uint8_t BOB_draw_circle_mat(BOB_Renderer *r, BOB_Vector2 centre, float radius, B
     BOB_Vector3 points3[BOBi_MAX_POLY_SIZE];
     memcpy(points2, vertices, vertex_count * sizeof(BOB_Vector2));
 
-    size_t clipped_size = BOBi_clip_polygon(r, points2, vertex_count);
+    size_t clipped_size = BOBi_clip_polygon(renderer, points2, vertex_count);
     if(clipped_size < 3) return 1; //Early exit
 
     if(layer > BOB_MAX_LAYER) layer = BOB_MAX_LAYER-1; //Normalise it to be within the required range
@@ -4521,17 +4358,17 @@ uint8_t BOB_draw_circle_mat(BOB_Renderer *r, BOB_Vector2 centre, float radius, B
         indices[index_count++] = ((i+1) % clipped_size);
     }
 
-    BOBi_create_draw_call(r, points3, clipped_size, NULL, clipped_size * 3, colour, context->default_tex, mat, 0, BOBi_DRAW_CIRCLE);
+    BOBi_create_draw_call(r, points3, clipped_size, NULL, clipped_size * 3, colour, renderer->default_tex, mat, 0, BOBi_DRAW_CIRCLE);
     return 1;
 }
 
 //Draws a filled quad with a specified material
-uint8_t BOB_draw_quad_mat(BOB_Renderer *r, BOB_Quad quad, BOB_Vector4 colour, uint16_t layer, float rotation, BOB_Material_Handle mat) {
+uint8_t BOB_draw_quad_mat(BOB_Renderer_Handle r, BOB_Quad quad, BOB_Vector4 colour, uint16_t layer, float rotation, BOB_Material_Handle mat) {
     if(mat & BOBi_MSB) return 0; //Do not work with already invalid handles
-    BOB_Context *context;
-    if(!BOBi_get_context(r->context, &context)) return 0;
+    BOB_Renderer *renderer;
+    if(!BOBi_get_renderer(r, &renderer)) return 0;
 
-    if(!BOBi_clip_quad(r, &quad)) return 1; //Early exit
+    if(!BOBi_clip_quad(renderer, &quad)) return 1; //Early exit
 
     BOB_Vector2 rotated_coords[4];
     BOBi_rotate_quad(quad, rotated_coords, rotation);
@@ -4545,33 +4382,33 @@ uint8_t BOB_draw_quad_mat(BOB_Renderer *r, BOB_Quad quad, BOB_Vector4 colour, ui
     };
 
     // BOBi_draw_mesh(r, strip, 4, NULL, (uint32_t[6]){0,1,3,1,2,3}, 6, colour, intrn_data.default_tex, mat, 0);
-    BOBi_create_draw_call(r, strip, 4, NULL, 6, colour, context->default_tex, mat, 0, BOBi_DRAW_QUAD);
+    BOBi_create_draw_call(r, strip, 4, NULL, 6, colour, renderer->default_tex, mat, 0, BOBi_DRAW_QUAD);
     return 1;
 }
 
 //Draws a filled triangle with a specified material
-uint8_t BOB_draw_polygon_mat(BOB_Renderer *r, BOB_Vector2* poly_points, size_t poly_size, BOB_Vector4 colour, uint16_t layer, float rotation, BOB_Material_Handle mat) {
+uint8_t BOB_draw_polygon_mat(BOB_Renderer_Handle r, BOB_Vector2* poly_points, size_t poly_size, BOB_Vector4 colour, uint16_t layer, float rotation, BOB_Material_Handle mat) {
     if(mat & BOBi_MSB) return 0; //Do not work with already invalid handles
-    BOB_Context *context;
-    if(!BOBi_get_context(r->context, &context)) return 0;
+    BOB_Renderer *renderer;
+    if(!BOBi_get_renderer(r, &renderer)) return 0;
 
     BOBi_rotate_polygon(poly_points, poly_size, rotation);
 
     BOB_Vector2 points[BOBi_MAX_POLY_SIZE];
     memcpy(points, poly_points, poly_size * sizeof(BOB_Vector2));
 
-    size_t clipped_size = BOBi_clip_polygon(r, points, poly_size);
+    size_t clipped_size = BOBi_clip_polygon(renderer, points, poly_size);
     if(clipped_size < 3) return 1; //Early exit
 
     BOB_Vector3 vertices[BOBi_MAX_POLY_SIZE]; //Holds the compressed vertex values
     for(size_t i = 0; i < clipped_size; i++) {
         vertices[i] = (BOB_Vector3){points[i].x, points[i].y, layer};
     }
-    BOBi_create_draw_call(r, vertices, clipped_size, NULL, (clipped_size - 2) * 3, colour, context->default_tex, mat, 0, BOBi_DRAW_POLY);
+    BOBi_create_draw_call(r, vertices, clipped_size, NULL, (clipped_size - 2) * 3, colour, renderer->default_tex, mat, 0, BOBi_DRAW_POLY);
     return 1;
 }
 //Draws an unfilled circle with a specified material
-uint8_t BOB_draw_unfilled_circle_mat(BOB_Renderer *r, BOB_Vector2 centre, float radius, float thickness, BOB_Vector4 colour, uint16_t layer, BOB_Material_Handle mat) {
+uint8_t BOB_draw_unfilled_circle_mat(BOB_Renderer_Handle r, BOB_Vector2 centre, float radius, float thickness, BOB_Vector4 colour, uint16_t layer, BOB_Material_Handle mat) {
     if(mat & BOBi_MSB) return 0; //Do not work with already invalid handles
 
     float angle_step = 2.0f * M_PI / BOB_CIRCLE_LINE_SEGMENTS;
@@ -4597,7 +4434,7 @@ uint8_t BOB_draw_unfilled_circle_mat(BOB_Renderer *r, BOB_Vector2 centre, float 
 }
 
 //Draws an unfilled quad with a specified material
-uint8_t BOB_draw_unfilled_quad_mat(BOB_Renderer *r, BOB_Quad quad, float thickness, BOB_Vector4 colour, uint16_t layer, float rotation, BOB_Material_Handle mat) {
+uint8_t BOB_draw_unfilled_quad_mat(BOB_Renderer_Handle r, BOB_Quad quad, float thickness, BOB_Vector4 colour, uint16_t layer, float rotation, BOB_Material_Handle mat) {
     if(mat & BOBi_MSB) return 0; //Do not work with already invalid handles
 
     BOB_Vector2 tl = {quad.x,          quad.y};
@@ -4614,13 +4451,16 @@ uint8_t BOB_draw_unfilled_quad_mat(BOB_Renderer *r, BOB_Quad quad, float thickne
 }
 
 //Draws an unfilled triange with a specified material
-uint8_t BOB_draw_unfilled_polygon_mat(BOB_Renderer *r, BOB_Vector2 *poly_points, size_t poly_size, BOB_Vector4 colour, float thickness, uint16_t layer, float rotation, BOB_Material_Handle mat) {
+uint8_t BOB_draw_unfilled_polygon_mat(BOB_Renderer_Handle r, BOB_Vector2 *poly_points, size_t poly_size, BOB_Vector4 colour, float thickness, uint16_t layer, float rotation, BOB_Material_Handle mat) {
     if(mat & BOBi_MSB) return 0; //Do not work with already invalid handles
+
+    BOB_Renderer *renderer;
+    if(!BOBi_get_renderer(r, &renderer)) return 0;
 
     BOB_Vector2 points[BOBi_MAX_POLY_SIZE];
     memcpy(points, poly_points, poly_size * sizeof(BOB_Vector2));
 
-    size_t clipped_size = BOBi_clip_polygon(r, points, poly_size);
+    size_t clipped_size = BOBi_clip_polygon(renderer, points, poly_size);
     if(clipped_size < 2) return 1; //Early exit
 
     for(size_t i = 0; i < clipped_size; i++) {
@@ -4632,12 +4472,12 @@ uint8_t BOB_draw_unfilled_polygon_mat(BOB_Renderer *r, BOB_Vector2 *poly_points,
 }
 
 //Draws a line between two points with a specified material
-uint8_t BOB_draw_line_mat(BOB_Renderer *r, BOB_Vector2 start_pos, BOB_Vector2 end_pos, float thickness, BOB_Vector4 colour, uint16_t layer, BOB_Material_Handle mat) {
+uint8_t BOB_draw_line_mat(BOB_Renderer_Handle r, BOB_Vector2 start_pos, BOB_Vector2 end_pos, float thickness, BOB_Vector4 colour, uint16_t layer, BOB_Material_Handle mat) {
     if(mat & BOBi_MSB) return 0; //Do not work with already invalid handles
-    BOB_Context *context;
-    if(!BOBi_get_context(r->context, &context)) return 0;
+    BOB_Renderer *renderer;
+    if(!BOBi_get_renderer(r, &renderer)) return 0;
 
-    if(!BOBi_clip_line(r, &start_pos, &end_pos)) return 1; //Early exit
+    if(!BOBi_clip_line(renderer, &start_pos, &end_pos)) return 1; //Early exit
 
     BOB_Vector2 delta = {end_pos.x - start_pos.x, end_pos.y - start_pos.y};
     float length = sqrtf(delta.x*delta.x + delta.y*delta.y);
@@ -4654,20 +4494,20 @@ uint8_t BOB_draw_line_mat(BOB_Renderer *r, BOB_Vector2 start_pos, BOB_Vector2 en
             {start_pos.x + radius.x, start_pos.y + radius.y, layer},
         };
 
-        BOBi_create_draw_call(r, strip, 4, NULL, 6, colour, context->default_tex, mat, 0, BOBi_DRAW_QUAD);
+        BOBi_create_draw_call(r, strip, 4, NULL, 6, colour, renderer->default_tex, mat, 0, BOBi_DRAW_QUAD);
     }
 
     return 1;
 }
 
 //Draws a dynamically allocated texture with a specified material
-uint8_t BOB_draw_texture_channel(BOB_Renderer *r, BOB_Texture_Handle texture, BOB_Quad screen_quad, BOB_Quad tex_sub_rect, BOB_Vector4 colour, uint16_t layer, float rotation, BOB_Material_Handle mat, uint8_t channel) {
+uint8_t BOB_draw_texture_channel(BOB_Texture_Handle texture, BOB_Quad screen_quad, BOB_Quad tex_sub_rect, BOB_Vector4 colour, uint16_t layer, float rotation, BOB_Material_Handle mat, uint8_t channel) {
     if((texture & BOBi_MSB) || (mat & BOBi_MSB)) return 0; //Do not work with already invalid handles
-    BOB_Context *context;
+    BOB_Renderer *renderer;
     uint32_t index;
-    if(!BOBi_get_handle_data(texture, &context, &index)) return 0;
+    if(!BOBi_get_handle_data(texture, &renderer, &index)) return 0;
 
-    if(!BOBi_clip_quad(r, &screen_quad)) return 1; //Early exit
+    if(!BOBi_clip_quad(renderer, &screen_quad)) return 1; //Early exit
 
     BOB_Vector2 rotated_coords[4];
     BOBi_rotate_quad(screen_quad, rotated_coords, rotation);
@@ -4681,8 +4521,8 @@ uint8_t BOB_draw_texture_channel(BOB_Renderer *r, BOB_Texture_Handle texture, BO
         {rotated_coords[3].x, rotated_coords[3].y, layer}
     };
 
-    float width = context->texture_table[index].width;
-    float height = context->texture_table[index].height;
+    float width = renderer->texture_table[index].width;
+    float height = renderer->texture_table[index].height;
 
     BOB_Vector2 uv[4] = {
         {tex_sub_rect.x / width, tex_sub_rect.y / height},
@@ -4691,31 +4531,31 @@ uint8_t BOB_draw_texture_channel(BOB_Renderer *r, BOB_Texture_Handle texture, BO
         {(tex_sub_rect.x + tex_sub_rect.w) / width , tex_sub_rect.y / height}
     };
 
-    BOBi_create_draw_call(r, coords, BOB_VERTICIES_PER_QUAD, uv, BOB_INDECIES_PER_QUAD, colour, texture, mat, channel, BOBi_DRAW_QUAD);
+    BOBi_create_draw_call((texture >> 32), coords, BOB_VERTICIES_PER_QUAD, uv, BOB_INDECIES_PER_QUAD, colour, texture, mat, channel, BOBi_DRAW_QUAD);
 
     return 1;
 }
 
 //Draws a quad with a specified material
-uint8_t BOB_draw_atlas_quad_channel(BOB_Renderer *r, BOB_Quad screen_quad, BOB_Quad tex_sub_rect, BOB_Vector4 colour, BOB_Atlas_Handle atlas, uint16_t layer, float rotation, BOB_Material_Handle mat, uint8_t channel) {
+uint8_t BOB_draw_atlas_quad_channel(BOB_Quad screen_quad, BOB_Quad tex_sub_rect, BOB_Vector4 colour, BOB_Atlas_Handle atlas, uint16_t layer, float rotation, BOB_Material_Handle mat, uint8_t channel) {
     if((atlas & BOBi_MSB) || (mat & BOBi_MSB)) return 0; //Do not work with already invalid handles
-    BOB_Context *context;
+    BOB_Renderer *renderer;
     uint32_t index;
-    if(!BOBi_get_handle_data(atlas, &context, &index)) return 0;
-    return BOB_draw_texture_channel(r, context->atlas_table[index].texture, screen_quad, tex_sub_rect, colour, layer, rotation, mat, channel);
+    if(!BOBi_get_handle_data(atlas, &renderer, &index)) return 0;
+    return BOB_draw_texture_channel(renderer->atlas_table[index].texture, screen_quad, tex_sub_rect, colour, layer, rotation, mat, channel);
 }
 
 //Draws a pixel buffer with a specified material
-uint8_t BOB_draw_pixel_buffer_channel(BOB_Renderer *r, BOB_PixelBuffer_Handle pb, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, uint16_t layer, float rotation, BOB_Material_Handle mat, uint8_t channel) {
+uint8_t BOB_draw_pixel_buffer_channel(BOB_PixelBuffer_Handle pb, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, uint16_t layer, float rotation, BOB_Material_Handle mat, uint8_t channel) {
     if((pb & BOBi_MSB) || (mat & BOBi_MSB)) return 0; //Do not work with already invalid handles
-    BOB_Context *context;
+    BOB_Renderer *renderer;
     uint32_t index;
-    if(!BOBi_get_handle_data(pb, &context, &index)) return 0;
+    if(!BOBi_get_handle_data(pb, &renderer, &index)) return 0;
 
-    if(!BOBi_clip_quad(r, &dimensions)) return 1; //Early exit
-    BOB_Texture tex = context->texture_table[context->pixelbuffer_table[index].pixel_tex];
+    if(!BOBi_clip_quad(renderer, &dimensions)) return 1; //Early exit
+    BOB_Texture tex = renderer->texture_table[renderer->pixelbuffer_table[index].pixel_tex];
 
-    return BOB_draw_texture_channel(r, context->pixelbuffer_table[index].pixel_tex, dimensions, uv_dimensions, colour, layer, rotation, mat, channel);
+    return BOB_draw_texture_channel(renderer->pixelbuffer_table[index].pixel_tex, dimensions, uv_dimensions, colour, layer, rotation, mat, channel);
 }
 
 //=================================== CLIPPING FUNCTIONS =====================================
@@ -4723,7 +4563,10 @@ uint8_t BOB_draw_pixel_buffer_channel(BOB_Renderer *r, BOB_PixelBuffer_Handle pb
 //Updates the current clipping rect by pushing the intersection of the new clipping region
 //with the old clipping regions to the front of the stack but maintains the clipping directions
 //specified in the original rect
-void BOB_start_clip(BOB_Renderer *r, BOB_Quad rect, BOB_Clip_Dir dir) {
+void BOB_start_clip(BOB_Renderer_Handle renderer, BOB_Quad rect, BOB_Clip_Dir dir) {
+    BOB_Renderer *r;
+    if(!BOBi_get_renderer(renderer, &r)) return;
+
     BOBi_Clip_Stack *stack = r->stack;
     if(stack->size >= stack->capacity) {
         size_t newCap = (stack->capacity == 0) ? 4 : stack->capacity * 2;
@@ -4778,7 +4621,9 @@ void BOB_start_clip(BOB_Renderer *r, BOB_Quad rect, BOB_Clip_Dir dir) {
 }
 
 //Removes the first clipping intersection from the stack and returns its value
-void BOB_end_clip(BOB_Renderer *r) {
+void BOB_end_clip(BOB_Renderer_Handle renderer) {
+    BOB_Renderer *r;
+    if(!BOBi_get_renderer(renderer, &r)) return;
     BOB_ASSERT(r->stack->size > 0 && "Popping an empty stack");
 
     BOBi_Clip_Rect rect = r->stack->elems[r->stack->size-1];
@@ -5112,34 +4957,34 @@ uint8_t BOBi_parse_binary(BOB_Font *font, uint8_t *data, size_t data_sz) {
     return 1;
 }
 
-uint8_t BOB_load_bmf_font(BOB_Context_Handle context, const char *font_path, BOB_Font_Handle *font, BOB_BMF_Format format) {
-    BOB_Context *intrn_context;
-    if(!BOBi_get_context(context, &intrn_context)) return 0;
+uint8_t BOB_load_bmf_font(BOB_Renderer_Handle renderer, const char *font_path, BOB_Font_Handle *font, BOB_BMF_Format format) {
+    BOB_Renderer *intrn_renderer;
+    if(!BOBi_get_renderer(renderer, &intrn_renderer)) return 0;
 
-    if(intrn_context->num_fonts >= intrn_context->font_capacity) {
+    if(intrn_renderer->num_fonts >= intrn_renderer->font_capacity) {
         printf("ERROR: Exceeded Font Capacity");
         *font |= BOBi_MSB;
         return 0;
     }
 
     uint32_t index;
-    if (intrn_context->next_font_slot == UINT32_MAX) {
-        index = intrn_context->num_fonts;
+    if (intrn_renderer->next_font_slot == UINT32_MAX) {
+        index = intrn_renderer->num_fonts;
     }
     else {
-        index = intrn_context->next_font_slot;
+        index = intrn_renderer->next_font_slot;
 
         //Linearly searching to find the next empty slot. Yes I know that this is slow
-        for (intrn_context->next_font_slot = index + 1; intrn_context->next_font_slot < intrn_context->num_fonts; intrn_context->next_font_slot++) {
-            if (!intrn_context->font_table[intrn_context->next_font_slot].init)
+        for (intrn_renderer->next_font_slot = index + 1; intrn_renderer->next_font_slot < intrn_renderer->num_fonts; intrn_renderer->next_font_slot++) {
+            if (!intrn_renderer->font_table[intrn_renderer->next_font_slot].init)
                 break;
         }
 
-        if (intrn_context->next_font_slot >= intrn_context->num_fonts)
-            intrn_context->next_font_slot = UINT32_MAX;
+        if (intrn_renderer->next_font_slot >= intrn_renderer->num_fonts)
+            intrn_renderer->next_font_slot = UINT32_MAX;
     }
 
-    intrn_context->font_table[index].init = 1; //Setting the value to be initialised
+    intrn_renderer->font_table[index].init = 1; //Setting the value to be initialised
 
     uint8_t *buf;
     int size = BOBi_read_to_end(font_path, &buf, 1);
@@ -5148,86 +4993,86 @@ uint8_t BOB_load_bmf_font(BOB_Context_Handle context, const char *font_path, BOB
         return 0;
     }
 
-    uint8_t res = (format == BOB_BMF_TEXT) ? BOBi_parse_text(&intrn_context->font_table[index], buf, size) : BOBi_parse_binary(&intrn_context->font_table[index], buf, size);
+    uint8_t res = (format == BOB_BMF_TEXT) ? BOBi_parse_text(&intrn_renderer->font_table[index], buf, size) : BOBi_parse_binary(&intrn_renderer->font_table[index], buf, size);
     free(buf);
     if(!res) {
         *font |= BOBi_MSB;
-        intrn_context->font_table[index] = (BOB_Font){0}; //Clear all of the initially assigned font data
+        intrn_renderer->font_table[index] = (BOB_Font){0}; //Clear all of the initially assigned font data
         return 0;
     }
 
-    intrn_context->num_fonts++;
-    *font = ((uint64_t)context << 32) | index;
+    intrn_renderer->num_fonts++;
+    *font = ((uint64_t)renderer << 32) | index;
     return 1;
 }
 
-uint8_t BOB_create_custom_font(BOB_Context_Handle context, BOB_Font_Handle *font, size_t num_glyphs, size_t num_kernings, size_t line_height, size_t base) {
-    BOB_Context *intrn_context;
-    if(!BOBi_get_context(context, &intrn_context)) return 0;
+uint8_t BOB_create_custom_font(BOB_Renderer_Handle renderer, BOB_Font_Handle *font, size_t num_glyphs, size_t num_kernings, size_t line_height, size_t base) {
+    BOB_Renderer *intrn_renderer;
+    if(!BOBi_get_renderer(renderer, &intrn_renderer)) return 0;
 
-    if(intrn_context->num_fonts >= intrn_context->font_capacity) {
+    if(intrn_renderer->num_fonts >= intrn_renderer->font_capacity) {
         printf("ERROR: Exceeded Font Capacity");
         *font |= BOBi_MSB;
         return 0;
     }
 
     uint32_t index;
-    if (intrn_context->next_font_slot == UINT32_MAX) {
-        index = intrn_context->num_fonts;
+    if (intrn_renderer->next_font_slot == UINT32_MAX) {
+        index = intrn_renderer->num_fonts;
     }
     else {
-        index = intrn_context->next_font_slot;
+        index = intrn_renderer->next_font_slot;
 
         //Linearly searching to find the next empty slot. Yes I know that this is slow
-        for (intrn_context->next_font_slot = index + 1; intrn_context->next_font_slot < intrn_context->num_fonts; intrn_context->next_font_slot++) {
-            if (!intrn_context->font_table[intrn_context->next_font_slot].init)
+        for (intrn_renderer->next_font_slot = index + 1; intrn_renderer->next_font_slot < intrn_renderer->num_fonts; intrn_renderer->next_font_slot++) {
+            if (!intrn_renderer->font_table[intrn_renderer->next_font_slot].init)
                 break;
         }
 
-        if (intrn_context->next_font_slot >= intrn_context->num_fonts)
-            intrn_context->next_font_slot = UINT32_MAX;
+        if (intrn_renderer->next_font_slot >= intrn_renderer->num_fonts)
+            intrn_renderer->next_font_slot = UINT32_MAX;
     }
 
-    intrn_context->font_table[index].init = 1; //Setting the value to be initialised
-    intrn_context->font_table[index].base = base;
-    intrn_context->font_table[index].line_height = line_height;
-    intrn_context->font_table[index].glyph_capacity = num_glyphs;
-    intrn_context->font_table[index].glyph_count = 0;
-    intrn_context->font_table[index].kerning_capacity = num_kernings;
-    intrn_context->font_table[index].kerning_count = 0;
-    intrn_context->font_table[index].page_count = 0;
+    intrn_renderer->font_table[index].init = 1; //Setting the value to be initialised
+    intrn_renderer->font_table[index].base = base;
+    intrn_renderer->font_table[index].line_height = line_height;
+    intrn_renderer->font_table[index].glyph_capacity = num_glyphs;
+    intrn_renderer->font_table[index].glyph_count = 0;
+    intrn_renderer->font_table[index].kerning_capacity = num_kernings;
+    intrn_renderer->font_table[index].kerning_count = 0;
+    intrn_renderer->font_table[index].page_count = 0;
     if(num_glyphs) {
-        intrn_context->font_table[index].glyphs = malloc(sizeof(BOB_Glyph) * num_glyphs);
-        if(!BOBi_hashmap_init(intrn_context->font_table[index].glyph_capacity, intrn_context->font_table[index].glyph_map)) return 0;
+        intrn_renderer->font_table[index].glyphs = malloc(sizeof(BOB_Glyph) * num_glyphs);
+        if(!BOBi_hashmap_init(intrn_renderer->font_table[index].glyph_capacity, intrn_renderer->font_table[index].glyph_map)) return 0;
     }
     if(num_kernings) {
-        intrn_context->font_table[index].kernings = malloc(sizeof(BOB_Kerning) * num_kernings);
-        intrn_context->font_table[index].kerning_map = malloc(sizeof(BOBi_Hashmap));
-        if(!BOBi_hashmap_init(intrn_context->font_table[index].kerning_capacity, intrn_context->font_table[index].kerning_map)) return 0;
+        intrn_renderer->font_table[index].kernings = malloc(sizeof(BOB_Kerning) * num_kernings);
+        intrn_renderer->font_table[index].kerning_map = malloc(sizeof(BOBi_Hashmap));
+        if(!BOBi_hashmap_init(intrn_renderer->font_table[index].kerning_capacity, intrn_renderer->font_table[index].kerning_map)) return 0;
     }
 
-    intrn_context->num_fonts++;
-    *font = ((uint64_t)context << 32) | index;
+    intrn_renderer->num_fonts++;
+    *font = ((uint64_t)renderer << 32) | index;
     return 1;
 }
 
 uint8_t BOB_add_font_page(BOB_Font_Handle font, uint32_t page_width, uint32_t page_height, uint8_t *page_data, BOB_Format page_format) {
     if(font & BOBi_MSB) return 0; //Do not do anything with invalid handles
-    BOB_Context *context;
+    BOB_Renderer *renderer;
     uint32_t index;
-    if(!BOBi_get_handle_data(font, &context, &index)) return 0;
+    if(!BOBi_get_handle_data(font, &renderer, &index)) return 0;
     uint32_t handle = (font & 0xFFFFFFFF00000000) >> 32;
 
-     return BOB_create_texture(handle, page_width, page_height, page_data, page_format, &context->font_table[index].pages[context->font_table[index].page_count++]);
+     return BOB_create_texture(handle, page_width, page_height, page_data, page_format, &renderer->font_table[index].pages[renderer->font_table[index].page_count++]);
 }
 
-uint8_t BOB_draw_codepoint(BOB_Renderer *r, BOB_Font_Handle font, uint32_t codepoint, BOB_Vector2 *pos, BOB_Vector4 colour, uint16_t layer) {
+uint8_t BOB_draw_codepoint(BOB_Font_Handle font, uint32_t codepoint, BOB_Vector2 *pos, BOB_Vector4 colour, uint16_t layer) {
     if(font & BOBi_MSB) return 0; //Do not do anything with invalid handles
-    BOB_Context *context;
+    BOB_Renderer *renderer;
     uint32_t index;
-    if(!BOBi_get_handle_data(font, &context, &index)) return 0;
+    if(!BOBi_get_handle_data(font, &renderer, &index)) return 0;
 
-    BOB_Font f = context->font_table[index];
+    BOB_Font f = renderer->font_table[index];
     uint32_t hash_index = BOBi_hashmap_get(f.glyph_map, codepoint);
     if(hash_index == UINT32_MAX) return 0; //Codepoint doesn't exist
 
@@ -5236,9 +5081,9 @@ uint8_t BOB_draw_codepoint(BOB_Renderer *r, BOB_Font_Handle font, uint32_t codep
     if(!BOBi_get_index_from_handle(f.pages[g.page], &tex_index)) return 0;
     //Setting the flags we pass to the shader
     uint8_t chnl_flags = g.channel | BOB_GLYPH_BIT;
-    if(context->texture_table[tex_index].format == BOB_RED) chnl_flags |= BOB_GREYSCALE_BIT;
+    if(renderer->texture_table[tex_index].format == BOB_RED) chnl_flags |= BOB_GREYSCALE_BIT;
 
-    BOB_draw_texture_channel(r, f.pages[g.page], (BOB_Quad){pos->x + g.x_offset, pos->y + g.y_offset, g.sub_rect.w, g.sub_rect.h}, g.sub_rect, colour, layer, 0.0f, r->default_mat, chnl_flags);
+    BOB_draw_texture_channel(f.pages[g.page], (BOB_Quad){pos->x + g.x_offset, pos->y + g.y_offset, g.sub_rect.w, g.sub_rect.h}, g.sub_rect, colour, layer, 0.0f, renderer->default_mat, chnl_flags);
     pos->x += g.x_advance;
     return 1;
 }
@@ -5247,13 +5092,13 @@ typedef uint32_t (*BOBi_Codepoint_Reader)(void *str, size_t index);
 static uint32_t BOBi_read_char(void *str, size_t index) { return (uint32_t)((char *)str)[index]; }
 static uint32_t BOBi_read_codepoint(void *str, size_t index) { return ((uint32_t *)str)[index]; }
 
-static uint8_t BOBi_draw_string(BOB_Renderer *r, BOB_Font_Handle font, void *str, size_t str_len, BOBi_Codepoint_Reader reader, BOB_Vector2 *start, BOB_Vector4 colour, uint16_t layer) {
+static uint8_t BOBi_draw_string(BOB_Font_Handle font, void *str, size_t str_len, BOBi_Codepoint_Reader reader, BOB_Vector2 *start, BOB_Vector4 colour, uint16_t layer) {
     if(font & BOBi_MSB) return 0; //Do not do anything with invalid handles
-    BOB_Context *context;
+    BOB_Renderer *renderer;
     uint32_t index;
-    if(!BOBi_get_handle_data(font, &context, &index)) return 0;
+    if(!BOBi_get_handle_data(font, &renderer, &index)) return 0;
 
-    BOB_Font f = context->font_table[index];
+    BOB_Font f = renderer->font_table[index];
     float start_x = start->x;
     uint32_t prev = 0;
 
@@ -5281,47 +5126,47 @@ static uint8_t BOBi_draw_string(BOB_Renderer *r, BOB_Font_Handle font, void *str
             if(index != UINT32_MAX) start->x += f.kernings[index].amount;
         }
 
-        if(!BOB_draw_codepoint(r, font, codepoint, start, colour, layer)) return 0;
+        if(!BOB_draw_codepoint(font, codepoint, start, colour, layer)) return 0;
         prev = codepoint;
     }
 
     return 1;
 }
 
-uint8_t BOB_draw_char_string(BOB_Renderer *r, BOB_Font_Handle font, char *str, size_t str_len, BOB_Vector2 *start, BOB_Vector4 colour, uint16_t layer) {
-    return BOBi_draw_string(r, font, str, str_len, BOBi_read_char, start, colour, layer);
+uint8_t BOB_draw_char_string(BOB_Font_Handle font, char *str, size_t str_len, BOB_Vector2 *start, BOB_Vector4 colour, uint16_t layer) {
+    return BOBi_draw_string(font, str, str_len, BOBi_read_char, start, colour, layer);
 }
 
-uint8_t BOB_draw_codepoint_string(BOB_Renderer *r, BOB_Font_Handle font, uint32_t *str, size_t str_len, BOB_Vector2 *start, BOB_Vector4 colour, uint16_t layer) {
-    return BOBi_draw_string(r, font, str, str_len, BOBi_read_codepoint, start, colour, layer);
+uint8_t BOB_draw_codepoint_string(BOB_Font_Handle font, uint32_t *str, size_t str_len, BOB_Vector2 *start, BOB_Vector4 colour, uint16_t layer) {
+    return BOBi_draw_string(font, str, str_len, BOBi_read_codepoint, start, colour, layer);
 }
 
 uint8_t BOB_append_glyph(BOB_Font_Handle font, BOB_Glyph glyph) {
     if((font) & BOBi_MSB) return 0; //Do not work with already invalid handles
-    BOB_Context *context;
+    BOB_Renderer *renderer;
     uint32_t index;
-    if(!BOBi_get_handle_data(font, &context, &index)) return 0;
+    if(!BOBi_get_handle_data(font, &renderer, &index)) return 0;
 
-    BOBi_append_glyph(&context->font_table[index], glyph);
+    BOBi_append_glyph(&renderer->font_table[index], glyph);
     return 1;
 }
 uint8_t BOB_append_kerning(BOB_Font_Handle font, BOB_Kerning kerning) {
     if((font) & BOBi_MSB) return 0; //Do not work with already invalid handles
-    BOB_Context *context;
+    BOB_Renderer *renderer;
     uint32_t index;
-    if(!BOBi_get_handle_data(font, &context, &index)) return 0;
+    if(!BOBi_get_handle_data(font, &renderer, &index)) return 0;
 
-    BOBi_append_kerning(&context->font_table[index], kerning);
+    BOBi_append_kerning(&renderer->font_table[index], kerning);
     return 1;
 }
 
 static uint8_t BOBi_measure_string(void *str, size_t str_len, BOBi_Codepoint_Reader reader, BOB_Font_Handle font, BOB_Vector2 *out) {
     if((font) & BOBi_MSB) return 0; //Do not work with already invalid handles
-    BOB_Context *context;
+    BOB_Renderer *renderer;
     uint32_t index;
-    if(!BOBi_get_handle_data(font, &context, &index)) return 0;
+    if(!BOBi_get_handle_data(font, &renderer, &index)) return 0;
 
-    BOB_Font f = context->font_table[index];
+    BOB_Font f = renderer->font_table[index];
     float max_w = 0;
     float h = f.line_height;
     float cur_w = 0;
@@ -5377,17 +5222,17 @@ void BOB_print_parsing_error(void) {
 
 uint8_t BOB_font_free(BOB_Font_Handle *font) {
     if((*font) & BOBi_MSB) return 0; //Do not work with already invalid handles
-    BOB_Context *context;
+    BOB_Renderer *renderer;
     uint32_t index;
-    if(!BOBi_get_handle_data(*font, &context, &index)) return 0;
+    if(!BOBi_get_handle_data(*font, &renderer, &index)) return 0;
 
-    BOB_Font f = context->font_table[index];
+    BOB_Font f = renderer->font_table[index];
 
     for(size_t i = 0; i < f.page_count; i++) {
         BOB_texture_free(&f.pages[i]);
     }
 
-    BOBi_font_free(context, *font);
+    BOBi_font_free(renderer, *font);
 
     *font |= BOBi_MSB;
     return 1;
