@@ -3,19 +3,22 @@
 #include <stdint.h>
 #include <stddef.h>
 
-//TODO: Vulkan support - Fix memory leaks, screen resizing, and figure out why text is coloured in opengl version and not vulkan version
+//TODO: Vulkan support - Fix memory leaks, screen resizing, discarding swapchain and depth images, pbo functions and figure out why text is coloured in opengl version and not vulkan version
 //      Use macros to hide getting index and context from a handle and finding index where next object is placed
-//      Merge Renderer and context together
 //      Hide all of the structs in the .c file and use handles everywhere
 //
 //      Do proper error reporting and document what each error code means somewhere
+//      Debug mode with statistics
+//      Reduce number of memory allocations cpu-side and in the Vulkan backend
+//      Allow more customisability in the shaders in general
+//      Use texture arrays instead of binding textures every draw call (and ssbos for shaders (opengl))
 //      Allow the user to define render passes -> Custom framebuffers
 //      Allow the user to define their own pipeline and sampler layout
 //      Allow the user to select what kind of device you want vulkan to use
-//      Maybe allow custom vertex layout
-//      Debug mode with statistics
+//      Custom vertex layout
+//      Compute shader support
 
-#define BOB_INCLUDE_GLAD
+// #define BOB_INCLUDE_GLAD
 #define BOB_INCLUDE_VULKAN
 
 typedef uint64_t BOB_Texture_Handle;
@@ -398,7 +401,6 @@ typedef struct BOB_Font BOB_Font;
 //TODO: Change renderers to also just return handles to the user and keep this struct internal
 //      Store renderers in bob_state alongside contexts
 typedef struct {
-    // BOB_Render_Layer layer; //Layers of rendering
     BOBi_Clip_Stack *stack; //Stores the current clipping rect and the history
     BOB_Mat4 projection; //projection matrix for this renderer
     RenderBatch batch; //Vertex/Index/Draw call memory of the renderer
@@ -412,6 +414,7 @@ typedef struct {
     BOB_Font *font_table;
 
     void *mapped_mem_ptr; //Pointer to cpu memory mapped from gpu memory
+    float *colour;
 
     //TODO: Maybe make this a pointer instead of a union
     union {

@@ -284,7 +284,7 @@ const char *fragment_shader = "#version 330 core\n"
                               "}\n";
 
 uint8_t BOB_create_opengl_renderer(size_t atlas_capacity, size_t pixelbuf_capacity, size_t tex_capacity, size_t mat_capacity, size_t font_capacity, size_t width, size_t height, size_t vertex_capacity, size_t index_capacity, size_t draw_call_capacity, BOB_Renderer_Handle *renderer) {
-    if(!BOBi_create_renderer(BOB_OPENGL_RENDERER, atlas_capacity, pixelbuf_capacity, tex_capacity, mat_capacity, font_capacity, vertex_capacity, index_capacity, draw_call_capacity, 0, 0, renderer)) return 0;
+    if(!BOBi_create_renderer(BOB_OPENGL_RENDERER, atlas_capacity, pixelbuf_capacity, tex_capacity, mat_capacity, font_capacity, vertex_capacity, index_capacity, draw_call_capacity, width, height, renderer)) return 0;
 
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -324,7 +324,7 @@ uint8_t BOB_create_opengl_renderer(size_t atlas_capacity, size_t pixelbuf_capaci
         return 0;
     }
 
-    if(!BOB_create_material(*renderer, (BOB_Shader_Data[2]){(BOB_Shader_Data){.shader_code = vertex_shader, .type = BOB_VERTEX_SHADER}, (BOB_Shader_Data){.shader_code = fragment_shader, .type = BOB_FRAGMENT_SHADER}}, 2, (BOB_Uniform[2]){BOB_uniform_mat4("uProjection", r->projection), BOB_uniform_signed_int("screenTexture", 0)}, 2, &r->default_mat)) {
+    if(!BOB_create_material(*renderer, (BOB_Shader_Data[2]){(BOB_Shader_Data){.shader_code = vertex_shader, .type = BOB_VERTEX_SHADER}, (BOB_Shader_Data){.shader_code = fragment_shader, .type = BOB_FRAGMENT_SHADER}}, 2, (BOB_Uniform[1]){BOB_uniform_mat4("uProjection", r->projection)}, 1, &r->default_mat)) {
         BOB_destroy_renderer(renderer);
         return 0;
     }
@@ -337,11 +337,13 @@ void BOBi_gl_destroy_renderer_mem(BOB_Renderer *r) {
     glDeleteVertexArrays(1, &r->opengl.vao);
 }
 
-uint8_t BOBi_gl_draw(BOB_Renderer *r, float colour[4]) {
+uint8_t BOBi_gl_draw(BOB_Renderer *r) {
     //Resetting colour and depth
-    if(colour != NULL) glClearColor(colour[0], colour[1], colour[2], colour[3]);
-    glClearDepth(1.0f);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT); //Need to clear the depth buffer as well
+    if(r->colour != NULL) {
+        glClearColor(r->colour[0], r->colour[1], r->colour[2], r->colour[3]);
+        glClearDepth(1.0f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT); //Need to clear the depth buffer as well
+    }
 
     //Bind all of the arrays and buffers we will reuse over time
     glBindVertexArray(r->opengl.vao);
@@ -374,10 +376,9 @@ uint8_t BOBi_gl_draw(BOB_Renderer *r, float colour[4]) {
     return 1;
 }
 
-//TODO: FIX
 void BOBi_gl_copy_buffer_data(BOB_Renderer *r, void *data, size_t data_sz) {
     //Update projection matrix for renderer
-    BOB_ortho_gl(0.0f, width, height, 0.0f, -BOB_MAX_LAYER, 0.0f, &r->projection);
+    BOB_ortho_gl(0.0f, r->screen_width, r->screen_height, 0.0f, -BOB_MAX_LAYER, 0.0f, &r->projection);
     BOB_set_material_mat4(r->default_mat, 0, r->projection);
 
     glBindBuffer(GL_ARRAY_BUFFER, r->opengl.vao);
@@ -2252,7 +2253,9 @@ uint8_t BOBi_vk_recreate_swapchain(BOB_Renderer *renderer, size_t width, size_t 
 
 // ===================================== DRAWING FUNCTIONS =========================================
 
-uint8_t BOBi_vk_draw(BOB_Renderer *renderer, float colour[4]) {
+//TODO: IF MULTIPLE DRAW CALLS PER FRAME, CANNOT DO THE UNDEFINED BS ANYMORE WHEN TRANSITIONING, HAVE TO DO FROM PREVIOUS LAYOUT
+//OTHERWISE WILL DISCARD PREVIOUS SWAPCHAIN IMAGE
+uint8_t BOBi_vk_draw(BOB_Renderer *renderer) {
     //Wait until operations from previous frame have completed
     VULKAN_ERROR(vkWaitForFences(renderer->vulkan.log_device, 1, &renderer->vulkan.draw_fence, VK_TRUE, UINT64_MAX), "Failed to wait for fence");
     BOBi_vk_destroy_buffer(renderer->vulkan.log_device, &renderer->vulkan.vert_staging_buf);
@@ -2302,8 +2305,12 @@ uint8_t BOBi_vk_draw(BOB_Renderer *renderer, float colour[4]) {
 // //Records draw calls into the general command buffer
 // uint8_t BOBi_vk_draw(BOB_Renderer *renderer) {
 //     VkCommandBuffer buffer = renderer->vulkan.command_buffer; //Getting a reference to the command buffer so that don't have to write out full code every time
-    VkClearValue clear_color = {.color = {.float32 = {0.0f, 0.0f, 0.0f, 0.0f}}}; //Set the colour the screen gets cleared to
-    VkClearValue clear_depth = {.depthStencil = {.depth = 1.0f, .stencil = 0}}; //Set the depth the screen is cleared at
+    VkClearValue clear_color = {0};
+    VkClearValue clear_depth = {0};
+    if(renderer->colour != NULL) {
+        clear_color = (VkClearValue){.color = {.float32 = {renderer->colour[0], renderer->colour[1], renderer->colour[2], renderer->colour[3]}}}; //Set the colour the screen gets cleared to
+        clear_depth = (VkClearValue){.depthStencil = {.depth = 1.0f, .stencil = 0}}; //Set the depth the screen is cleared at
+    }
 
     VkRenderingAttachmentInfo attachment_info = {
         .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .pNext = NULL,
@@ -2409,7 +2416,6 @@ uint8_t BOBi_vk_draw(BOB_Renderer *renderer, float colour[4]) {
     uint32_t old_mat = UINT32_MAX, old_tex = UINT32_MAX;
     for(size_t i = 0; i < renderer->batch.num_draw_calls; i++) {
         BOBi_Draw_Call call = BOBi_get_arena_elem(renderer->batch.draw_call_arena, i, BOBi_Draw_Call);
-        printf("Draw call %zu, Num indicies: %zu, Offset: %zu\n", i, call.num_indices, call.index_offset);
 
         uint32_t mat_index, tex_index;
         if(!BOBi_get_index_from_handle(call.mat, &mat_index)) return 0;
@@ -2426,7 +2432,6 @@ uint8_t BOBi_vk_draw(BOB_Renderer *renderer, float colour[4]) {
             vkCmdBindDescriptorSets(buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, mat->vulkan.layout, 0, 1, &mat->vulkan.uniform_descriptor_set, 0, NULL);
         }
         if(old_tex != tex_index) {
-            printf("Switching texture\n");
             //Set the material to use this texture.
             BOB_Texture *tex = &renderer->texture_table[tex_index];
             vkCmdBindDescriptorSets(buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, mat->vulkan.layout, 1, 1, &tex->vulkan.descriptor, 0, NULL);
@@ -2495,7 +2500,7 @@ typedef uint8_t (*BOBi_back_create_pb_func)(BOB_Renderer *renderer, uint32_t pb_
 typedef void (*BOBi_back_destr_obj_func)(BOB_Renderer *renderer, uint32_t obj_index);
 typedef void (*BOBi_back_destroy_renderer_func)(BOB_Renderer *renderer);
 typedef uint8_t (*BOBi_back_create_default_mat_func)(BOB_Renderer_Handle renderer);
-typedef uint8_t (*BOBi_back_draw_func)(BOB_Renderer *renderer, float colour[4]);
+typedef uint8_t (*BOBi_back_draw_func)(BOB_Renderer *renderer);
 typedef void (*BOBi_back_copy_data_tex_func)(BOB_Renderer *renderer, uint32_t atlas_index, BOB_Format format, BOB_Quad dest_rect, uint8_t *data);
 typedef uint8_t (*BOBi_back_bind_mem_func)(BOB_Renderer *renderer, uint32_t pb_index);
 typedef void (*BOBi_back_unbind_mem_func)(BOB_Renderer *renderer);
@@ -2512,7 +2517,6 @@ typedef struct {
     BOBi_back_create_mat_func create_material;
     BOBi_back_create_pb_func create_pixelbuffer;
     BOBi_back_destroy_renderer_func destroy_renderer;
-    BOBi_back_create_default_mat_func create_default_mat;
     BOBi_back_draw_func draw;
     BOBi_back_copy_data_tex_func copy_data_to_tex;
     BOBi_back_bind_mem_func bind_memory;
@@ -2533,7 +2537,6 @@ BOBi_Backend_Vtable renderer_functions[BOB_NUM_RENDERER_TYPES] = {
         .create_texture = &BOBi_gl_create_tex,
         .create_material = &BOBi_gl_create_material,
         .create_pixelbuffer = &BOBi_gl_create_pbo,
-        .create_default_mat = &BOBi_gl_create_default_material,
         .destroy_renderer = &BOBi_gl_destroy_renderer_mem,
         .draw = &BOBi_gl_draw,
         .copy_data_to_tex = &BOBi_gl_copy_data_tex,
@@ -2555,7 +2558,6 @@ BOBi_Backend_Vtable renderer_functions[BOB_NUM_RENDERER_TYPES] = {
         .create_texture = &BOBi_vk_create_texture,
         .create_material = &BOBi_vk_create_material,
         .create_pixelbuffer = NULL,
-        .create_default_mat = &BOBi_vk_create_default_material,
         .draw = &BOBi_vk_draw,
         .copy_data_to_tex = NULL,
         .bind_memory = NULL,
@@ -3526,6 +3528,7 @@ void BOB_renderer_begin(BOB_Renderer_Handle renderer, float colour[4]) {
     r->batch.num_draw_calls = 0;
     r->batch.num_indices = 0;
     r->batch.num_vertices = 0;
+    r->colour = colour;
 }
 
 //Ends rendering to the current pixel frame
@@ -3634,7 +3637,7 @@ void BOB_renderer_end(BOB_Renderer_Handle renderer) {
 
     r->batch.num_draw_calls = num_unique_calls;
 
-    renderer_functions[r->type].draw(r, NULL);
+    renderer_functions[r->type].draw(r);
 }
 
 //Updates the dimensions of the screen that the renderer renders to.
