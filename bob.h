@@ -213,42 +213,6 @@ typedef struct {
     uint8_t is_reference;
 } BOB_Uniform;
 
-//TODO: Make this struct hidden and create a public one that
-//only holds name, value, and type, not any api specific stuff. Won't matter since we memcpy everything anyway
-typedef struct {
-    const char *name;
-    union {
-        float f;
-        uint32_t u32;
-        int32_t i32;
-        BOB_Vector2 vec2;
-        BOB_Vector3 vec3;
-        BOB_Vector4 vec4;
-        BOB_Texture_Handle tex_index;
-        BOB_Mat4 mat4;
-        const void *ptr;
-    } value;
-    union {
-        #ifdef BOB_INCLUDE_GLAD
-        struct {
-            int32_t location;
-        } opengl;
-        #endif //BOB_INCLUDE_GLAD
-        #ifdef BOB_INCLUDE_VULKAN
-        struct {
-            union {
-                uint32_t binding;
-                uint32_t offset;
-            };
-            VkShaderStageFlags stage; //TODO: Make these settable by the user using an API enum
-        } vulkan;
-        #endif //BOB_INCLUDE_VULKAN
-    };
-
-    BOB_Uniform_Type type;
-    uint8_t is_reference;
-} BOBi_Uniform_Impl;
-
 #define BOB_uniform_float(u_name, v, stage) (BOB_Uniform){.name = (u_name), .value.f = (v), .type = BOB_UNIFORM_FLOAT, .shader_stage = stage, .is_reference = 0}
 #define BOB_uniform_unsigned_int(u_name, v, stage) (BOB_Uniform){.name = (u_name), .value.u32 = (v), .type = BOB_UNIFORM_UNSIGNED_INT, .shader_stage = stage, .is_reference = 0}
 #define BOB_uniform_signed_int(u_name, v, stage) (BOB_Uniform){.name = (u_name), .value.i32 = (v), .type = BOB_UNIFORM_SIGNED_INT, .shader_stage = stage, .is_reference = 0}
@@ -488,6 +452,41 @@ typedef struct {
     BOB_Format format; //Pixel format of the texture
     uint8_t init;
 } BOBi_Atlas_Impl;
+
+typedef struct {
+    const char *name;
+    union {
+        float f;
+        uint32_t u32;
+        int32_t i32;
+        BOB_Vector2 vec2;
+        BOB_Vector3 vec3;
+        BOB_Vector4 vec4;
+        BOB_Texture_Handle tex_index;
+        BOB_Mat4 mat4;
+        const void *ptr;
+    } value;
+    union {
+        #ifdef BOB_INCLUDE_GLAD
+        struct {
+            int32_t location;
+        } opengl;
+        #endif //BOB_INCLUDE_GLAD
+        #ifdef BOB_INCLUDE_VULKAN
+        struct {
+            union {
+                uint32_t binding;
+                uint32_t offset;
+            };
+            VkShaderStageFlags stage;
+        } vulkan;
+        #endif //BOB_INCLUDE_VULKAN
+    };
+
+    BOB_Uniform_Type type;
+    uint8_t is_reference;
+} BOBi_Uniform_Impl;
+
 
 //TODO: Make the shader/pipeline independent of the material?
 //      Only when we add other stuff to the material like blend modes etc
