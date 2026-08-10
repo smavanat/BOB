@@ -5,6 +5,8 @@ main.c
 CMakeLists.txt
 build/
 GLFW/
+dev/
+externals/
 *.fnt
 *.png
 stb_image.h
