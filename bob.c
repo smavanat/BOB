@@ -337,14 +337,18 @@ void BOBi_gl_destroy_renderer_mem(BOB_Renderer *r) {
     glDeleteVertexArrays(1, &r->opengl.vao);
 }
 
-uint8_t BOBi_gl_draw(BOB_Renderer *r) {
+uint8_t BOBi_gl_begin_frame(BOB_Renderer *r) {
     //Resetting colour and depth
-    if(r->colour != NULL) {
-        glClearColor(r->colour[0], r->colour[1], r->colour[2], r->colour[3]);
-        glClearDepth(1.0f);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT); //Need to clear the depth buffer as well
-    }
+    if(r->colour != NULL) glClearColor(r->colour[0], r->colour[1], r->colour[2], r->colour[3]);
+    glClearDepth(1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT); //Need to clear the depth buffer as well
 
+    return 1;
+}
+
+uint8_t BOBi_gl_end_frame(BOB_Renderer *r) {return 1;}
+
+uint8_t BOBi_gl_draw(BOB_Renderer *r) {
     //Bind all of the arrays and buffers we will reuse over time
     glBindVertexArray(r->opengl.vao);
     glBindBuffer(GL_ARRAY_BUFFER, r->opengl.vbo);
@@ -936,7 +940,7 @@ unsigned char shader_vert_spv[] = {
 };
 unsigned int shader_vert_spv_len = 1700;
 
-//Validation layers we are using.
+//Validation layers we are using. TODO: Figure out memory leaks
 const char *validation_layers[] = {"VK_LAYER_KHRONOS_validation"};
 size_t num_validation_layers = 1;
 //Extensions we are using
@@ -1203,12 +1207,12 @@ uint8_t BOBi_vk_stream_to_buffer(VkDevice device, const void *src, size_t size, 
 }
 
 //Copies the data from a buffer to an image's data memory
-void BOBi_vk_copy_buffer_to_image(VkCommandBuffer command_buf, VkBuffer buffer, VkImage image, uint32_t width, uint32_t height) {
+void BOBi_vk_copy_buffer_to_image(VkCommandBuffer command_buf, VkBuffer buffer, VkImage image, BOB_Quad sub_rect) {
     VkBufferImageCopy region = {
         .bufferOffset = 0, .bufferRowLength = 0, .bufferImageHeight = 0,
         .imageSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1},
-        .imageOffset = {0, 0, 0},
-        .imageExtent = {width, height, 1}
+        .imageOffset = {sub_rect.x, sub_rect.y, 0},
+        .imageExtent = {sub_rect.w, sub_rect.h, 1}
     };
     vkCmdCopyBufferToImage(command_buf, buffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 }
@@ -2112,8 +2116,8 @@ uint8_t BOBi_vk_init_vulkan_renderer(BOB_Renderer *renderer, size_t width, size_
     VULKAN_ERROR(!BOBi_vk_create_logical_device(renderer), "Didn't create logical device");
     VULKAN_ERROR(!BOBi_vk_create_swapchain(renderer, width, height), "Didn't create swapchain");
     VULKAN_ERROR(!BOBi_vk_create_image_views(renderer), "Didn't create swapchain images");
-    VULKAN_ERROR(!BOBi_vk_create_command_pool(renderer), "Didn't create command pool");
     VULKAN_ERROR(!BOBi_vk_create_depth_resources(renderer), "Didn't create depth resources");
+    VULKAN_ERROR(!BOBi_vk_create_command_pool(renderer), "Didn't create command pool");
     VULKAN_ERROR(!BOBi_vk_create_descriptor_pool(renderer), "Didn't create descriptor pool");
     VULKAN_ERROR(!BOBi_vk_create_descriptor_layout(renderer, &renderer->vulkan.default_tex_layout, 
                 (VkDescriptorType[1]){VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER}, (VkShaderStageFlags[1]){VK_SHADER_STAGE_FRAGMENT_BIT},
@@ -2128,6 +2132,16 @@ uint8_t BOBi_vk_init_vulkan_renderer(BOB_Renderer *renderer, size_t width, size_
     //Create the index buffer
     VULKAN_ERROR(!BOBi_vk_create_buffer(renderer, index_buf_sz, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
                   VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,  &renderer->vulkan.index_buffer), "Failed to create index buffer");
+
+    //Create the staging buffer
+    if(!BOBi_vk_create_buffer(renderer, vert_buf_sz, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                  VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, &renderer->vulkan.vert_staging_buf)) return 0;
+    if(!BOBi_vk_create_buffer(renderer, index_buf_sz, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                  VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, &renderer->vulkan.index_staging_buf)) return 0;
+    if(!BOBi_vk_create_buffer(renderer, 4096, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &renderer->vulkan.pbo_staging_buf)) return 0;
+    renderer->vulkan.pbo_staging_buf_sz = 4096;
+
     return 1;
 }
 
@@ -2174,6 +2188,7 @@ void BOBi_vk_destroy_renderer(BOB_Renderer *renderer) {
     BOBi_vk_destroy_buffer(renderer->vulkan.log_device, &renderer->vulkan.index_buffer);
     BOBi_vk_destroy_buffer(renderer->vulkan.log_device, &renderer->vulkan.index_staging_buf);
     BOBi_vk_destroy_buffer(renderer->vulkan.log_device, &renderer->vulkan.vert_staging_buf);
+    BOBi_vk_destroy_buffer(renderer->vulkan.log_device, &renderer->vulkan.pbo_staging_buf);
     vkDestroyDescriptorSetLayout(renderer->vulkan.log_device, renderer->vulkan.default_tex_layout, NULL);
     BOBi_vk_destroy_image(renderer, &renderer->vulkan.depth);
 
@@ -2238,7 +2253,7 @@ uint8_t BOBi_vk_create_texture(BOB_Renderer *renderer, uint32_t index, size_t wi
     VULKAN_ERROR(!BOBi_vk_transition_tex_layout(command_buf, tex->image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL), "Failed to transition layout",
         BOBi_vk_destroy_buffer(renderer->vulkan.log_device, &staging_buf);
     );
-    BOBi_vk_copy_buffer_to_image(command_buf, staging_buf.buffer, tex->image, width, height);
+    BOBi_vk_copy_buffer_to_image(command_buf, staging_buf.buffer, tex->image, (BOB_Quad){0, 0, width, height});
     VULKAN_ERROR(!BOBi_vk_transition_tex_layout(command_buf, tex->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
         "Failed to transition layout", BOBi_vk_destroy_buffer(renderer->vulkan.log_device, &staging_buf);
     );
@@ -2258,6 +2273,53 @@ uint8_t BOBi_vk_create_texture(BOB_Renderer *renderer, uint32_t index, size_t wi
 
     BOBi_vk_write_image_descriptor(renderer, tex->descriptor, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 0, index);
     return 1;
+}
+
+// ============================================ PBO FUNCTIONS ======================================
+
+void BOBi_vk_copy_data_tex(BOB_Renderer *renderer, uint32_t tex_index, BOB_Format format, BOB_Quad region, uint8_t *pixels) {
+    BOBi_Vulkan_Buffer staging_buf;
+    BOBi_vk_create_buffer(renderer, (region.h * region.w), VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &staging_buf);
+    BOBi_vk_stream_to_buffer(renderer->vulkan.log_device, pixels, region.h * region.w, &staging_buf);
+
+    VkCommandBuffer buf;
+    BOBi_vk_begin_single_time_commands(renderer, &buf);
+    BOBi_vk_copy_buffer_to_image(buf, staging_buf.buffer, renderer->texture_table[tex_index].vulkan.image, region);
+    BOBi_vk_end_single_time_commands(renderer, buf);
+}
+
+void BOBi_vk_destroy_pbo(BOB_Renderer *r, uint32_t index) {return;}
+uint8_t BOBi_vk_create_pbo(BOB_Renderer *r, uint32_t index) {return 1;}
+
+uint8_t BOBi_vk_bind_pbo_mem(BOB_Renderer *renderer, uint32_t pb_index) {
+    VULKAN_ERROR(vkMapMemory(renderer->vulkan.log_device, renderer->vulkan.pbo_staging_buf.memory, 0, renderer->vulkan.pbo_staging_buf_sz, 0, &renderer->mapped_mem_ptr), "Failed to map GPU memory to CPU memory");
+
+    return 1;
+}
+void BOBi_vk_unbind_pbo_mem(BOB_Renderer *renderer) {
+    vkUnmapMemory(renderer->vulkan.log_device, renderer->vulkan.pbo_staging_buf.memory);
+}
+void BOBi_vk_copy_to_pbo(BOB_Renderer *renderer, uint8_t *data, size_t buf_sz) {
+    if(buf_sz > renderer->vulkan.pbo_staging_buf_sz) {
+        vkUnmapMemory(renderer->vulkan.log_device, renderer->vulkan.pbo_staging_buf.memory);
+        BOBi_vk_destroy_buffer(renderer->vulkan.log_device, &renderer->vulkan.pbo_staging_buf);
+        BOBi_vk_create_buffer(renderer, buf_sz, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &renderer->vulkan.pbo_staging_buf);
+        renderer->vulkan.pbo_staging_buf_sz = buf_sz;
+        if(!vkMapMemory(renderer->vulkan.log_device, renderer->vulkan.pbo_staging_buf.memory, 0, buf_sz, 0, &renderer->mapped_mem_ptr)) return;
+    }
+    memcpy(renderer->mapped_mem_ptr, data, buf_sz);
+}
+void BOBi_vk_copy_from_pbo(BOB_Renderer *renderer, uint8_t *dest, size_t buf_sz) {
+    memcpy(dest, renderer->mapped_mem_ptr, buf_sz);
+}
+void BOBi_vk_upload_pbo_data(BOB_Renderer *renderer, uint32_t pb_index) {
+    VkCommandBuffer buf;
+    BOBi_vk_begin_single_time_commands(renderer, &buf);
+    BOB_Texture tex = renderer->texture_table[pb_index];
+    BOBi_vk_copy_buffer_to_image(buf, renderer->vulkan.pbo_staging_buf.buffer, tex.vulkan.image, (BOB_Quad){0, 0, tex.width, tex.height});
+    BOBi_vk_end_single_time_commands(renderer, buf);
 }
 
 // ============================================ DESTRUCTION FUNCTIONS ========================================
@@ -2284,20 +2346,17 @@ uint8_t BOBi_vk_recreate_swapchain(BOB_Renderer *renderer) {
 
 // ===================================== DRAWING FUNCTIONS =========================================
 
-//TODO: IF MULTIPLE DRAW CALLS PER FRAME, CANNOT DO THE UNDEFINED BS ANYMORE WHEN TRANSITIONING, HAVE TO DO FROM PREVIOUS LAYOUT
-//OTHERWISE WILL DISCARD PREVIOUS SWAPCHAIN IMAGE
-uint8_t BOBi_vk_draw(BOB_Renderer *renderer) {
+uint8_t BOBi_vk_begin_frame(BOB_Renderer *renderer) {
+    VkCommandBuffer buffer = renderer->vulkan.command_buffer; //Getting a reference to the command buffer so that don't have to write out full code every time
     //Wait until operations from previous frame have completed
     VULKAN_ERROR(vkWaitForFences(renderer->vulkan.log_device, 1, &renderer->vulkan.draw_fence, VK_TRUE, UINT64_MAX), "Failed to wait for fence");
-    BOBi_vk_destroy_buffer(renderer->vulkan.log_device, &renderer->vulkan.vert_staging_buf);
-    BOBi_vk_destroy_buffer(renderer->vulkan.log_device, &renderer->vulkan.index_staging_buf);
 
     //Get the next swapchain image
     VkResult res = vkAcquireNextImageKHR(renderer->vulkan.log_device, renderer->vulkan.swapchain, UINT64_MAX,
                                          renderer->vulkan.present_complete_semaphore, VK_NULL_HANDLE, &renderer->vulkan.next_swapchain_image_index);
     //If the swapchain data is invalid, remake it
     if(res == VK_ERROR_OUT_OF_DATE_KHR) {
-        BOBi_vk_recreate_swapchain(renderer); //TODO: Fix
+        BOBi_vk_recreate_swapchain(renderer);
         return 1;
     }
     //If we haven't been able to get a valid image, throw an error
@@ -2309,37 +2368,40 @@ uint8_t BOBi_vk_draw(BOB_Renderer *renderer) {
     vkResetFences(renderer->vulkan.log_device, 1, &renderer->vulkan.draw_fence);
 
     //CLear the command buffer and record the draw commands for the current frame
-    vkResetCommandBuffer(renderer->vulkan.command_buffer, 0);
+    vkResetCommandBuffer(buffer, 0);
 
     //Begin writing to the command buffer
     VkCommandBufferBeginInfo begin_info = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .pNext = NULL
     };
-    VkCommandBuffer buffer = renderer->vulkan.command_buffer; //Getting a reference to the command buffer so that don't have to write out full code every time
     VULKAN_ERROR(vkBeginCommandBuffer(buffer, &begin_info), "Failed to begin command buffer operations");
 
+    //TODO: FIX THE TRANSITIONING
+
     //Transition the image to VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
-    BOBi_vk_transition_image_layout(renderer->vulkan.images[renderer->vulkan.next_swapchain_image_index], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, (VkAccessFlags2){},
+    BOBi_vk_transition_image_layout(renderer->vulkan.images[renderer->vulkan.next_swapchain_image_index],
+                            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, (VkAccessFlags2){},
                             VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                             VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_IMAGE_ASPECT_COLOR_BIT, buffer);
 
     //Transition depth image to depth attachment optimal layout
-    BOBi_vk_transition_image_layout(renderer->vulkan.depth.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-                            VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+    BOBi_vk_transition_image_layout(renderer->vulkan.depth.image, VK_IMAGE_LAYOUT_UNDEFINED,
+                            VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                            VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
                             VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-                            VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-                            VK_IMAGE_ASPECT_DEPTH_BIT, buffer);
+                            VK_IMAGE_ASPECT_DEPTH_BIT, renderer->vulkan.command_buffer);
 
-//     return 1;
-// }
-//
-// //Records draw calls into the general command buffer
-// uint8_t BOBi_vk_draw(BOB_Renderer *renderer) {
-//     VkCommandBuffer buffer = renderer->vulkan.command_buffer; //Getting a reference to the command buffer so that don't have to write out full code every time
+    if(renderer->frame_state != 1) renderer->frame_state = 1;
+
+    return 1;
+}
+
+uint8_t BOBi_vk_draw(BOB_Renderer *renderer) {
+    VkCommandBuffer buffer = renderer->vulkan.command_buffer; //Getting a reference to the command buffer so that don't have to write out full code every time
     VkClearValue clear_color = {0};
     VkClearValue clear_depth = {0};
-    if(renderer->colour != NULL) {
-        clear_color = (VkClearValue){.color = {.float32 = {renderer->colour[0], renderer->colour[1], renderer->colour[2], renderer->colour[3]}}}; //Set the colour the screen gets cleared to
+    if(renderer->frame_state == 1) {
+        if(renderer->colour != NULL) clear_color = (VkClearValue){.color = {.float32 = {renderer->colour[0], renderer->colour[1], renderer->colour[2], renderer->colour[3]}}}; //Set the colour the screen gets cleared to
         clear_depth = (VkClearValue){.depthStencil = {.depth = 1.0f, .stencil = 0}}; //Set the depth the screen is cleared at
     }
 
@@ -2347,7 +2409,7 @@ uint8_t BOBi_vk_draw(BOB_Renderer *renderer) {
         .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .pNext = NULL,
             .imageView = renderer->vulkan.views[renderer->vulkan.next_swapchain_image_index], //Specifies which view to render to
         .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, //Specifies what to do with the image during rendering
+        .loadOp = (renderer->frame_state == 1) ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD, //Specifies what to do with the image during rendering
         .storeOp = VK_ATTACHMENT_STORE_OP_STORE, //Specifies what to do with the image after rendering
         .clearValue = clear_color
     };
@@ -2355,7 +2417,7 @@ uint8_t BOBi_vk_draw(BOB_Renderer *renderer) {
         .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .pNext = NULL,
         .imageView = renderer->vulkan.depth.view,
         .imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, //Specifies what to do with the image during rendering
+        .loadOp = (renderer->frame_state == 1) ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD, //Specifies what to do with the image during rendering
         .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE, //Specifies what to do with the image after rendering
         .clearValue = clear_depth
     };
@@ -2370,12 +2432,6 @@ uint8_t BOBi_vk_draw(BOB_Renderer *renderer) {
 
     size_t index_sz = sizeof(uint32_t) * renderer->batch.num_indices;
     size_t vertex_sz = sizeof(BOB_Render_Vertex) * renderer->batch.num_vertices;
-    //Create the staging buffer
-    if(!BOBi_vk_create_buffer(renderer, vertex_sz, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                  VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, &renderer->vulkan.vert_staging_buf)) return 0;
-    if(!BOBi_vk_create_buffer(renderer, index_sz, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                  VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, &renderer->vulkan.index_staging_buf)) return 0;
-
     //Map the staging buffer to CPU memory and copy the index data into it
     VULKAN_ERROR(!BOBi_vk_stream_to_buffer(renderer->vulkan.log_device, renderer->batch.vertex_arena.memory, index_sz, &renderer->vulkan.index_staging_buf), "Failed to stream data into a Vulkan Buffer");
     //Copy the data
@@ -2473,13 +2529,14 @@ uint8_t BOBi_vk_draw(BOB_Renderer *renderer) {
         old_tex = tex_index;
     }
     vkCmdEndRendering(buffer); //End rendering
-//     return 1;
-// }
-//
-// //Draws every frame
-// uint8_t BOBi_vk_end_frame(BOB_Renderer *renderer) {
-//     VkCommandBuffer buffer = renderer->vulkan.command_buffer; //Getting a reference to the command buffer so that don't have to write out full code every time
 
+    if(renderer->frame_state != 2) renderer->frame_state = 2;
+
+    return 1;
+}
+
+uint8_t BOBi_vk_end_frame(BOB_Renderer *renderer) {
+    VkCommandBuffer buffer = renderer->vulkan.command_buffer; //Getting a reference to the command buffer so that don't have to write out full code every time
     //After rendering, transition the swapchain image to VK_IMAGE_LAYOUT_PRESENT_SRC_KHR so it can be presented to the screen
     BOBi_vk_transition_image_layout(renderer->vulkan.images[renderer->vulkan.next_swapchain_image_index], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
                             VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, (VkAccessFlags2){}, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
@@ -2503,12 +2560,12 @@ uint8_t BOBi_vk_draw(BOB_Renderer *renderer) {
         .waitSemaphoreCount = 1, .pWaitSemaphores = &renderer->vulkan.render_finished_semaphore[renderer->vulkan.next_swapchain_image_index],
         .swapchainCount = 1, .pSwapchains = &renderer->vulkan.swapchain, .pImageIndices = &renderer->vulkan.next_swapchain_image_index
     };
-    res = vkQueuePresentKHR(renderer->vulkan.graphics_queue, &present_info);
+    VkResult res = vkQueuePresentKHR(renderer->vulkan.graphics_queue, &present_info);
 
     //If its invalid, recreate the swapchain
     if(res == VK_ERROR_OUT_OF_DATE_KHR || res == VK_SUBOPTIMAL_KHR || renderer->vulkan.framebuffer_resized) {
         renderer->vulkan.framebuffer_resized = 0;
-        BOBi_vk_recreate_swapchain(renderer); //TODO: Fix
+        BOBi_vk_recreate_swapchain(renderer);
         return 1;
     }
     VULKAN_ERROR(res, "Failed to acquire swap chain image");
@@ -2548,7 +2605,9 @@ typedef struct {
     BOBi_back_create_mat_func create_material;
     BOBi_back_create_pb_func create_pixelbuffer;
     BOBi_back_destroy_renderer_func destroy_renderer;
+    BOBi_back_draw_func begin_frame;
     BOBi_back_draw_func draw;
+    BOBi_back_draw_func end_frame;
     BOBi_back_copy_data_tex_func copy_data_to_tex;
     BOBi_back_bind_mem_func bind_memory;
     BOBi_back_unbind_mem_func unbind_memory;
@@ -2569,7 +2628,9 @@ BOBi_Backend_Vtable renderer_functions[BOB_NUM_RENDERER_TYPES] = {
         .create_material = &BOBi_gl_create_material,
         .create_pixelbuffer = &BOBi_gl_create_pbo,
         .destroy_renderer = &BOBi_gl_destroy_renderer_mem,
+        .begin_frame = &BOBi_gl_begin_frame,
         .draw = &BOBi_gl_draw,
+        .end_frame = &BOBi_gl_end_frame,
         .copy_data_to_tex = &BOBi_gl_copy_data_tex,
         .bind_memory = &BOBi_gl_bind_pbo_mem,
         .unbind_memory = &BOBi_gl_unbind_pbo_mem,
@@ -2584,18 +2645,20 @@ BOBi_Backend_Vtable renderer_functions[BOB_NUM_RENDERER_TYPES] = {
     #ifdef BOB_INCLUDE_VULKAN
     (BOBi_Backend_Vtable) {
         .destroy_texture = &BOBi_vk_destroy_texture,
-        .destroy_pixelbuffer = NULL, //TODO: FIGURE OUT HOW PBs in VULKAN WORK
+        .destroy_pixelbuffer = &BOBi_vk_destroy_pbo,
         .destroy_material = &BOBi_vk_destroy_material,
         .create_texture = &BOBi_vk_create_texture,
         .create_material = &BOBi_vk_create_material,
-        .create_pixelbuffer = NULL,
+        .create_pixelbuffer = &BOBi_vk_create_pbo,
+        .begin_frame = &BOBi_vk_begin_frame,
         .draw = &BOBi_vk_draw,
-        .copy_data_to_tex = NULL,
-        .bind_memory = NULL,
-        .unbind_memory = NULL,
-        .copy_into_buf = NULL,
-        .copy_from_buf = NULL,
-        .update_tex_from_buf = NULL,
+        .end_frame = &BOBi_vk_end_frame,
+        .copy_data_to_tex = &BOBi_vk_copy_data_tex,
+        .bind_memory = &BOBi_vk_bind_pbo_mem,
+        .unbind_memory = &BOBi_vk_unbind_pbo_mem,
+        .copy_into_buf = &BOBi_vk_copy_to_pbo,
+        .copy_from_buf = &BOBi_vk_copy_from_pbo,
+        .update_tex_from_buf = &BOBi_vk_upload_pbo_data,
         .update_rend_dim = &BOBi_vk_update_rend_dim,
         .destroy_renderer = &BOBi_vk_destroy_renderer,
     },
@@ -3124,9 +3187,124 @@ size_t BOBi_triangulate_ec(BOB_Vector2 *poly_points, size_t poly_size, uint32_t 
     return triangle_count;
 }
 
-void BOBi_flush_draw_calls(BOB_Renderer_Handle r) {
-    BOB_renderer_end(r);
-    BOB_renderer_begin(r, NULL);
+void BOBi_renderer_reset(BOB_Renderer *r) {
+    BOB_arena_clear(&r->batch.vertex_arena);
+    BOB_arena_clear(&r->batch.vertex_arena_2);
+    BOB_arena_clear(&r->batch.draw_call_arena);
+
+    r->batch.num_draw_calls = 0;
+    r->batch.num_indices = 0;
+    r->batch.num_vertices = 0;
+}
+
+void BOBi_renderer_draw(BOB_Renderer *r) {
+    if(r->batch.num_draw_calls == 0 || r->batch.num_indices == 0 || r->batch.num_vertices == 0) return;
+    //Sort the draw calls
+    BOBi_quicksort_draw_calls(r, 0, r->batch.num_draw_calls-1);
+
+    //Copy the vertices to be in sorted order
+    for(size_t i = 0; i < r->batch.num_draw_calls; i++) {
+        BOBi_Draw_Call *call = (BOBi_Draw_Call *)r->batch.draw_call_arena.memory + i;
+        BOB_Render_Vertex *new_pos = BOB_arena_alloc(&r->batch.vertex_arena_2, call->num_vertices * sizeof(BOB_Render_Vertex), alignof(BOB_Render_Vertex));
+        memcpy(new_pos, call->vertices, call->num_vertices * sizeof(BOB_Render_Vertex));
+        call->vertices = new_pos;
+    }
+
+    //Clear the orginial vertex arena so that we can re-use it for indicies
+    BOB_arena_clear(&r->batch.vertex_arena);
+
+    //Generate the indices for each draw call
+    size_t cur_vertex = 0;
+    size_t index_count = 0;
+    uint32_t *indices;
+    for(size_t i = 0; i < r->batch.num_draw_calls; i++) {
+        BOBi_Draw_Call *call = (BOBi_Draw_Call *)r->batch.draw_call_arena.memory + i;
+        call->index_offset = index_count;
+        indices = BOB_arena_alloc(&r->batch.vertex_arena, sizeof(uint32_t) * call->num_indices, alignof(uint32_t));
+        switch(call->type) {
+            case BOBi_DRAW_CIRCLE: {
+                size_t circ_index = 0;
+                for(int i = 1; i < call->num_vertices; i++) {
+                    indices[circ_index++] = cur_vertex;
+                    indices[circ_index++] = cur_vertex + i;
+                    indices[circ_index++] = cur_vertex + ((i+1) % call->num_vertices);
+                }
+            }
+            break;
+            case BOBi_DRAW_QUAD:
+                indices[0] = cur_vertex;
+                indices[1] = cur_vertex+1;
+                indices[2] = cur_vertex+3;
+                indices[3] = cur_vertex+1;
+                indices[4] = cur_vertex+2;
+                indices[5] = cur_vertex+3;
+            break;
+            case BOBi_DRAW_POLY: {
+                uint32_t triangle_indices[(BOBi_MAX_POLY_SIZE - 2) * 3]; //Ear clipping always produces n-2 triangles for a polygon with n vertices
+                BOB_Vector2 base_vertices[BOBi_MAX_POLY_SIZE];
+                for(size_t j = 0; j < call->num_vertices; j++) {
+                    base_vertices[j] = (BOB_Vector2){call->vertices[j].pos.x, call->vertices[j].pos.y};
+                }
+
+                size_t triangle_count = BOBi_triangulate_ec(base_vertices, call->num_vertices, triangle_indices);
+
+                if(!triangle_count) return; //Early exit
+
+                //Processing the returned vertex data into a more compact form so we can pass it to the renderer
+                uint32_t vertex_map[BOBi_MAX_POLY_SIZE];
+
+                //Filling the map with dummy values
+                for(size_t i = 0; i < call->num_vertices; i++)
+                    vertex_map[i] = UINT32_MAX;
+
+                BOB_Render_Vertex compressed[BOBi_MAX_POLY_SIZE]; //Holds the compressed vertex values
+                size_t vertex_count = 0;
+
+                //Copying the old verticies into compressed format
+                for(size_t j = 0; j < triangle_count*3; j++) {
+                    uint32_t old = triangle_indices[j];
+                    if(vertex_map[old] == UINT32_MAX) {
+                        vertex_map[old] = vertex_count;
+                        compressed[vertex_count++] = call->vertices[old];
+                    }
+                    indices[j] = cur_vertex + vertex_map[old];
+                }
+
+                memcpy(call->vertices, compressed, vertex_count * sizeof(BOB_Render_Vertex));
+            }
+            break;
+        }
+
+        index_count += call->num_indices;
+        cur_vertex += call->num_vertices;
+    }
+
+    //Compress the draw calls:
+    size_t num_unique_calls = 1;
+    size_t i = 0;
+    BOBi_Draw_Call *curr = (BOBi_Draw_Call *)r->batch.draw_call_arena.memory + i;
+    while(i < r->batch.num_draw_calls-1) {
+        BOBi_Draw_Call next = BOBi_get_arena_elem(r->batch.draw_call_arena, i+1, BOBi_Draw_Call);
+        if(BOBi_compare_draw_calls(*curr, next, 0) != 0) {
+            BOBi_get_arena_elem(r->batch.draw_call_arena, num_unique_calls, BOBi_Draw_Call) = next;
+            curr = (BOBi_Draw_Call *)r->batch.draw_call_arena.memory + num_unique_calls;
+            num_unique_calls++;
+        }
+        else {
+            curr->num_indices += next.num_indices;
+            curr->num_vertices += next.num_vertices;
+        }
+        i++;
+    }
+
+    r->batch.num_draw_calls = num_unique_calls;
+
+    renderer_functions[r->type].draw(r);
+}
+
+void BOBi_flush_draw_calls(BOB_Renderer *r) {
+    BOBi_renderer_draw(r);
+    BOBi_renderer_reset(r);
 }
 
 void BOBi_check_draw_capacity(BOB_Renderer_Handle renderer, uint32_t num_vertices, uint32_t num_indices) {
@@ -3135,7 +3313,7 @@ void BOBi_check_draw_capacity(BOB_Renderer_Handle renderer, uint32_t num_vertice
     if(num_indices + r->batch.num_indices >= BOB_MAX_INDEX_CAPACITY ||
        num_vertices + r->batch.num_vertices >= BOB_MAX_VERTEX_CAPACITY ||
        r->batch.num_draw_calls + 1 >= BOB_MAX_DRAW_CALL_CAPACITY) {
-        BOBi_flush_draw_calls(renderer);
+        BOBi_flush_draw_calls(r);
         r->batch.num_draw_calls = 0;
         r->batch.num_indices = 0;
         r->batch.num_vertices = 0;
@@ -3551,15 +3729,9 @@ void BOB_terminate() {
 void BOB_renderer_begin(BOB_Renderer_Handle renderer, float colour[4]) {
     BOB_Renderer *r;
     if(!BOBi_get_renderer(renderer, &r)) return;
-
-    BOB_arena_clear(&r->batch.vertex_arena);
-    BOB_arena_clear(&r->batch.vertex_arena_2);
-    BOB_arena_clear(&r->batch.draw_call_arena);
-
-    r->batch.num_draw_calls = 0;
-    r->batch.num_indices = 0;
-    r->batch.num_vertices = 0;
+    BOBi_renderer_reset(r);
     r->colour = colour;
+    renderer_functions[r->type].begin_frame(r);
 }
 
 //Ends rendering to the current pixel frame
@@ -3568,107 +3740,8 @@ void BOB_renderer_end(BOB_Renderer_Handle renderer) {
     BOB_Renderer *r;
     if(!BOBi_get_renderer(renderer, &r)) return;
 
-    //Sort the draw calls
-    BOBi_quicksort_draw_calls(r, 0, r->batch.num_draw_calls-1);
-
-    //Copy the vertices to be in sorted order
-    for(size_t i = 0; i < r->batch.num_draw_calls; i++) {
-        BOBi_Draw_Call *call = (BOBi_Draw_Call *)r->batch.draw_call_arena.memory + i;
-        BOB_Render_Vertex *new_pos = BOB_arena_alloc(&r->batch.vertex_arena_2, call->num_vertices * sizeof(BOB_Render_Vertex), alignof(BOB_Render_Vertex));
-        memcpy(new_pos, call->vertices, call->num_vertices * sizeof(BOB_Render_Vertex));
-        call->vertices = new_pos;
-    }
-
-    //Clear the orginial vertex arena so that we can re-use it for indicies
-    BOB_arena_clear(&r->batch.vertex_arena);
-
-    //Generate the indices for each draw call
-    size_t cur_vertex = 0;
-    size_t index_count = 0;
-    uint32_t *indices;
-    for(size_t i = 0; i < r->batch.num_draw_calls; i++) {
-        BOBi_Draw_Call *call = (BOBi_Draw_Call *)r->batch.draw_call_arena.memory + i;
-        call->index_offset = index_count;
-        indices = BOB_arena_alloc(&r->batch.vertex_arena, sizeof(uint32_t) * call->num_indices, alignof(uint32_t));
-        switch(call->type) {
-            case BOBi_DRAW_CIRCLE: {
-                size_t circ_index = 0;
-                for(int i = 1; i < call->num_vertices; i++) {
-                    indices[circ_index++] = cur_vertex;
-                    indices[circ_index++] = cur_vertex + i;
-                    indices[circ_index++] = cur_vertex + ((i+1) % call->num_vertices);
-                }
-            }
-            break;
-            case BOBi_DRAW_QUAD:
-                indices[0] = cur_vertex;
-                indices[1] = cur_vertex+1;
-                indices[2] = cur_vertex+3;
-                indices[3] = cur_vertex+1;
-                indices[4] = cur_vertex+2;
-                indices[5] = cur_vertex+3;
-            break;
-            case BOBi_DRAW_POLY: {
-                uint32_t triangle_indices[(BOBi_MAX_POLY_SIZE - 2) * 3]; //Ear clipping always produces n-2 triangles for a polygon with n vertices
-                BOB_Vector2 base_vertices[BOBi_MAX_POLY_SIZE];
-                for(size_t j = 0; j < call->num_vertices; j++) {
-                    base_vertices[j] = (BOB_Vector2){call->vertices[j].pos.x, call->vertices[j].pos.y};
-                }
-
-                size_t triangle_count = BOBi_triangulate_ec(base_vertices, call->num_vertices, triangle_indices);
-
-                if(!triangle_count) return; //Early exit
-
-                //Processing the returned vertex data into a more compact form so we can pass it to the renderer
-                uint32_t vertex_map[BOBi_MAX_POLY_SIZE];
-
-                //Filling the map with dummy values
-                for(size_t i = 0; i < call->num_vertices; i++)
-                    vertex_map[i] = UINT32_MAX;
-
-                BOB_Render_Vertex compressed[BOBi_MAX_POLY_SIZE]; //Holds the compressed vertex values
-                size_t vertex_count = 0;
-
-                //Copying the old verticies into compressed format
-                for(size_t j = 0; j < triangle_count*3; j++) {
-                    uint32_t old = triangle_indices[j];
-                    if(vertex_map[old] == UINT32_MAX) {
-                        vertex_map[old] = vertex_count;
-                        compressed[vertex_count++] = call->vertices[old];
-                    }
-                    indices[j] = cur_vertex + vertex_map[old];
-                }
-
-                memcpy(call->vertices, compressed, vertex_count * sizeof(BOB_Render_Vertex));
-            }
-            break;
-        }
-
-        index_count += call->num_indices;
-        cur_vertex += call->num_vertices;
-    }
-
-    //Compress the draw calls:
-    size_t num_unique_calls = 1;
-    size_t i = 0;
-    BOBi_Draw_Call *curr = (BOBi_Draw_Call *)r->batch.draw_call_arena.memory + i;
-    while(i < r->batch.num_draw_calls-1) {
-        BOBi_Draw_Call next = BOBi_get_arena_elem(r->batch.draw_call_arena, i+1, BOBi_Draw_Call);
-        if(BOBi_compare_draw_calls(*curr, next, 0) != 0) {
-            BOBi_get_arena_elem(r->batch.draw_call_arena, num_unique_calls, BOBi_Draw_Call) = next;
-            curr = (BOBi_Draw_Call *)r->batch.draw_call_arena.memory + num_unique_calls;
-            num_unique_calls++;
-        }
-        else {
-            curr->num_indices += next.num_indices;
-            curr->num_vertices += next.num_vertices;
-        }
-        i++;
-    }
-
-    r->batch.num_draw_calls = num_unique_calls;
-
-    renderer_functions[r->type].draw(r);
+    BOBi_renderer_draw(r);
+    renderer_functions[r->type].end_frame(r);
 }
 
 //Updates the dimensions of the screen that the renderer renders to.

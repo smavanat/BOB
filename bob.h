@@ -3,10 +3,10 @@
 #include <stdint.h>
 #include <stddef.h>
 
-//TODO: Vulkan support - Fix discarding swapchain and depth images, pbo functions and figure out why text is coloured in opengl version and not vulkan version
-//      Use macros to hide getting index and context from a handle and finding index where next object is placed
+//TODO: Vulkan support - figure out why text is coloured in opengl version and not vulkan version
 //      Hide all of the structs in the .c file and use handles everywhere
 //
+//      Use macros to hide getting index and context from a handle and finding index where next object is placed
 //      Do proper error reporting and document what each error code means somewhere
 //      Debug mode with statistics
 //      Reduce number of memory allocations cpu-side and in the Vulkan backend
@@ -460,8 +460,11 @@ typedef struct {
             VkDescriptorPool descriptor_pool;
             VkDescriptorSetLayout default_tex_layout;
 
+            //TODO: FIX VULKAN MEMORY
             BOBi_Vulkan_Buffer vert_staging_buf;
             BOBi_Vulkan_Buffer index_staging_buf;
+            BOBi_Vulkan_Buffer pbo_staging_buf;
+            size_t pbo_staging_buf_sz;
         } vulkan;
     #endif //BOB_INCLUDE_VULKAN
     };
@@ -493,6 +496,7 @@ typedef struct {
     uint32_t screen_width_px;
 
     BOB_Renderer_Type type;
+    uint8_t frame_state; //Holds the state of the renderer: 0 - first ever frame 1 - start of new frame 2 - in the middle of drawing a frame
 } BOB_Renderer;
 
 //Updates the current clipping rect by pushing the intersection of the new clipping region
