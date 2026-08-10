@@ -15,9 +15,6 @@
 //      Custom vertex layout
 //      Compute shader support
 
-// #define BOB_INCLUDE_GLAD
-// #define BOB_INCLUDE_VULKAN
-
 #ifdef BOB_INCLUDE_GLAD
 #include <glad/glad.h>
 #endif
