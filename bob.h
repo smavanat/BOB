@@ -3,7 +3,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-//TODO: Vulkan support - Fix memory leaks, screen resizing, discarding swapchain and depth images, pbo functions and figure out why text is coloured in opengl version and not vulkan version
+//TODO: Vulkan support - Fix discarding swapchain and depth images, pbo functions and figure out why text is coloured in opengl version and not vulkan version
 //      Use macros to hide getting index and context from a handle and finding index where next object is placed
 //      Hide all of the structs in the .c file and use handles everywhere
 //

@@ -1068,6 +1068,11 @@ uint8_t BOBi_vk_find_memory_type(BOB_Renderer *renderer, uint32_t type_filter, V
 }
 
 void BOBi_vk_destroy_image(BOB_Renderer *renderer, BOBi_Vulkan_Image *tex) {
+    vkWaitForFences(renderer->vulkan.log_device, 1, &renderer->vulkan.draw_fence, VK_TRUE, UINT64_MAX); //Need to wait for the GPU to stop using these resources
+    if(tex->descriptor != VK_NULL_HANDLE) {
+        vkFreeDescriptorSets(renderer->vulkan.log_device, renderer->vulkan.descriptor_pool, 1, &tex->descriptor);
+        tex->descriptor = VK_NULL_HANDLE;
+    }
     if(tex->view != VK_NULL_HANDLE) {
         vkDestroyImageView(renderer->vulkan.log_device, tex->view, NULL);
         tex->view = VK_NULL_HANDLE;
@@ -1751,17 +1756,42 @@ uint8_t BOBi_vk_create_command_buffer(BOB_Renderer *renderer, VkCommandBuffer *c
     return 1;
 }
 
+void BOBi_vk_destroy_sync_objects(BOB_Renderer *renderer) {
+    vkDeviceWaitIdle(renderer->vulkan.log_device);
+
+    if(renderer->vulkan.present_complete_semaphore != VK_NULL_HANDLE) {
+        vkDestroySemaphore(renderer->vulkan.log_device, renderer->vulkan.present_complete_semaphore, NULL);
+        renderer->vulkan.present_complete_semaphore = VK_NULL_HANDLE;
+    }
+    if(renderer->vulkan.draw_fence != VK_NULL_HANDLE) {
+        vkDestroyFence(renderer->vulkan.log_device, renderer->vulkan.draw_fence, NULL);
+        renderer->vulkan.draw_fence = VK_NULL_HANDLE;
+    }
+    if(renderer->vulkan.render_finished_semaphore != NULL) {
+        for(size_t i = 0; i < renderer->vulkan.num_images; i++) {
+            if(renderer->vulkan.render_finished_semaphore[i] != VK_NULL_HANDLE) {
+                vkDestroySemaphore(renderer->vulkan.log_device, renderer->vulkan.render_finished_semaphore[i], NULL);
+                renderer->vulkan.render_finished_semaphore[i] = VK_NULL_HANDLE;
+            }
+        }
+    }
+}
+
 //Creates the semaphores and fences required to synchronise operations
 uint8_t BOBi_vk_create_sync_objects(BOB_Renderer *renderer) {
     VkSemaphoreCreateInfo sem_info = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, .pNext = NULL, .flags = 0 };
 
     VkFenceCreateInfo fence_info = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, .pNext = NULL, .flags = VK_FENCE_CREATE_SIGNALED_BIT};
     renderer->vulkan.render_finished_semaphore = malloc(sizeof(VkSemaphore) * renderer->vulkan.num_images);
+    memset(renderer->vulkan.render_finished_semaphore, 0, sizeof(VkSemaphore) * renderer->vulkan.num_images);
     for(size_t i = 0; i < renderer->vulkan.num_images; i++) {
-        VULKAN_ERROR(vkCreateSemaphore(renderer->vulkan.log_device, &sem_info, NULL, &renderer->vulkan.render_finished_semaphore[i]), "Failed to create a semaphore");
+        VULKAN_ERROR(vkCreateSemaphore(renderer->vulkan.log_device, &sem_info, NULL, &renderer->vulkan.render_finished_semaphore[i]), "Failed to create a semaphore",
+                        BOBi_vk_destroy_sync_objects(renderer));
     }
-    VULKAN_ERROR(vkCreateSemaphore(renderer->vulkan.log_device, &sem_info, NULL, &renderer->vulkan.present_complete_semaphore), "Failed to create a semaphore");
-    VULKAN_ERROR(vkCreateFence(renderer->vulkan.log_device, &fence_info, NULL, &renderer->vulkan.draw_fence), "Failed to create a fence");
+    VULKAN_ERROR(vkCreateSemaphore(renderer->vulkan.log_device, &sem_info, NULL, &renderer->vulkan.present_complete_semaphore), "Failed to create a semaphore",
+                 BOBi_vk_destroy_sync_objects(renderer));
+    VULKAN_ERROR(vkCreateFence(renderer->vulkan.log_device, &fence_info, NULL, &renderer->vulkan.draw_fence), "Failed to create a fence",
+                 BOBi_vk_destroy_sync_objects(renderer));
 
     return 1;
 }
@@ -1988,6 +2018,7 @@ uint8_t BOBi_vk_create_descriptor_sets(BOB_Renderer *renderer, VkDescriptorSet *
 
 void BOBi_vk_destroy_material(BOB_Renderer *renderer, uint32_t index) {
     BOB_Material *mat = &renderer->material_table[index];
+    vkWaitForFences(renderer->vulkan.log_device, 1, &renderer->vulkan.draw_fence, VK_TRUE, UINT64_MAX);
     if(mat->vulkan.uniform_descriptor_set != VK_NULL_HANDLE) {vkFreeDescriptorSets(renderer->vulkan.log_device, renderer->vulkan.descriptor_pool, 1, &mat->vulkan.uniform_descriptor_set); mat->vulkan.uniform_descriptor_set = VK_NULL_HANDLE;}
     if(mat->vulkan.uniform_set_layout != VK_NULL_HANDLE) {vkDestroyDescriptorSetLayout(renderer->vulkan.log_device, mat->vulkan.uniform_set_layout, NULL); mat->vulkan.uniform_set_layout = VK_NULL_HANDLE;}
     BOBi_vk_destroy_buffer(renderer->vulkan.log_device, &mat->vulkan.uniform_buffer);
@@ -2138,8 +2169,13 @@ uint8_t BOB_create_vulkan_renderer(size_t atlas_capacity, size_t pixelbuf_capaci
 }
 
 void BOBi_vk_destroy_renderer(BOB_Renderer *renderer) {
+    vkDeviceWaitIdle(renderer->vulkan.log_device); //Need to wait for the GPU to stop using these resources
     BOBi_vk_destroy_buffer(renderer->vulkan.log_device, &renderer->vulkan.vertex_buffer);
     BOBi_vk_destroy_buffer(renderer->vulkan.log_device, &renderer->vulkan.index_buffer);
+    BOBi_vk_destroy_buffer(renderer->vulkan.log_device, &renderer->vulkan.index_staging_buf);
+    BOBi_vk_destroy_buffer(renderer->vulkan.log_device, &renderer->vulkan.vert_staging_buf);
+    vkDestroyDescriptorSetLayout(renderer->vulkan.log_device, renderer->vulkan.default_tex_layout, NULL);
+    BOBi_vk_destroy_image(renderer, &renderer->vulkan.depth);
 
     for(size_t i = 0; i < renderer->vulkan.num_images; i++) {
         vkDestroyImageView(renderer->vulkan.log_device, renderer->vulkan.views[i], NULL);
@@ -2149,9 +2185,7 @@ void BOBi_vk_destroy_renderer(BOB_Renderer *renderer) {
     free(renderer->vulkan.images);
 
     vkFreeCommandBuffers(renderer->vulkan.log_device, renderer->vulkan.command_pool, 1, &renderer->vulkan.command_buffer);
-    for(size_t i = 0; i < renderer->vulkan.num_images; i++) {
-        vkDestroySemaphore(renderer->vulkan.log_device, renderer->vulkan.render_finished_semaphore[i], NULL);
-    }
+    BOBi_vk_destroy_sync_objects(renderer);
     free(renderer->vulkan.render_finished_semaphore);
     vkDestroySemaphore(renderer->vulkan.log_device, renderer->vulkan.present_complete_semaphore, NULL);
     vkDestroyFence(renderer->vulkan.log_device, renderer->vulkan.draw_fence, NULL);
@@ -2168,10 +2202,7 @@ void BOBi_vk_destroy_renderer(BOB_Renderer *renderer) {
 void BOBi_vk_destroy_texture(BOB_Renderer *renderer, uint32_t tex_index) {
     BOBi_Vulkan_Image *tex = &renderer->texture_table[tex_index].vulkan;
 
-    if(tex->view != VK_NULL_HANDLE) vkDestroyImageView(renderer->vulkan.log_device, tex->view, NULL);
-    if(tex->memory != VK_NULL_HANDLE) vkFreeMemory(renderer->vulkan.log_device, tex->memory, NULL);
-    if(tex->image != VK_NULL_HANDLE) vkDestroyImage(renderer->vulkan.log_device, tex->image, NULL);
-    if(tex->descriptor != VK_NULL_HANDLE) vkFreeDescriptorSets(renderer->vulkan.log_device, renderer->vulkan.descriptor_pool, 1, &tex->descriptor);
+    BOBi_vk_destroy_image(renderer, tex);
 }
 
 VkFormat BOBi_vk_convert_format(BOB_Format format) {
@@ -2242,13 +2273,13 @@ void BOBi_vk_cleanup_swapchain(BOB_Renderer *renderer) {
 }
 
 //Rebuilds the swapchain on framebuffer resize
-uint8_t BOBi_vk_recreate_swapchain(BOB_Renderer *renderer, size_t width, size_t height) {
+uint8_t BOBi_vk_recreate_swapchain(BOB_Renderer *renderer) {
     VULKAN_ERROR(vkDeviceWaitIdle(renderer->vulkan.log_device), "Failed to wait for signal");
     BOBi_vk_cleanup_swapchain(renderer);
     vkDestroyImageView(renderer->vulkan.log_device, renderer->vulkan.depth.view, NULL);
-    vkFreeMemory(renderer->vulkan.log_device, renderer->vulkan.depth.memory, NULL);
     vkDestroyImage(renderer->vulkan.log_device, renderer->vulkan.depth.image, NULL);
-    return BOBi_vk_create_swapchain(renderer, width, height) && BOBi_vk_create_image_views(renderer) && BOBi_vk_create_depth_resources(renderer);
+    vkFreeMemory(renderer->vulkan.log_device, renderer->vulkan.depth.memory, NULL);
+    return BOBi_vk_create_swapchain(renderer, renderer->screen_width_px, renderer->screen_height_px) && BOBi_vk_create_image_views(renderer) && BOBi_vk_create_depth_resources(renderer);
 }
 
 // ===================================== DRAWING FUNCTIONS =========================================
@@ -2266,7 +2297,7 @@ uint8_t BOBi_vk_draw(BOB_Renderer *renderer) {
                                          renderer->vulkan.present_complete_semaphore, VK_NULL_HANDLE, &renderer->vulkan.next_swapchain_image_index);
     //If the swapchain data is invalid, remake it
     if(res == VK_ERROR_OUT_OF_DATE_KHR) {
-        BOBi_vk_recreate_swapchain(renderer, 0, 0); //TODO: Fix
+        BOBi_vk_recreate_swapchain(renderer); //TODO: Fix
         return 1;
     }
     //If we haven't been able to get a valid image, throw an error
@@ -2477,7 +2508,7 @@ uint8_t BOBi_vk_draw(BOB_Renderer *renderer) {
     //If its invalid, recreate the swapchain
     if(res == VK_ERROR_OUT_OF_DATE_KHR || res == VK_SUBOPTIMAL_KHR || renderer->vulkan.framebuffer_resized) {
         renderer->vulkan.framebuffer_resized = 0;
-        BOBi_vk_recreate_swapchain(renderer, 0, 0); //TODO: Fix
+        BOBi_vk_recreate_swapchain(renderer); //TODO: Fix
         return 1;
     }
     VULKAN_ERROR(res, "Failed to acquire swap chain image");
