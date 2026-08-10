@@ -13,7 +13,7 @@
  - Built-in default shaders so you can easily get started
 
 ## Getting Started  
-If using the OpenGL backend, define BOB_INCLUDE_GLAD and BOB_IMPLEMENTATION in one file before adding bob.h and add [glad.h](https://gen.glad.sh/) to your include path
+If using the OpenGL backend, define BOB_INCLUDE_GLAD and BOB_IMPLEMENTATION in one file before adding bob.h and add [glad.h](https://gen.glad.sh/) to your include path  
 If using the Vulkan backend, define BOB_INCLUDE_VULKAN and BOB_IMPLEMENTATION in one file before adding bob.h and add the [Vulkan SDK](https://vulkan.lunarg.com/sdk/home) (at least version 1.3) to your include path  
 
 ```C
@@ -200,7 +200,7 @@ The above code will output something like the following:
 **TODO** Add image here  
 ## Summary
 
-* [General Concepts]
+* [General Concepts](#general-concepts)
     * [Creating Objects]
     * [The Render Loop]
     * [Rendering Lines]
@@ -226,3 +226,5 @@ The above code will output something like the following:
     * [Materials]
     * [Uniforms]
     * [Clipping]
+
+## General Concepts
