@@ -3,8 +3,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-//TODO: Vulkan support - figure out why text is coloured in opengl version and not vulkan version
-//      Hide all of the structs in the .c file and use handles everywhere
+//TODO: Hide all of the structs in the .c file and use handles everywhere
 //
 //      Use macros to hide getting index and context from a handle and finding index where next object is placed
 //      Do proper error reporting and document what each error code means somewhere
@@ -18,8 +17,8 @@
 //      Custom vertex layout
 //      Compute shader support
 
-// #define BOB_INCLUDE_GLAD
-#define BOB_INCLUDE_VULKAN
+#define BOB_INCLUDE_GLAD
+// #define BOB_INCLUDE_VULKAN
 
 typedef uint64_t BOB_Texture_Handle;
 typedef uint64_t BOB_Material_Handle;

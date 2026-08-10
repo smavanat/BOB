@@ -563,7 +563,6 @@ void BOBi_gl_upload_pbo_data(BOB_Renderer *renderer, uint32_t pb_index) {
 //================================================= VULKAN FUNCTIONS ================================================
 
 #ifdef BOB_INCLUDE_VULKAN
-
 unsigned char shader_frag_spv[] = {
   0x03, 0x02, 0x23, 0x07, 0x00, 0x00, 0x01, 0x00, 0x0b, 0x00, 0x0d, 0x00,
   0x73, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x11, 0x00, 0x02, 0x00,
@@ -1877,24 +1876,15 @@ uint8_t BOBi_vk_create_graphics_pipeline(BOB_Renderer *renderer, BOB_Material *m
 
     //TODO: CHECK THAT THE OLD VERSION WORKS
     VkPipelineRasterizationStateCreateInfo rasteriser = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-        .depthClampEnable = VK_FALSE,
-        .rasterizerDiscardEnable = VK_FALSE,
-        .polygonMode = VK_POLYGON_MODE_FILL,
-        .cullMode = VK_CULL_MODE_NONE,
-        .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
-        .depthBiasEnable = VK_FALSE,
-        .lineWidth = 1.0f
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, .pNext = NULL,
+        .depthClampEnable = VK_FALSE, //If set to true, fragments beyond near and far planes are clamped to them instead of discarded
+        .rasterizerDiscardEnable = VK_FALSE, //If set to true, then geometry never passes through rasteriser stage. Disables output to framebuffer
+        .polygonMode = VK_POLYGON_MODE_FILL, //Determines how fragments are generated for geometry. Can also be drawn as lines or points
+        .cullMode = VK_CULL_MODE_NONE, //Determines what kind of face culling to use
+        .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE, //Determines the vertex order for the faces to be considered front facing and can be clockwise or counter-clockwise
+        .depthBiasEnable = VK_FALSE, //Rasteriser can alter the depth values by adding a constant value or biasing them based on a fragments slope. Not necessary
+        .lineWidth = 1.0f //Determines the thickness of lines in terms of fragments
     };
-    // VkPipelineRasterizationStateCreateInfo rasteriser = {
-    //     .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, .pNext = NULL,
-    //     .depthClampEnable = VK_FALSE, //If set to true, fragments beyond near and far planes are clamped to them instead of discarded
-    //     .rasterizerDiscardEnable = VK_FALSE, //If set to true, then geometry never passes through rasteriser stage. Disables output to framebuffer
-    //     .polygonMode = VK_POLYGON_MODE_FILL, //Determines how fragments are generated for geometry. Can also be drawn as lines or points
-    //     .cullMode = VK_CULL_MODE_BACK_BIT, //Determines what kind of face culling to use
-    //     .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE, //Determines the vertex order for the faces to be considered front facing and can be clockwise or counter-clockwise
-    //     .depthBiasEnable = VK_FALSE, //Rasteriser can alter the depth values by adding a constant value or biasing them based on a fragments slope. Not necessary
-    //     .lineWidth = 1.0}; //Determines the thickness of lines in terms of fragments
 
     //Configure Multisampling
     VkPipelineMultisampleStateCreateInfo multisampling = {
@@ -4488,7 +4478,6 @@ uint8_t BOB_draw_quad_mat(BOB_Renderer_Handle r, BOB_Quad quad, BOB_Vector4 colo
         {rotated_coords[3].x, rotated_coords[3].y, layer}
     };
 
-    // BOBi_draw_mesh(r, strip, 4, NULL, (uint32_t[6]){0,1,3,1,2,3}, 6, colour, intrn_data.default_tex, mat, 0);
     BOBi_create_draw_call(r, strip, 4, NULL, 6, colour, renderer->default_tex, mat, 0, BOBi_DRAW_QUAD);
     return 1;
 }
