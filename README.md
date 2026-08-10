@@ -201,30 +201,55 @@ The above code will output something like the following:
 ## Summary
 
 * [General Concepts](#general-concepts)
-    * [Creating Objects]
-    * [The Render Loop]
-    * [Rendering Lines]
-    * [Rendering Quads]
-    * [Rendering Polys]
-    * [Rendering Textures]
-    * [Rendering Fonts]
-    * [Streaming data to a pixelbuffer]
-    * [Adding images to an atlas]
-    * [Specifying a Clip Rect]
-    * [Loading a BMFont]
-    * [Creating a font from a different Bitmap font format]
-    * [Creating custom shaders]
-    * [Setting custom values to constants]
- * [API]
-    * [OpenGL]
-    * [Vulkan]
-    * [Renderer]
-    * [Texture]
-    * [Texture Atlas]
-    * [Pixelbuffer]
-    * [Font]
-    * [Materials]
-    * [Uniforms]
-    * [Clipping]
+    * [Creating Objects](#creating-objects)
+    * [The Render Loop](#the-render-loop)
+    * [Rendering Lines](#rendering-lines)
+    * [Rendering Quads](#rendering-quads)
+    * [Rendering Polys](#rendering-polys)
+    * [Rendering Textures](#rendering-textures)
+    * [Rendering Fonts](#rendering-fonts)
+    * [Streaming data to a pixelbuffer](#streaming-data-to-a-pixelbuffer)
+    * [Adding images to an atlas](#adding-images-to-an-atlas)
+    * [Specifying a Clip Rect](#specifying-a-clip-rect)
+    * [Loading a BMFont](#loading-a-bmfont)
+    * [Creating a font from a different Bitmap font format](#creating-a-font-from-a-different-bitmap-font-format)
+    * [Creating custom shaders](#creating-custom-shaders)
+    * [Setting custom values to constants](#setting-custom-values-to-constants)
+ * [API](#api)
+    * [OpenGL](#opengl)
+    * [Vulkan](#vulkan)
+    * [Renderer](#renderer)
+    * [Texture](#texture)
+    * [Texture Atlas](#texture-atlas)
+    * [Pixelbuffer](#pixelbuffer)
+    * [Font](#font)
+    * [Materials](#materials)
+    * [Uniforms](#uniforms)
+    * [Clipping](#clipping)
 
 ## General Concepts
+# Creating Objects
+# The Render Loop
+# Rendering Lines
+# Rendering Quads
+# Rendering Polys
+# Rendering Textures
+# Rendering Fonts
+# Streaming data to a pixelbuffer
+# Adding images to an atlas
+# Specifying a Clip Rect
+# Loading a BMFont
+# Creating a font from a different Bitmap font format
+# Creating custom shaders
+# Setting custom values to constants
+## API
+# OpenGL
+# Vulkan
+# Renderer
+# Texture
+# Texture Atlas
+# Pixelbuffer
+# Font
+# Materials
+# Uniforms
+# Clipping

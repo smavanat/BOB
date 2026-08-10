@@ -3,7 +3,8 @@
 #include <stdint.h>
 #include <stddef.h>
 
-//TODO: Use macros to hide getting index and context from a handle and finding index where next object is placed
+//TODO: Create a function for loading shader data since we already have read_to_end
+//      Use macros to hide getting index and context from a handle and finding index where next object is placed
 //      Do proper error reporting and document what each error code means somewhere
 //      Debug mode with statistics
 //      Reduce number of memory allocations cpu-side and in the Vulkan backend
