@@ -228,28 +228,28 @@ The above code will output something like the following:
     * [Clipping](#clipping)
 
 ## General Concepts
-# Creating Objects
-# The Render Loop
-# Rendering Lines
-# Rendering Quads
-# Rendering Polys
-# Rendering Textures
-# Rendering Fonts
-# Streaming data to a pixelbuffer
-# Adding images to an atlas
-# Specifying a Clip Rect
-# Loading a BMFont
-# Creating a font from a different Bitmap font format
-# Creating custom shaders
-# Setting custom values to constants
+### Creating Objects
+### The Render Loop
+### Rendering Lines
+### Rendering Quads
+### Rendering Polys
+### Rendering Textures
+### Rendering Fonts
+### Streaming data to a pixelbuffer
+### Adding images to an atlas
+### Specifying a Clip Rect
+### Loading a BMFont
+### Creating a font from a different Bitmap font format
+### Creating custom shaders
+### Setting custom values to constants
 ## API
-# OpenGL
-# Vulkan
-# Renderer
-# Texture
-# Texture Atlas
-# Pixelbuffer
-# Font
-# Materials
-# Uniforms
-# Clipping
+### OpenGL
+### Vulkan
+### Renderer
+### Texture
+### Texture Atlas
+### Pixelbuffer
+### Font
+### Materials
+### Uniforms
+### Clipping
