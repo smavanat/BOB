@@ -8,7 +8,7 @@
 //      Do proper error reporting and document what each error code means somewhere
 //      Debug mode with statistics
 //      Reduce number of memory allocations cpu-side and in the Vulkan backend
-//      Allow more customisability in the shaders in general
+//      Allow more customisability in the shaders in general (and add push constants)
 //      Use texture arrays instead of binding textures every draw call (and ssbos for shaders (opengl))
 //      Allow the user to define render passes -> Custom framebuffers
 //      Allow the user to define their own pipeline and sampler layout
@@ -31,7 +31,7 @@ typedef uint8_t (*BOB_vk_create_surface)(VkInstance, VkSurfaceKHR *);
 typedef uint64_t BOB_Texture_Handle;
 typedef uint64_t BOB_Material_Handle;
 typedef uint64_t BOB_Atlas_Handle;
-typedef uint64_t BOB_PixelBuffer_Handle;
+typedef uint64_t BOB_Pixelbuffer_Handle;
 typedef uint64_t BOB_Uniform_Handle;
 typedef uint64_t BOB_Font_Handle;
 typedef uint32_t BOB_Renderer_Handle;
@@ -85,6 +85,9 @@ typedef struct {
 #endif
 #ifndef BOB_MAX_UNIFORMS
 #define BOB_MAX_UNIFORMS 64
+#endif
+#ifndef BOB_MAX_POLY_SIZE
+#define BOB_MAX_POLY_SIZE 256
 #endif
 
 #ifdef BOB_INCLUDE_GLAD
@@ -142,22 +145,22 @@ uint8_t BOB_create_texture(BOB_Renderer_Handle r, uint32_t width, uint32_t heigh
 void BOB_texture_free(BOB_Texture_Handle *tex);
 
 //Creates a pixel buffer to hold the pixels representing a texture of size width * height
-uint8_t BOB_pixelbuffer_init(BOB_Renderer_Handle r, size_t width, size_t height, BOB_Format format, BOB_PixelBuffer_Handle *pb);
+uint8_t BOB_pixelbuffer_init(BOB_Renderer_Handle r, size_t width, size_t height, BOB_Format format, BOB_Pixelbuffer_Handle *pb);
 //Frees the data used by a pixel buffer
-void BOB_pixelbuffer_free(BOB_PixelBuffer_Handle *pb);
+void BOB_pixelbuffer_free(BOB_Pixelbuffer_Handle *pb);
 //Binds the pixelbuffers gpu memory to cpu memory. This can currently only be done by one pixelbuffer at a time
 //TODO: See if we can support multiple buffers having their gpu memory bound to cpu memory
-uint8_t BOB_bind_pixelbuffer_memory(BOB_PixelBuffer_Handle pb);
+uint8_t BOB_bind_pixelbuffer_memory(BOB_Pixelbuffer_Handle pb);
 //Unbinds the pixelbuffer's gpu memory from cpu space
-void BOB_unbind_pixelbuffer_memory(BOB_PixelBuffer_Handle pb);
+void BOB_unbind_pixelbuffer_memory(BOB_Pixelbuffer_Handle pb);
 //NOTE: The following three functions must be called between BOB_bind_pixelbuffer_memory and BOB_unbind_pixelbuffer_memory otherwise they will fail/cause undefined behaviour
 
 //Updates the pixel data stored in a pixelbuffer
-void BOB_pixelbuffer_send_data(BOB_PixelBuffer_Handle pb, uint8_t *data, size_t data_sz);
-//Gets the pixel data from a PixelBuffer
-void BOB_pixelbuffer_get_data(BOB_PixelBuffer_Handle pb, uint8_t *dest, size_t data_sz);
+void BOB_pixelbuffer_send_data(BOB_Pixelbuffer_Handle pb, uint8_t *data, size_t data_sz);
+//Gets the pixel data from a Pixelbuffer
+void BOB_pixelbuffer_get_data(BOB_Pixelbuffer_Handle pb, uint8_t *dest, size_t data_sz);
 //Uploads the pixel data from the pixelbuffer into its associated texture
-void BOB_pixelbuffer_updload(BOB_PixelBuffer_Handle pb);
+void BOB_pixelbuffer_updload(BOB_Pixelbuffer_Handle pb);
 
 //Initialises a blank texture atlas
 uint8_t BOB_atlas_init(BOB_Renderer_Handle r, uint32_t width, uint32_t height, BOB_Format format, BOB_Atlas_Handle *a);
@@ -182,6 +185,11 @@ typedef struct {
     size_t code_buf_sz;
     BOB_Shader_Type type;
 } BOB_Shader_Data;
+
+//Reads the shader data from a file and creates a shader data object
+uint8_t BOB_create_shader_data(const char * shader_path, BOB_Shader_Type type, BOB_Shader_Data *out);
+//Destroys a shader data by freeing the shader code bytes and setting the memory region at the pointer to 0
+void BOB_destroy_shader_data(BOB_Shader_Data *data);
 
 typedef enum {
     BOB_UNIFORM_FLOAT,
@@ -267,11 +275,11 @@ void BOB_renderer_end(BOB_Renderer_Handle r);
 void BOB_renderer_update_dimensions(BOB_Renderer_Handle r, uint32_t width, uint32_t height, uint32_t width_px, uint32_t height_px);
 
 //Draws a quad
-uint8_t BOB_draw_atlas_quad(BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, BOB_Atlas_Handle atlas, uint16_t layer, float rotation);
+uint8_t BOB_draw_atlas_quad(BOB_Quad dimensions, BOB_Quad sub_rect, BOB_Vector4 colour, BOB_Atlas_Handle atlas, uint16_t layer, float rotation);
 //Draws a dynamically allocated texture
-uint8_t BOB_draw_texture(BOB_Texture_Handle texture, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, uint16_t layer, float rotation);
+uint8_t BOB_draw_texture(BOB_Texture_Handle texture, BOB_Quad dimensions, BOB_Quad sub_rect, BOB_Vector4 colour, uint16_t layer, float rotation);
 //Draws a pixel buffer
-uint8_t BOB_draw_pixel_buffer(BOB_PixelBuffer_Handle pb, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, uint16_t layer, float rotation);
+uint8_t BOB_draw_pixelbuffer(BOB_Pixelbuffer_Handle pb, BOB_Quad dimensions, BOB_Quad sub_rect, BOB_Vector4 colour, uint16_t layer, float rotation);
 //Draws a filled circle
 uint8_t BOB_draw_circle(BOB_Renderer_Handle r, BOB_Vector2 centre, float radius, BOB_Vector4 colour, uint16_t layer);
 //Draws a filled quad
@@ -288,11 +296,11 @@ uint8_t BOB_draw_unfilled_polygon(BOB_Renderer_Handle r, BOB_Vector2 *poly_point
 uint8_t BOB_draw_line(BOB_Renderer_Handle r, BOB_Vector2 start_pos, BOB_Vector2 end_pos, float thickness, BOB_Vector4 colour, uint16_t layer);
 
 //Draws a quad with a specified material
-uint8_t BOB_draw_atlas_quad_mat(BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, BOB_Atlas_Handle atlas, uint16_t layer, float rotation, BOB_Material_Handle mat);
+uint8_t BOB_draw_atlas_quad_mat(BOB_Quad dimensions, BOB_Quad sub_rect, BOB_Vector4 colour, BOB_Atlas_Handle atlas, uint16_t layer, float rotation, BOB_Material_Handle mat);
 //Draws a dynamically allocated texture with a specified material
-uint8_t BOB_draw_texture_mat(BOB_Texture_Handle texture, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, uint16_t layer, float rotation, BOB_Material_Handle mat);
+uint8_t BOB_draw_texture_mat(BOB_Texture_Handle texture, BOB_Quad dimensions, BOB_Quad sub_rect, BOB_Vector4 colour, uint16_t layer, float rotation, BOB_Material_Handle mat);
 //Draws a pixel buffer with a specified material
-uint8_t BOB_draw_pixel_buffer_mat(BOB_PixelBuffer_Handle pb, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, uint16_t layer, float rotation, BOB_Material_Handle mat);
+uint8_t BOB_draw_pixelbuffer_mat(BOB_Pixelbuffer_Handle pb, BOB_Quad dimensions, BOB_Quad sub_rect, BOB_Vector4 colour, uint16_t layer, float rotation, BOB_Material_Handle mat);
 //Draws a filled circle with a specified material
 uint8_t BOB_draw_circle_mat(BOB_Renderer_Handle r, BOB_Vector2 centre, float radius, BOB_Vector4 colour, uint16_t layer, BOB_Material_Handle mat);
 //Draws a filled quad with a specified material
@@ -309,11 +317,11 @@ uint8_t BOB_draw_unfilled_polygon_mat(BOB_Renderer_Handle r, BOB_Vector2 *poly_p
 uint8_t BOB_draw_line_mat(BOB_Renderer_Handle r, BOB_Vector2 start_pos, BOB_Vector2 end_pos, float thickness, BOB_Vector4 colour, uint16_t layer, BOB_Material_Handle mat);
 
 //Draws a quad with a specified material
-uint8_t BOB_draw_atlas_quad_channel(BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, BOB_Atlas_Handle atlas, uint16_t layer, float rotation, BOB_Material_Handle mat, uint8_t channel);
+uint8_t BOB_draw_atlas_quad_channel(BOB_Quad dimensions, BOB_Quad sub_rect, BOB_Vector4 colour, BOB_Atlas_Handle atlas, uint16_t layer, float rotation, BOB_Material_Handle mat, uint8_t channel);
 //Draws a dynamically allocated texture with a specified material and channel
-uint8_t BOB_draw_texture_channel(BOB_Texture_Handle texture, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, uint16_t layer, float rotation, BOB_Material_Handle mat, uint8_t channel);
+uint8_t BOB_draw_texture_channel(BOB_Texture_Handle texture, BOB_Quad dimensions, BOB_Quad sub_rect, BOB_Vector4 colour, uint16_t layer, float rotation, BOB_Material_Handle mat, uint8_t channel);
 //Draws a pixel buffer with a specified erial and channel
-uint8_t BOB_draw_pixel_buffer_channel(BOB_PixelBuffer_Handle pb, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, uint16_t layer, float rotation, BOB_Material_Handle mat, uint8_t channel);
+uint8_t BOB_draw_pixelbuffer_channel(BOB_Pixelbuffer_Handle pb, BOB_Quad dimensions, BOB_Quad sub_rect, BOB_Vector4 colour, uint16_t layer, float rotation, BOB_Material_Handle mat, uint8_t channel);
 
 //Determines the projection matrix
 void BOB_ortho_gl(float left, float right, float bottom, float top, float nearZ, float farZ, BOB_Mat4 *dest);
@@ -341,7 +349,7 @@ typedef enum {
 } BOB_BMF_Format;
 
 uint8_t BOB_create_custom_font(BOB_Renderer_Handle r, BOB_Font_Handle *font, size_t num_glyphs, size_t num_kernings, size_t line_height, size_t base);
-uint8_t BOB_load_bmf_font(BOB_Renderer_Handle r, const char *font_path, BOB_Font_Handle *font, BOB_BMF_Format format);
+uint8_t BOB_load_bmf_font(BOB_Renderer_Handle r, const char *font_path, BOB_BMF_Format format, BOB_Font_Handle *font);
 uint8_t BOB_add_font_page(BOB_Font_Handle font, uint32_t page_width, uint32_t page_height, uint8_t *page_data, BOB_Format page_format);
 uint8_t BOB_draw_codepoint(BOB_Font_Handle font, uint32_t codepoint, BOB_Vector2 *pos, BOB_Vector4 colour, uint16_t layer);
 uint8_t BOB_draw_char_string(BOB_Font_Handle font, char *str, size_t str_len, BOB_Vector2 *start, BOB_Vector4 colour, uint16_t layer);
@@ -441,7 +449,7 @@ typedef struct {
     uint32_t pbo; //pbo this renderer uses
     BOB_Texture_Handle pixel_tex; //The texture the pbo is rendered to
     uint8_t init;
-} BOBi_PixelBuffer_Impl;
+} BOBi_Pixelbuffer_Impl;
 
 typedef struct {
     BOB_Texture_Handle texture; //GL index of the atlas texture
@@ -569,7 +577,7 @@ typedef struct {
     BOBi_Arena renderer_memory; //Memory arena that this context uses. Each table is just a pointer into this arena
 
     BOBi_Atlas_Impl *atlas_table;
-    BOBi_PixelBuffer_Impl *pixelbuffer_table;
+    BOBi_Pixelbuffer_Impl *pixelbuffer_table;
     BOBi_Texture_Impl *texture_table;
     BOBi_Material_Impl *material_table;
     BOBi_Font_Impl *font_table;
@@ -3333,7 +3341,7 @@ uint8_t BOBi_create_renderer(BOBi_Renderer_Type type, size_t atlas_capacity, siz
 
     //Calculating the size of the memory regions each buffer will end up using
     size_t atlas_sz = atlas_capacity * sizeof(BOBi_Atlas_Impl);
-    size_t pixelbuf_sz = pixelbuf_capacity * sizeof(BOBi_PixelBuffer_Impl);
+    size_t pixelbuf_sz = pixelbuf_capacity * sizeof(BOBi_Pixelbuffer_Impl);
     size_t tex_sz = tex_capacity * sizeof(BOBi_Texture_Impl);
     size_t mat_sz = mat_capacity * sizeof(BOBi_Material_Impl);
     size_t font_sz = font_capacity * sizeof(BOBi_Font_Impl);
@@ -3342,7 +3350,7 @@ uint8_t BOBi_create_renderer(BOBi_Renderer_Type type, size_t atlas_capacity, siz
     char *p = (char *)0;
     p = (char *)BOBi_align_up((uintptr_t)p, alignof(BOBi_Atlas_Impl));
     p += atlas_sz;
-    p = (char *)BOBi_align_up((uintptr_t)p, alignof(BOBi_PixelBuffer_Impl));
+    p = (char *)BOBi_align_up((uintptr_t)p, alignof(BOBi_Pixelbuffer_Impl));
     p += pixelbuf_sz;
     p = (char *)BOBi_align_up((uintptr_t)p, alignof(BOBi_Texture_Impl));
     p += tex_sz;
@@ -3359,7 +3367,7 @@ uint8_t BOBi_create_renderer(BOBi_Renderer_Type type, size_t atlas_capacity, siz
 
     //Assigning the start pointers from the general memory buffer
     intrn_renderer->atlas_table = BOB_arena_alloc(&intrn_renderer->renderer_memory, atlas_sz, alignof(BOBi_Atlas_Impl));
-    intrn_renderer->pixelbuffer_table = BOB_arena_alloc(&intrn_renderer->renderer_memory, pixelbuf_sz, alignof(BOBi_PixelBuffer_Impl));
+    intrn_renderer->pixelbuffer_table = BOB_arena_alloc(&intrn_renderer->renderer_memory, pixelbuf_sz, alignof(BOBi_Pixelbuffer_Impl));
     intrn_renderer->texture_table = BOB_arena_alloc(&intrn_renderer->renderer_memory, tex_sz, alignof(BOBi_Texture_Impl));
     intrn_renderer->material_table = BOB_arena_alloc(&intrn_renderer->renderer_memory, mat_sz, alignof(BOBi_Material_Impl));
     intrn_renderer->font_table = BOB_arena_alloc(&intrn_renderer->renderer_memory, font_sz, alignof(BOBi_Font_Impl));
@@ -3580,8 +3588,6 @@ uint8_t BOBi_clip_line(BOBi_Renderer_Impl *r, BOB_Vector2 *start, BOB_Vector2* e
     }
 }
 
-#define BOBi_MAX_POLY_SIZE 256
-
 typedef enum {
     BOBi_CLIP_LEFT,
     BOBi_CLIP_RIGHT,
@@ -3615,7 +3621,7 @@ static inline uint8_t BOBi_inside(BOB_Vector2 p, BOBi_Clip_Edge edge, float valu
 
 size_t BOBi_clip_edge(BOB_Vector2 *poly_points, size_t poly_size, BOBi_Clip_Edge edge, float value) {
     size_t new_poly_size = 0;
-    BOB_Vector2 new_points[BOBi_MAX_POLY_SIZE]; //Allow up to 256 vertex polygons
+    BOB_Vector2 new_points[BOB_MAX_POLY_SIZE]; //Allow up to 256 vertex polygons
 
     //Iterate over all points
     for(size_t i = 0; i < poly_size; i++) {
@@ -3628,7 +3634,7 @@ size_t BOBi_clip_edge(BOB_Vector2 *poly_points, size_t poly_size, BOBi_Clip_Edge
         uint8_t end_inside = BOBi_inside(end, edge, value);
 
         if(start_inside && end_inside) {
-            if(new_poly_size >= BOBi_MAX_POLY_SIZE) {
+            if(new_poly_size >= BOB_MAX_POLY_SIZE) {
                 printf("Exceeded new polygon point capacity\n");
                 break;
             }
@@ -3636,7 +3642,7 @@ size_t BOBi_clip_edge(BOB_Vector2 *poly_points, size_t poly_size, BOBi_Clip_Edge
             new_points[new_poly_size++] = end;
         }
         else if(!start_inside && end_inside) {
-            if(new_poly_size+1 >= BOBi_MAX_POLY_SIZE) {
+            if(new_poly_size+1 >= BOB_MAX_POLY_SIZE) {
                 printf("Exceeded new polygon point capacity\n");
                 break;
             }
@@ -3646,7 +3652,7 @@ size_t BOBi_clip_edge(BOB_Vector2 *poly_points, size_t poly_size, BOBi_Clip_Edge
         }
         //When only second point is outside
         else if(start_inside && !end_inside) {
-            if(new_poly_size >= BOBi_MAX_POLY_SIZE) {
+            if(new_poly_size >= BOB_MAX_POLY_SIZE) {
                 printf("Exceeded new polygon point capacity\n");
                 break;
             }
@@ -3728,8 +3734,8 @@ size_t BOBi_triangulate_ec(BOB_Vector2 *poly_points, size_t poly_size, uint32_t 
         return 1;
     }
 
-    BOBi_PartitionVertex vertices[BOBi_MAX_POLY_SIZE];
-    uint32_t processed[BOBi_MAX_POLY_SIZE];
+    BOBi_PartitionVertex vertices[BOB_MAX_POLY_SIZE];
+    uint32_t processed[BOB_MAX_POLY_SIZE];
     size_t processed_size = 0;
     #define EPSILON 1e-6f
 
@@ -3877,8 +3883,8 @@ void BOBi_renderer_draw(BOBi_Renderer_Impl *r) {
                 indices[5] = cur_vertex+3;
             break;
             case BOBi_DRAW_POLY: {
-                uint32_t triangle_indices[(BOBi_MAX_POLY_SIZE - 2) * 3]; //Ear clipping always produces n-2 triangles for a polygon with n vertices
-                BOB_Vector2 base_vertices[BOBi_MAX_POLY_SIZE];
+                uint32_t triangle_indices[(BOB_MAX_POLY_SIZE - 2) * 3]; //Ear clipping always produces n-2 triangles for a polygon with n vertices
+                BOB_Vector2 base_vertices[BOB_MAX_POLY_SIZE];
                 for(size_t j = 0; j < call->num_vertices; j++) {
                     base_vertices[j] = (BOB_Vector2){call->vertices[j].pos.x, call->vertices[j].pos.y};
                 }
@@ -3888,13 +3894,13 @@ void BOBi_renderer_draw(BOBi_Renderer_Impl *r) {
                 if(!triangle_count) return; //Early exit
 
                 //Processing the returned vertex data into a more compact form so we can pass it to the renderer
-                uint32_t vertex_map[BOBi_MAX_POLY_SIZE];
+                uint32_t vertex_map[BOB_MAX_POLY_SIZE];
 
                 //Filling the map with dummy values
                 for(size_t i = 0; i < call->num_vertices; i++)
                     vertex_map[i] = UINT32_MAX;
 
-                BOBi_Render_Vertex compressed[BOBi_MAX_POLY_SIZE]; //Holds the compressed vertex values
+                BOBi_Render_Vertex compressed[BOB_MAX_POLY_SIZE]; //Holds the compressed vertex values
                 size_t vertex_count = 0;
 
                 //Copying the old verticies into compressed format
@@ -4037,7 +4043,7 @@ void BOBi_texture_free(BOBi_Renderer_Impl *renderer, uint32_t index) {
 void BOBi_pixelbuffer_free(BOBi_Renderer_Impl *renderer, uint32_t index) {
     renderer_functions[renderer->type].destroy_pixelbuffer(renderer, index);
     BOB_texture_free(&renderer->pixelbuffer_table[index].pixel_tex);
-    renderer->pixelbuffer_table[index] = (BOBi_PixelBuffer_Impl){0}; //Clear the data
+    renderer->pixelbuffer_table[index] = (BOBi_Pixelbuffer_Impl){0}; //Clear the data
 }
 void BOBi_material_free(BOBi_Renderer_Impl *renderer, uint32_t index) {
     renderer_functions[renderer->type].destroy_material(renderer, index);
@@ -4482,6 +4488,26 @@ uint8_t get_uniform(BOB_Material_Handle mat, char *name, BOB_Uniform_Handle *uni
     return 0;
 }
 
+//Reads the shader data from a file and creates a shader data object
+uint8_t BOB_create_shader_data(const char *shader_path, const char *entrypoint_name, BOB_Shader_Type type, BOB_Shader_Data *out) {
+    uint8_t *buf;
+    int sz = BOBi_read_to_end(shader_path, &buf, 1);
+
+    if(sz < 0) {
+        free(buf);
+        return 0;
+    }
+    *out = (BOB_Shader_Data){.shader_code = (const char *)buf, .entrypoint_name = entrypoint_name, .code_buf_sz = sz, .type = type};
+
+    return 1;
+}
+
+//Destroys a shader data by freeing the shader code bytes and setting the memory region at the pointer to 0
+void BOB_destroy_shader_data(BOB_Shader_Data *data) {
+    free((void *)data->shader_code);
+    *data = (BOB_Shader_Data){0};
+}
+
 uint8_t BOB_create_material(BOB_Renderer_Handle renderer, BOB_Shader_Data *data, size_t num_shaders, BOB_Uniform *uniforms, size_t num_uniforms, BOB_Material_Handle *mat) {
     BOBi_Renderer_Impl *intrn_renderer;
     if(!BOBi_get_renderer(renderer, &intrn_renderer)) return 0;
@@ -4843,12 +4869,12 @@ uint8_t BOB_atlas_pack(BOB_Atlas_Handle a, uint8_t* pixels, size_t w, size_t h, 
 //Creates a pixel buffer to hold the pixels representing
 //a texture of size width * height
 //Pixel size should be either 3 or 4 (rgb/rgba)
-uint8_t BOB_pixelbuffer_init(BOB_Renderer_Handle renderer, size_t width, size_t height, BOB_Format format, BOB_PixelBuffer_Handle *pb) {
+uint8_t BOB_pixelbuffer_init(BOB_Renderer_Handle renderer, size_t width, size_t height, BOB_Format format, BOB_Pixelbuffer_Handle *pb) {
     BOBi_Renderer_Impl *intrn_renderer;
     if(!BOBi_get_renderer(renderer, &intrn_renderer)) return 0;
 
     if(intrn_renderer->num_pixelbuffers >= BOB_MAX_PIXELBUFFER_CAPACITY) {
-        printf("ERROR: Exceeded PixelBuffer Capacity");
+        printf("ERROR: Exceeded Pixelbuffer Capacity");
         *pb |= BOBi_MSB;
         return 0;
     }
@@ -4873,7 +4899,7 @@ uint8_t BOB_pixelbuffer_init(BOB_Renderer_Handle renderer, size_t width, size_t 
 
     //Setting up the texture for the pixel simulations:
     if(!BOB_create_texture(renderer, width, height, NULL, format, &intrn_renderer->pixelbuffer_table[index].pixel_tex)) {
-        intrn_renderer->pixelbuffer_table[index] = (BOBi_PixelBuffer_Impl){0};
+        intrn_renderer->pixelbuffer_table[index] = (BOBi_Pixelbuffer_Impl){0};
         return 0;
     }
 
@@ -4901,7 +4927,7 @@ uint8_t BOB_pixelbuffer_init(BOB_Renderer_Handle renderer, size_t width, size_t 
     return 1;
 }
 //Frees the data used by a pixel buffer
-void BOB_pixelbuffer_free(BOB_PixelBuffer_Handle *pb) {
+void BOB_pixelbuffer_free(BOB_Pixelbuffer_Handle *pb) {
     if(*(pb) & BOBi_MSB) return; //Do not work with already invalid handles
 
     BOBi_Renderer_Impl *renderer;
@@ -4915,7 +4941,7 @@ void BOB_pixelbuffer_free(BOB_PixelBuffer_Handle *pb) {
 }
 
 //Binds the pixelbuffers gpu memory to cpu memory. This can currently only be done by one pixelbuffer at a time
-uint8_t BOB_bind_pixelbuffer_memory(BOB_PixelBuffer_Handle pb) {
+uint8_t BOB_bind_pixelbuffer_memory(BOB_Pixelbuffer_Handle pb) {
     if(pb & BOBi_MSB) return 0; //Do not work with already invalid handles
     BOBi_Renderer_Impl *renderer;
     uint32_t index;
@@ -4924,22 +4950,22 @@ uint8_t BOB_bind_pixelbuffer_memory(BOB_PixelBuffer_Handle pb) {
     return renderer_functions[renderer->type].bind_memory(renderer, index);
 }
 //Unbinds the pixelbuffer's gpu memory from cpu space
-void BOB_unbind_pixelbuffer_memory(BOB_PixelBuffer_Handle pb) {
+void BOB_unbind_pixelbuffer_memory(BOB_Pixelbuffer_Handle pb) {
     if(pb & BOBi_MSB) return; //Do not work with already invalid handles
     BOBi_Renderer_Impl *renderer;
     if(!BOBi_get_renderer_from_handle(pb, &renderer)) return;
     return renderer_functions[renderer->type].unbind_memory(renderer);
 }
 //Updates the pixel data stored in a pixelbuffer
-void BOB_pixelbuffer_send_data(BOB_PixelBuffer_Handle pb, uint8_t *data, size_t data_sz) {
+void BOB_pixelbuffer_send_data(BOB_Pixelbuffer_Handle pb, uint8_t *data, size_t data_sz) {
     if(pb & BOBi_MSB) return; //Do not work with already invalid handles
     BOBi_Renderer_Impl *renderer;
     if(!BOBi_get_renderer_from_handle(pb, &renderer)) return;
 
     renderer_functions[renderer->type].copy_into_buf(renderer, data, data_sz);
 }
-//Gets the pixel data from a PixelBuffer
-void BOB_pixelbuffer_get_data(BOB_PixelBuffer_Handle pb, uint8_t *dest, size_t data_sz) {
+//Gets the pixel data from a Pixelbuffer
+void BOB_pixelbuffer_get_data(BOB_Pixelbuffer_Handle pb, uint8_t *dest, size_t data_sz) {
     if(pb & BOBi_MSB) return; //Do not work with already invalid handles
     BOBi_Renderer_Impl *renderer;
     if(!BOBi_get_renderer_from_handle(pb, &renderer)) return;
@@ -4947,7 +4973,7 @@ void BOB_pixelbuffer_get_data(BOB_PixelBuffer_Handle pb, uint8_t *dest, size_t d
     renderer_functions[renderer->type].copy_from_buf(renderer, dest, data_sz);
 }
 //Uploads the pixel data from the pixelbuffer into its associated texture
-void BOB_pixelbuffer_updload(BOB_PixelBuffer_Handle pb) {
+void BOB_pixelbuffer_updload(BOB_Pixelbuffer_Handle pb) {
     if(pb & BOBi_MSB) return; //Do not work with already invalid handles
     BOBi_Renderer_Impl *renderer;
     uint32_t index;
@@ -4973,10 +4999,10 @@ uint8_t BOB_draw_atlas_quad(BOB_Quad screen_quad, BOB_Quad tex_sub_rect, BOB_Vec
     return BOB_draw_atlas_quad_channel(screen_quad, tex_sub_rect, colour, r->atlas_table[index].texture, layer, rotation, r->default_mat, 0);
 }
 
-uint8_t BOB_draw_pixel_buffer(BOB_PixelBuffer_Handle pb, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, uint16_t layer, float rotation) {
+uint8_t BOB_draw_pixelbuffer(BOB_Pixelbuffer_Handle pb, BOB_Quad dimensions, BOB_Quad sub_rect, BOB_Vector4 colour, uint16_t layer, float rotation) {
     BOBi_Renderer_Impl *r;
     BOBi_get_renderer_from_handle(pb, &r);
-    return BOB_draw_pixel_buffer_channel(pb, dimensions, uv_dimensions, colour, layer, rotation, r->default_mat, 0);
+    return BOB_draw_pixelbuffer_channel(pb, dimensions, sub_rect, colour, layer, rotation, r->default_mat, 0);
 }
 
 uint8_t BOB_draw_line(BOB_Renderer_Handle r, BOB_Vector2 start_pos, BOB_Vector2 end_pos, float thickness, BOB_Vector4 colour, uint16_t layer) {
@@ -5037,8 +5063,8 @@ uint8_t BOB_draw_atlas_quad_mat(BOB_Quad screen_quad, BOB_Quad tex_sub_rect, BOB
 }
 
 //Draws a pixel buffer with a specified material
-uint8_t BOB_draw_pixel_buffer_mat(BOB_PixelBuffer_Handle pb, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, uint16_t layer, float rotation, BOB_Material_Handle mat) {
-    return BOB_draw_pixel_buffer_channel(pb, dimensions, uv_dimensions, colour, layer, rotation, mat, 0);
+uint8_t BOB_draw_pixelbuffer_mat(BOB_Pixelbuffer_Handle pb, BOB_Quad dimensions, BOB_Quad sub_rect, BOB_Vector4 colour, uint16_t layer, float rotation, BOB_Material_Handle mat) {
+    return BOB_draw_pixelbuffer_channel(pb, dimensions, sub_rect, colour, layer, rotation, mat, 0);
 }
 
 //Draws a filled circle with a specified material
@@ -5061,8 +5087,8 @@ uint8_t BOB_draw_circle_mat(BOB_Renderer_Handle r, BOB_Vector2 centre, float rad
         vertices[vertex_count++] = (BOB_Vector2){x, y};
     }
 
-    BOB_Vector2 points2[BOBi_MAX_POLY_SIZE];
-    BOB_Vector3 points3[BOBi_MAX_POLY_SIZE];
+    BOB_Vector2 points2[BOB_MAX_POLY_SIZE];
+    BOB_Vector3 points3[BOB_MAX_POLY_SIZE];
     memcpy(points2, vertices, vertex_count * sizeof(BOB_Vector2));
 
     size_t clipped_size = BOBi_clip_polygon(renderer, points2, vertex_count);
@@ -5113,13 +5139,13 @@ uint8_t BOB_draw_polygon_mat(BOB_Renderer_Handle r, BOB_Vector2* poly_points, si
 
     BOBi_rotate_polygon(poly_points, poly_size, rotation);
 
-    BOB_Vector2 points[BOBi_MAX_POLY_SIZE];
+    BOB_Vector2 points[BOB_MAX_POLY_SIZE];
     memcpy(points, poly_points, poly_size * sizeof(BOB_Vector2));
 
     size_t clipped_size = BOBi_clip_polygon(renderer, points, poly_size);
     if(clipped_size < 3) return 1; //Early exit
 
-    BOB_Vector3 vertices[BOBi_MAX_POLY_SIZE]; //Holds the compressed vertex values
+    BOB_Vector3 vertices[BOB_MAX_POLY_SIZE]; //Holds the compressed vertex values
     for(size_t i = 0; i < clipped_size; i++) {
         vertices[i] = (BOB_Vector3){points[i].x, points[i].y, layer};
     }
@@ -5176,7 +5202,7 @@ uint8_t BOB_draw_unfilled_polygon_mat(BOB_Renderer_Handle r, BOB_Vector2 *poly_p
     BOBi_Renderer_Impl *renderer;
     if(!BOBi_get_renderer(r, &renderer)) return 0;
 
-    BOB_Vector2 points[BOBi_MAX_POLY_SIZE];
+    BOB_Vector2 points[BOB_MAX_POLY_SIZE];
     memcpy(points, poly_points, poly_size * sizeof(BOB_Vector2));
 
     size_t clipped_size = BOBi_clip_polygon(renderer, points, poly_size);
@@ -5265,7 +5291,7 @@ uint8_t BOB_draw_atlas_quad_channel(BOB_Quad screen_quad, BOB_Quad tex_sub_rect,
 }
 
 //Draws a pixel buffer with a specified material
-uint8_t BOB_draw_pixel_buffer_channel(BOB_PixelBuffer_Handle pb, BOB_Quad dimensions, BOB_Quad uv_dimensions, BOB_Vector4 colour, uint16_t layer, float rotation, BOB_Material_Handle mat, uint8_t channel) {
+uint8_t BOB_draw_pixelbuffer_channel(BOB_Pixelbuffer_Handle pb, BOB_Quad dimensions, BOB_Quad sub_rect, BOB_Vector4 colour, uint16_t layer, float rotation, BOB_Material_Handle mat, uint8_t channel) {
     if((pb & BOBi_MSB) || (mat & BOBi_MSB)) return 0; //Do not work with already invalid handles
     BOBi_Renderer_Impl *renderer;
     uint32_t index;
@@ -5274,7 +5300,7 @@ uint8_t BOB_draw_pixel_buffer_channel(BOB_PixelBuffer_Handle pb, BOB_Quad dimens
     if(!BOBi_clip_quad(renderer, &dimensions)) return 1; //Early exit
     BOBi_Texture_Impl tex = renderer->texture_table[renderer->pixelbuffer_table[index].pixel_tex];
 
-    return BOB_draw_texture_channel(renderer->pixelbuffer_table[index].pixel_tex, dimensions, uv_dimensions, colour, layer, rotation, mat, channel);
+    return BOB_draw_texture_channel(renderer->pixelbuffer_table[index].pixel_tex, dimensions, sub_rect, colour, layer, rotation, mat, channel);
 }
 
 //=================================== CLIPPING FUNCTIONS =====================================
@@ -5676,7 +5702,7 @@ uint8_t BOBi_parse_binary(BOBi_Font_Impl *font, uint8_t *data, size_t data_sz) {
     return 1;
 }
 
-uint8_t BOB_load_bmf_font(BOB_Renderer_Handle renderer, const char *font_path, BOB_Font_Handle *font, BOB_BMF_Format format) {
+uint8_t BOB_load_bmf_font(BOB_Renderer_Handle renderer, const char *font_path, BOB_BMF_Format format, BOB_Font_Handle *font) {
     BOBi_Renderer_Impl *intrn_renderer;
     if(!BOBi_get_renderer(renderer, &intrn_renderer)) return 0;
 
