@@ -8,6 +8,6 @@ GLFW/
 dev/
 externals/
 *.fnt
-*.png
+test.png
 stb_image.h
 .clangd

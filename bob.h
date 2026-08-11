@@ -187,7 +187,7 @@ typedef struct {
 } BOB_Shader_Data;
 
 //Reads the shader data from a file and creates a shader data object
-uint8_t BOB_create_shader_data(const char * shader_path, BOB_Shader_Type type, BOB_Shader_Data *out);
+uint8_t BOB_create_shader_data(const char * shader_path, const char *entrypoint, BOB_Shader_Type type, BOB_Shader_Data *out);
 //Destroys a shader data by freeing the shader code bytes and setting the memory region at the pointer to 0
 void BOB_destroy_shader_data(BOB_Shader_Data *data);
 
@@ -202,7 +202,8 @@ typedef enum {
 } BOB_Uniform_Type;
 
 typedef struct {
-    const char *name;
+    const char *name; //Name of the uniform variable
+    //Tagged union representing its value
     union {
         float f;
         uint32_t u32;
@@ -210,13 +211,12 @@ typedef struct {
         BOB_Vector2 vec2;
         BOB_Vector3 vec3;
         BOB_Vector4 vec4;
-        BOB_Texture_Handle tex_index;
         BOB_Mat4 mat4;
         const void *ptr;
     } value;
     BOB_Uniform_Type type;
-    BOB_Shader_Type shader_stage;
-    uint8_t is_reference;
+    BOB_Shader_Type shader_stage; //What stage of the pipeline it occurs in
+    uint8_t is_reference; //If the value is a pointer to another value (used if the value is updated frequently)
 } BOB_Uniform;
 
 #define BOB_uniform_float(u_name, v, stage) (BOB_Uniform){.name = (u_name), .value.f = (v), .type = BOB_UNIFORM_FLOAT, .shader_stage = stage, .is_reference = 0}
@@ -254,10 +254,11 @@ uint8_t BOB_set_material_vector3_ref(BOB_Material_Handle mat, BOB_Uniform_Handle
 uint8_t BOB_set_material_vector4_ref(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, BOB_Vector4 *value);
 uint8_t BOB_set_material_mat4_ref(BOB_Material_Handle mat, BOB_Uniform_Handle uniform, BOB_Mat4 *value);
 
+//Enum for clipping direction
 typedef enum {
-    BOB_CLIP_HORZ,
-    BOB_CLIP_VERT,
-    BOB_CLIP_BOTH,
+    BOB_CLIP_HORZ, //Only clip horizontally
+    BOB_CLIP_VERT, //Only clip vertically
+    BOB_CLIP_BOTH, //Clip in both directions
 } BOB_Clip_Dir;
 
 //Updates the current clipping rect by pushing the intersection of the new clipping region
@@ -332,10 +333,10 @@ float BOB_degrees_to_radians(float angle);
 //Font structs
 typedef struct {
     uint32_t codepoint; //Unicode codepoint
-    BOB_Quad sub_rect;
-    float x_offset, y_offset, x_advance;
-    uint8_t page;
-    uint8_t channel;
+    BOB_Quad sub_rect; //What region of the page the glyph occupies
+    float x_offset, y_offset, x_advance; //Cursor positions before and after drawing this character
+    uint8_t page; //Page used to draw this character
+    uint8_t channel; //Channel flags
 } BOB_Glyph;
 
 typedef struct {
@@ -348,7 +349,7 @@ typedef enum {
     BOB_BMF_TEXT,
 } BOB_BMF_Format;
 
-uint8_t BOB_create_custom_font(BOB_Renderer_Handle r, BOB_Font_Handle *font, size_t num_glyphs, size_t num_kernings, size_t line_height, size_t base);
+uint8_t BOB_create_custom_font(BOB_Renderer_Handle r, size_t num_glyphs, size_t num_kernings, size_t line_height, size_t base, BOB_Font_Handle *font);
 uint8_t BOB_load_bmf_font(BOB_Renderer_Handle r, const char *font_path, BOB_BMF_Format format, BOB_Font_Handle *font);
 uint8_t BOB_add_font_page(BOB_Font_Handle font, uint32_t page_width, uint32_t page_height, uint8_t *page_data, BOB_Format page_format);
 uint8_t BOB_draw_codepoint(BOB_Font_Handle font, uint32_t codepoint, BOB_Vector2 *pos, BOB_Vector4 colour, uint16_t layer);
@@ -468,7 +469,6 @@ typedef struct {
         BOB_Vector2 vec2;
         BOB_Vector3 vec3;
         BOB_Vector4 vec4;
-        BOB_Texture_Handle tex_index;
         BOB_Mat4 mat4;
         const void *ptr;
     } value;
@@ -5751,7 +5751,7 @@ uint8_t BOB_load_bmf_font(BOB_Renderer_Handle renderer, const char *font_path, B
     return 1;
 }
 
-uint8_t BOB_create_custom_font(BOB_Renderer_Handle renderer, BOB_Font_Handle *font, size_t num_glyphs, size_t num_kernings, size_t line_height, size_t base) {
+uint8_t BOB_create_custom_font(BOB_Renderer_Handle renderer, size_t num_glyphs, size_t num_kernings, size_t line_height, size_t base, BOB_Font_Handle *font) {
     BOBi_Renderer_Impl *intrn_renderer;
     if(!BOBi_get_renderer(renderer, &intrn_renderer)) return 0;
 
