@@ -25,7 +25,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-//TODO: Create a function for loading shader data since we already have read_to_end
+//TODO: Change the vulkan memory code to use our allocator so the PBO memory mapping works properly -> Maybe a ring allocator to ensure constant memory usage
 //      Use macros to hide getting index and context from a handle and finding index where next object is placed
 //      Do proper error reporting and document what each error code means somewhere
 //      Debug mode with statistics
@@ -171,18 +171,12 @@ uint8_t BOB_pixelbuffer_init(BOB_Renderer_Handle r, size_t width, size_t height,
 //Frees the data used by a pixel buffer
 void BOB_pixelbuffer_free(BOB_Pixelbuffer_Handle *pb);
 //Binds the pixelbuffers gpu memory to cpu memory. This can currently only be done by one pixelbuffer at a time
-//TODO: See if we can support multiple buffers having their gpu memory bound to cpu memory
-uint8_t BOB_bind_pixelbuffer_memory(BOB_Pixelbuffer_Handle pb);
+uint8_t BOB_bind_pixelbuffer_memory(BOB_Pixelbuffer_Handle pb, void **mapped_mem_ptr, size_t *mem_sz);
 //Unbinds the pixelbuffer's gpu memory from cpu space
 void BOB_unbind_pixelbuffer_memory(BOB_Pixelbuffer_Handle pb);
-//NOTE: The following three functions must be called between BOB_bind_pixelbuffer_memory and BOB_unbind_pixelbuffer_memory otherwise they will fail/cause undefined behaviour
-
-//Updates the pixel data stored in a pixelbuffer
-void BOB_pixelbuffer_send_data(BOB_Pixelbuffer_Handle pb, uint8_t *data, size_t data_sz);
-//Gets the pixel data from a Pixelbuffer
-void BOB_pixelbuffer_get_data(BOB_Pixelbuffer_Handle pb, uint8_t *dest, size_t data_sz);
 //Uploads the pixel data from the pixelbuffer into its associated texture
-void BOB_pixelbuffer_updload(BOB_Pixelbuffer_Handle pb);
+//This function must be called between BOB_bind_pixelbuffer_memory and BOB_unbind_pixelbuffer_memory otherwise they will fail/cause undefined behaviour
+void BOB_pixelbuffer_upload(BOB_Pixelbuffer_Handle pb);
 
 //Initialises a blank texture atlas
 uint8_t BOB_atlas_init(BOB_Renderer_Handle r, uint32_t width, uint32_t height, BOB_Format format, BOB_Atlas_Handle *a);
@@ -384,6 +378,8 @@ uint8_t BOB_measure_codepoint_string(uint32_t *str, size_t str_len, BOB_Font_Han
 void BOB_print_parsing_error(void);
 uint8_t BOB_font_free(BOB_Font_Handle *font);
 
+#endif //BOB_H
+
 #ifdef BOB_IMPLEMENTATION
 
 #include <ctype.h>
@@ -395,7 +391,6 @@ uint8_t BOB_font_free(BOB_Font_Handle *font);
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
-#include <vulkan/vulkan_core.h>
 
 #ifdef BOB_INCLUDE_GLAD
 #include <glad/glad.h>
@@ -604,7 +599,7 @@ typedef struct {
     BOBi_Material_Impl *material_table;
     BOBi_Font_Impl *font_table;
 
-    void *mapped_mem_ptr; //Pointer to cpu memory mapped from gpu memory
+    // void *mapped_mem_ptr; //Pointer to cpu memory mapped from gpu memory
     float *colour;
 
     //TODO: Maybe make this a pointer instead of a union
@@ -1185,7 +1180,7 @@ uint8_t BOBi_gl_create_pbo(BOBi_Renderer_Impl *renderer, uint32_t index) {
     glGenBuffers(1, pbo);
     glBindBuffer(GL_PIXEL_UNPACK_BUFFER, *pbo);
     glBufferData(GL_PIXEL_UNPACK_BUFFER, buf_sz, NULL, GL_STREAM_DRAW);
-    uint8_t *ptr = glMapBuffer(GL_PIXEL_UNPACK_BUFFER, GL_WRITE_ONLY);
+    uint8_t *ptr = glMapBuffer(GL_PIXEL_UNPACK_BUFFER, GL_READ_WRITE);
     if(ptr == NULL) {
         printf("Failed to map GPU to CPU memory\n");
         return 0;
@@ -1197,46 +1192,35 @@ uint8_t BOBi_gl_create_pbo(BOBi_Renderer_Impl *renderer, uint32_t index) {
     return 1;
 }
 
-uint8_t BOBi_gl_bind_pbo_mem(BOBi_Renderer_Impl *renderer, uint32_t pb_index) {
+uint8_t BOBi_gl_bind_pbo_mem(BOBi_Renderer_Impl *renderer, uint32_t pb_index, void **mapped_mem_ptr, size_t *mem_sz) {
     glBindBuffer(GL_PIXEL_UNPACK_BUFFER, renderer->pixelbuffer_table[pb_index].pbo);
 
-    if(renderer->mapped_mem_ptr != NULL) {
-        printf("Memory region already mapped");
-        return 0;
-    }
-
-    renderer->mapped_mem_ptr= glMapBuffer(GL_PIXEL_UNPACK_BUFFER, GL_WRITE_ONLY);
-    if(renderer->mapped_mem_ptr == NULL) {
+    *mapped_mem_ptr= glMapBuffer(GL_PIXEL_UNPACK_BUFFER, GL_READ_WRITE);
+    if(*mapped_mem_ptr == NULL) {
         printf("Failed to map GPU to CPU memory\n");
         return 0;
     }
+    *mem_sz = renderer->pixelbuffer_table[pb_index].buf_sz;
     return 1;
 }
 
-void BOBi_gl_unbind_pbo_mem(BOBi_Renderer_Impl *renderer) {
-    if(renderer->mapped_mem_ptr != NULL) {
-        glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
-        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
-        renderer->mapped_mem_ptr = NULL;
-    }
-}
-
-void BOBi_gl_copy_pbo(BOBi_Renderer_Impl *renderer, uint8_t *data, size_t buf_sz) {
-    memcpy(renderer->mapped_mem_ptr, data, buf_sz);
-}
-
-void BOBi_gl_get_pbo_data(BOBi_Renderer_Impl *renderer, uint8_t *dest, size_t buf_sz) {
-    memcpy(dest, renderer->mapped_mem_ptr, buf_sz);
+void BOBi_gl_unbind_pbo_mem(BOBi_Renderer_Impl *renderer, uint32_t index) {
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, renderer->pixelbuffer_table[index].pbo);
+    glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
 }
 
 void BOBi_gl_upload_pbo_data(BOBi_Renderer_Impl *renderer, uint32_t pb_index) {
     glBindBuffer(GL_PIXEL_UNPACK_BUFFER, renderer->pixelbuffer_table[pb_index].pbo);
-    BOBi_gl_unbind_pbo_mem(renderer);
-    BOBi_gl_bind_pbo_mem(renderer, pb_index);
-    glBindTexture(GL_TEXTURE_2D, renderer->pixelbuffer_table[pb_index].pixel_tex);
+
     uint32_t tex_index;
     BOBi_get_index_from_handle(renderer->pixelbuffer_table[pb_index].pixel_tex, &tex_index);
+    glBindTexture(GL_TEXTURE_2D, renderer->texture_table[tex_index].opengl.texture);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, renderer->texture_table[tex_index].width, renderer->texture_table[tex_index].height, GL_RGB, GL_UNSIGNED_BYTE, 0);
+
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
 }
 
 #endif //BOB_INCLUDE_GLAD
@@ -2902,33 +2886,38 @@ VkFormat BOBi_vk_convert_format(BOB_Format format) {
 uint8_t BOBi_vk_create_texture(BOBi_Renderer_Impl *renderer, uint32_t index, size_t width, size_t height, uint8_t *data, BOB_Format format) {
     BOBi_Vulkan_Image *tex = &renderer->texture_table[index].vulkan;
 
-    //Create the staging buffer
-    BOBi_Vulkan_Buffer staging_buf;
-    if(!BOBi_vk_create_buffer(renderer, width * height * (format + 1), VK_BUFFER_USAGE_TRANSFER_SRC_BIT,  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &staging_buf)) return 0;
-
-    //Map the staging buffer memory into CPU memory and copy the pixel data into it
-    VULKAN_ERROR(!BOBi_vk_stream_to_buffer(renderer->vulkan.log_device, data, width * height * (format + 1), &staging_buf), "Failed to stream data into a Vulkan Buffer");
-
     //Create the image
     if(!BOBi_vk_create_image(renderer, width, height, BOBi_vk_convert_format(format), VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
                      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, tex)) return 0;
 
     VkCommandBuffer command_buf;
-    VULKAN_ERROR(!BOBi_vk_begin_single_time_commands(renderer, &command_buf), "Failed to begin command buffer",
-        BOBi_vk_destroy_buffer(renderer->vulkan.log_device, &staging_buf);
-    );
+    VULKAN_ERROR(!BOBi_vk_begin_single_time_commands(renderer, &command_buf), "Failed to begin command buffer");
     VULKAN_ERROR(!BOBi_vk_transition_tex_layout(command_buf, tex->image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL), "Failed to transition layout",
-        BOBi_vk_destroy_buffer(renderer->vulkan.log_device, &staging_buf);
-    );
-    BOBi_vk_copy_buffer_to_image(command_buf, staging_buf.buffer, tex->image, (BOB_Quad){0, 0, width, height});
-    VULKAN_ERROR(!BOBi_vk_transition_tex_layout(command_buf, tex->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
-        "Failed to transition layout", BOBi_vk_destroy_buffer(renderer->vulkan.log_device, &staging_buf);
-    );
-    VULKAN_ERROR(!BOBi_vk_end_single_time_commands(renderer, command_buf), "Failed to end command buffer",
-        BOBi_vk_destroy_buffer(renderer->vulkan.log_device, &staging_buf);
-    );
+                 BOBi_vk_destroy_image(renderer, tex));
 
-    BOBi_vk_destroy_buffer(renderer->vulkan.log_device, &staging_buf);
+    BOBi_Vulkan_Buffer staging_buf = {0};
+    uint8_t has_staging = 0;
+
+    if(data != NULL) {
+        //Create the staging buffer
+        VULKAN_ERROR(!BOBi_vk_create_buffer(renderer, width * height * (format + 1), VK_BUFFER_USAGE_TRANSFER_SRC_BIT,  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &staging_buf), "Failed to create staging buffer",
+                     BOBi_vk_destroy_image(renderer, tex));
+
+        has_staging = 1;
+
+        //Map the staging buffer memory into CPU memory and copy the pixel data into it
+        VULKAN_ERROR(!BOBi_vk_stream_to_buffer(renderer->vulkan.log_device, data, width * height * (format + 1), &staging_buf), "Failed to stream data into a Vulkan Buffer",
+            BOBi_vk_destroy_buffer(renderer->vulkan.log_device, &staging_buf), BOBi_vk_destroy_image(renderer, tex));
+
+        BOBi_vk_copy_buffer_to_image(command_buf, staging_buf.buffer, tex->image, (BOB_Quad){0, 0, width, height});
+    }
+
+    VULKAN_ERROR(!BOBi_vk_transition_tex_layout(command_buf, tex->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL), "Failed to transition layout",
+                 BOBi_vk_destroy_buffer(renderer->vulkan.log_device, &staging_buf), BOBi_vk_destroy_image(renderer, tex));
+
+    VULKAN_ERROR(!BOBi_vk_end_single_time_commands(renderer, command_buf), "Failed to end command buffer", BOBi_vk_destroy_buffer(renderer->vulkan.log_device, &staging_buf), BOBi_vk_destroy_image(renderer, tex));
+
+    if(has_staging) BOBi_vk_destroy_buffer(renderer->vulkan.log_device, &staging_buf);
 
     //Create view for the image
     VULKAN_ERROR(!BOBi_vk_create_image_view(renderer, tex->image, BOBi_vk_convert_format(format),  VK_IMAGE_ASPECT_COLOR_BIT, &tex->view),
@@ -2959,32 +2948,19 @@ void BOBi_vk_copy_data_tex(BOBi_Renderer_Impl *renderer, uint32_t tex_index, BOB
 void BOBi_vk_destroy_pbo(BOBi_Renderer_Impl *r, uint32_t index) {return;}
 uint8_t BOBi_vk_create_pbo(BOBi_Renderer_Impl *r, uint32_t index) {return 1;}
 
-uint8_t BOBi_vk_bind_pbo_mem(BOBi_Renderer_Impl *renderer, uint32_t pb_index) {
-    VULKAN_ERROR(vkMapMemory(renderer->vulkan.log_device, renderer->vulkan.pbo_staging_buf.memory, 0, renderer->vulkan.pbo_staging_buf_sz, 0, &renderer->mapped_mem_ptr), "Failed to map GPU memory to CPU memory");
+uint8_t BOBi_vk_bind_pbo_mem(BOBi_Renderer_Impl *renderer, uint32_t pb_index, void **mapped_mem_ptr, size_t *mem_sz) {
+    VULKAN_ERROR(vkMapMemory(renderer->vulkan.log_device, renderer->vulkan.pbo_staging_buf.memory, 0, renderer->vulkan.pbo_staging_buf_sz, 0, mapped_mem_ptr), "Failed to map GPU memory to CPU memory");
 
+    *mem_sz = renderer->pixelbuffer_table[pb_index].buf_sz;
     return 1;
 }
-void BOBi_vk_unbind_pbo_mem(BOBi_Renderer_Impl *renderer) {
+void BOBi_vk_unbind_pbo_mem(BOBi_Renderer_Impl *renderer, uint32_t index) {
     vkUnmapMemory(renderer->vulkan.log_device, renderer->vulkan.pbo_staging_buf.memory);
-}
-void BOBi_vk_copy_to_pbo(BOBi_Renderer_Impl *renderer, uint8_t *data, size_t buf_sz) {
-    if(buf_sz > renderer->vulkan.pbo_staging_buf_sz) {
-        vkUnmapMemory(renderer->vulkan.log_device, renderer->vulkan.pbo_staging_buf.memory);
-        BOBi_vk_destroy_buffer(renderer->vulkan.log_device, &renderer->vulkan.pbo_staging_buf);
-        BOBi_vk_create_buffer(renderer, buf_sz, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &renderer->vulkan.pbo_staging_buf);
-        renderer->vulkan.pbo_staging_buf_sz = buf_sz;
-        if(!vkMapMemory(renderer->vulkan.log_device, renderer->vulkan.pbo_staging_buf.memory, 0, buf_sz, 0, &renderer->mapped_mem_ptr)) return;
-    }
-    memcpy(renderer->mapped_mem_ptr, data, buf_sz);
-}
-void BOBi_vk_copy_from_pbo(BOBi_Renderer_Impl *renderer, uint8_t *dest, size_t buf_sz) {
-    memcpy(dest, renderer->mapped_mem_ptr, buf_sz);
 }
 void BOBi_vk_upload_pbo_data(BOBi_Renderer_Impl *renderer, uint32_t pb_index) {
     VkCommandBuffer buf;
     BOBi_vk_begin_single_time_commands(renderer, &buf);
-    BOBi_Texture_Impl tex = renderer->texture_table[pb_index];
+    BOBi_Texture_Impl tex = renderer->texture_table[renderer->pixelbuffer_table[pb_index].pixel_tex];
     BOBi_vk_copy_buffer_to_image(buf, renderer->vulkan.pbo_staging_buf.buffer, tex.vulkan.image, (BOB_Quad){0, 0, tex.width, tex.height});
     BOBi_vk_end_single_time_commands(renderer, buf);
 }
@@ -3257,10 +3233,8 @@ typedef void (*BOBi_back_destroy_renderer_func)(BOBi_Renderer_Impl *renderer);
 typedef uint8_t (*BOBi_back_create_default_mat_func)(BOB_Renderer_Handle renderer);
 typedef uint8_t (*BOBi_back_draw_func)(BOBi_Renderer_Impl *renderer);
 typedef void (*BOBi_back_copy_data_tex_func)(BOBi_Renderer_Impl *renderer, uint32_t atlas_index, BOB_Format format, BOB_Quad dest_rect, uint8_t *data);
-typedef uint8_t (*BOBi_back_bind_mem_func)(BOBi_Renderer_Impl *renderer, uint32_t pb_index);
-typedef void (*BOBi_back_unbind_mem_func)(BOBi_Renderer_Impl *renderer);
-typedef void (*BOBi_back_copy_into_buf_func)(BOBi_Renderer_Impl *renderer, uint8_t *data, size_t sz);
-typedef void (*BOBi_back_copy_from_buf_func)(BOBi_Renderer_Impl *renderer, uint8_t *dest, size_t sz);
+typedef uint8_t (*BOBi_back_bind_mem_func)(BOBi_Renderer_Impl *renderer, uint32_t pb_index, void **mapped_mem_ptr, size_t *mem_sz);
+typedef void (*BOBi_back_unbind_mem_func)(BOBi_Renderer_Impl *renderer, uint32_t index);
 typedef void (*BOBi_back_update_tex_from_buf_func)(BOBi_Renderer_Impl *renderer, uint32_t pb_index);
 typedef void (*BOBi_back_update_renderer_dimensions_func)(BOBi_Renderer_Impl *renderer, void *data, size_t sz);
 
@@ -3278,8 +3252,6 @@ typedef struct {
     BOBi_back_copy_data_tex_func copy_data_to_tex;
     BOBi_back_bind_mem_func bind_memory;
     BOBi_back_unbind_mem_func unbind_memory;
-    BOBi_back_copy_into_buf_func copy_into_buf;
-    BOBi_back_copy_from_buf_func copy_from_buf;
     BOBi_back_update_tex_from_buf_func update_tex_from_buf;
     BOBi_back_update_renderer_dimensions_func update_rend_dim;
     BOBi_Renderer_Type type;
@@ -3301,8 +3273,6 @@ BOBi_Backend_Vtable renderer_functions[BOB_NUM_RENDERER_TYPES] = {
         .copy_data_to_tex = &BOBi_gl_copy_data_tex,
         .bind_memory = &BOBi_gl_bind_pbo_mem,
         .unbind_memory = &BOBi_gl_unbind_pbo_mem,
-        .copy_into_buf = &BOBi_gl_copy_pbo,
-        .copy_from_buf = &BOBi_gl_get_pbo_data,
         .update_tex_from_buf = &BOBi_gl_upload_pbo_data,
         .update_rend_dim = &BOBi_gl_copy_buffer_data,
         .type = BOB_OPENGL_RENDERER,
@@ -3323,8 +3293,6 @@ BOBi_Backend_Vtable renderer_functions[BOB_NUM_RENDERER_TYPES] = {
         .copy_data_to_tex = &BOBi_vk_copy_data_tex,
         .bind_memory = &BOBi_vk_bind_pbo_mem,
         .unbind_memory = &BOBi_vk_unbind_pbo_mem,
-        .copy_into_buf = &BOBi_vk_copy_to_pbo,
-        .copy_from_buf = &BOBi_vk_copy_from_pbo,
         .update_tex_from_buf = &BOBi_vk_upload_pbo_data,
         .update_rend_dim = &BOBi_vk_update_rend_dim,
         .destroy_renderer = &BOBi_vk_destroy_renderer,
@@ -3414,9 +3382,6 @@ uint8_t BOBi_create_renderer(BOBi_Renderer_Type type, size_t atlas_capacity, siz
     intrn_renderer->next_tex_slot = UINT32_MAX;
     intrn_renderer->next_mat_slot = UINT32_MAX;
     intrn_renderer->next_font_slot = UINT32_MAX;
-
-    //Set it to null so that no strange errors from uninitialised pointers
-    intrn_renderer->mapped_mem_ptr = NULL;
 
     intrn_renderer->type = type;
 
@@ -4963,39 +4928,24 @@ void BOB_pixelbuffer_free(BOB_Pixelbuffer_Handle *pb) {
 }
 
 //Binds the pixelbuffers gpu memory to cpu memory. This can currently only be done by one pixelbuffer at a time
-uint8_t BOB_bind_pixelbuffer_memory(BOB_Pixelbuffer_Handle pb) {
+uint8_t BOB_bind_pixelbuffer_memory(BOB_Pixelbuffer_Handle pb, void **mapped_mem_ptr, size_t *mem_sz) {
     if(pb & BOBi_MSB) return 0; //Do not work with already invalid handles
     BOBi_Renderer_Impl *renderer;
     uint32_t index;
     if(!BOBi_get_handle_data(pb, &renderer, &index)) return 0;
 
-    return renderer_functions[renderer->type].bind_memory(renderer, index);
+    return renderer_functions[renderer->type].bind_memory(renderer, index, mapped_mem_ptr, mem_sz);
 }
 //Unbinds the pixelbuffer's gpu memory from cpu space
 void BOB_unbind_pixelbuffer_memory(BOB_Pixelbuffer_Handle pb) {
     if(pb & BOBi_MSB) return; //Do not work with already invalid handles
     BOBi_Renderer_Impl *renderer;
-    if(!BOBi_get_renderer_from_handle(pb, &renderer)) return;
-    return renderer_functions[renderer->type].unbind_memory(renderer);
-}
-//Updates the pixel data stored in a pixelbuffer
-void BOB_pixelbuffer_send_data(BOB_Pixelbuffer_Handle pb, uint8_t *data, size_t data_sz) {
-    if(pb & BOBi_MSB) return; //Do not work with already invalid handles
-    BOBi_Renderer_Impl *renderer;
-    if(!BOBi_get_renderer_from_handle(pb, &renderer)) return;
-
-    renderer_functions[renderer->type].copy_into_buf(renderer, data, data_sz);
-}
-//Gets the pixel data from a Pixelbuffer
-void BOB_pixelbuffer_get_data(BOB_Pixelbuffer_Handle pb, uint8_t *dest, size_t data_sz) {
-    if(pb & BOBi_MSB) return; //Do not work with already invalid handles
-    BOBi_Renderer_Impl *renderer;
-    if(!BOBi_get_renderer_from_handle(pb, &renderer)) return;
-
-    renderer_functions[renderer->type].copy_from_buf(renderer, dest, data_sz);
+    uint32_t index;
+    if(!BOBi_get_handle_data(pb, &renderer, &index)) return;
+    return renderer_functions[renderer->type].unbind_memory(renderer, index);
 }
 //Uploads the pixel data from the pixelbuffer into its associated texture
-void BOB_pixelbuffer_updload(BOB_Pixelbuffer_Handle pb) {
+void BOB_pixelbuffer_upload(BOB_Pixelbuffer_Handle pb) {
     if(pb & BOBi_MSB) return; //Do not work with already invalid handles
     BOBi_Renderer_Impl *renderer;
     uint32_t index;
@@ -5320,7 +5270,6 @@ uint8_t BOB_draw_pixelbuffer_channel(BOB_Pixelbuffer_Handle pb, BOB_Quad dimensi
     if(!BOBi_get_handle_data(pb, &renderer, &index)) return 0;
 
     if(!BOBi_clip_quad(renderer, &dimensions)) return 1; //Early exit
-    BOBi_Texture_Impl tex = renderer->texture_table[renderer->pixelbuffer_table[index].pixel_tex];
 
     return BOB_draw_texture_channel(renderer->pixelbuffer_table[index].pixel_tex, dimensions, sub_rect, colour, layer, rotation, mat, channel);
 }
@@ -6005,4 +5954,3 @@ uint8_t BOB_font_free(BOB_Font_Handle *font) {
     return 1;
 }
 #endif
-#endif //BOB_H

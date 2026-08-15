@@ -35,9 +35,12 @@ BOB_Renderer_Handle r;
 //(and the objects being rendered) can be adjusted to fit the new screen size
 void framebuffer_size_callback(GLFWwindow* window, int width, int height) {
     //Update viewport dimensions
+    #ifdef BOB_INCLUDE_GLAD
     glViewport(0, 0, width, height);
-    glfwGetFramebufferSize(window, &width, &height);
-    BOB_renderer_update_dimensions(r, width, height, width, height);
+    #endif
+    int width_scr, height_scr;
+    glfwGetWindowSize(window, &width_scr, &height_scr);
+    BOB_renderer_update_dimensions(r, width_scr, height_scr, width, height);
 }
 
 //Callback function used by the Vulkan backend to create the swapchain surface
@@ -131,8 +134,6 @@ int init(GLFWwindow **window) {
         return 0;
     }
     #endif
-
-    return 1;
 
     return 1;
 }
@@ -259,14 +260,17 @@ When rendering a string from a font you should use BOB_draw_char_string() (for A
 ### Streaming data to a pixelbuffer
 BOB_Pixelbuffers represent textures that have their pixel data continuously updated, and as such they function as textures for rendering, but have their own functions for streaming data to and from themselves. This would look something like the following:
 ```C
-BOB_bind_pixelbuffer_memory(pb); //Bind memory
+void *mapped_mem_ptr;
+size_t mapped_mem_sz;
+//Bind memory, getting a pointer to the mapped region and its size as output
+BOB_bind_pixelbuffer_memory(pb, &mapped_mem_ptr, &mapped_mem_sz);
     /* Pixelbuffer Operations */
     ...
 
-    BOB_pixelbuffer_upload(pb); //Stream the final data to the pixelbuffer's texture
-BOB_unbind_pixelbuffer_memory(pb);
+BOB_unbind_pixelbuffer_memory(pb); //Unbind the memory so the GPU source is updated
+BOB_pixelbuffer_upload(pb); //Stream the final data to the pixelbuffer's texture
 ```
-Currently only one pixelbuffer's memory can be bound per renderer (this may change in the future). Currently there are three pixelbuffer data manipulation functions: BOB_pixelbuffer_get_data(), BOB_pixelbuffer_send_data(), BOB_pixelbuffer_upload_data();
+Currently the OpenGL backend supports having as many pbos bound as you would like, this is still a developing feature in the Vulkan backend.
 ### Adding images to an atlas
 BOB allows you to build your own texture atlases for efficient batched rendering. This can be done by creating a blank atlas texture using BOB_atlas_init() and then packing it using BOB_atlas_pack(), which returns the sub_rect on the atlas where the new texture data was added.
 ### Specifying a Clip Rect
@@ -274,7 +278,7 @@ BOB supports rect clipping (scissoring). You can begin a new scissor by calling 
 ### Loading a BMFont
 BOB natively supports loading a BMFont using either a text or binary .fnt file (but not xml). Simply call BOB_load_bmf_font with your filepath and specify the .fnt format you are using, BOB_BMF_BINARY for binary .fnt files, and BOB_BMF_TEXT for text .fnt files. Font pages need to be added one by one using BOB_add_font_page(), and should be added in the order of their ids (0 first, then 1, etc).
 ### Creating a font from a different Bitmap font format
-If you would like to create a BOB_Font from a different bitmap format, you'll have to parse the data yourself, but you can easily add it to BOB by first calling BOB_create_custom_font with the number of glyphs and kernings your font contains, and then call BOB_font_append_glyph() or BOB_font_append_kerning() for each glyph/kerning in your font's data.
+If you would like to create a BOB_Font from a different bitmap format, you'll have to parse the data yourself, but you can easily add it to BOB by first calling BOB_create_custom_font with the number of glyphs and kernings your font contains, and then call BOB_font_append_glyph() or BOB_font_append_kerning() for each glyph/kerning in your font's data. Note that if you append multiple glyphs for the same character or kernings for the same character pairs (e.g. for the same character but of different sizes), BOB overrides the current entry with the latest one added. To support multiple font sizes, you can either have multiple BOB_Fonts which represent the font at different sizes, or have one font which you render at different scalings.
 ### Creating custom shaders
 **N.B.** This feature is currently incomplete and very experimental. It is recommended that you currently use the default shaders instead of defining your own. If you do want to write your own shaders, uniforms should be bound to binding 0, and you can only have one texture, which should be bound to (set = 1, binding = 0)  
 BOB allows you to define your own custom shaders and pass them in when creating a material. To do this, you must first create a BOB_Shader_Data object containing the shader code (a string containing the shader text if using the OpenGL backend, or an array of SPIR-V bytecode if using the Vulkan backend), the size of the shader code, the name of the shader's entrypoint, and the type of shader (**NOTE:** If using the Vulkan backend, currently only Vertex and Fragment shaders are supported). This should then be passed to the BOB_create_material function alongside any default uniform values you want to use.
