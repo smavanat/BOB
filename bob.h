@@ -38,6 +38,10 @@
 //      Custom vertex layout
 //      Compute shader support
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #ifdef BOB_INCLUDE_GLAD
 #include <glad/glad.h>
 #endif
@@ -376,6 +380,10 @@ uint8_t BOB_measure_char_string(char *str, size_t str_len, BOB_Font_Handle font,
 uint8_t BOB_measure_codepoint_string(uint32_t *str, size_t str_len, BOB_Font_Handle font, BOB_Vector2 *out);
 void BOB_print_parsing_error(void);
 uint8_t BOB_font_free(BOB_Font_Handle *font);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif //BOB_H
 
