@@ -170,12 +170,11 @@ void BOB_texture_free(BOB_Texture_Handle *tex);
 uint8_t BOB_pixelbuffer_init(BOB_Renderer_Handle r, size_t width, size_t height, BOB_Format format, BOB_Pixelbuffer_Handle *pb);
 //Frees the data used by a pixel buffer
 void BOB_pixelbuffer_free(BOB_Pixelbuffer_Handle *pb);
-//Binds the pixelbuffers gpu memory to cpu memory. This can currently only be done by one pixelbuffer at a time
+//Binds the pixelbuffers gpu memory to cpu memory. Returns a pointer to the mapped cpu region and its size in bytes
 uint8_t BOB_bind_pixelbuffer_memory(BOB_Pixelbuffer_Handle pb, void **mapped_mem_ptr, size_t *mem_sz);
-//Unbinds the pixelbuffer's gpu memory from cpu space
+//Unbinds the pixelbuffer's gpu memory from cpu space. Must be called before BOB_pixelbuffer_upload
 void BOB_unbind_pixelbuffer_memory(BOB_Pixelbuffer_Handle pb);
 //Uploads the pixel data from the pixelbuffer into its associated texture
-//This function must be called between BOB_bind_pixelbuffer_memory and BOB_unbind_pixelbuffer_memory otherwise they will fail/cause undefined behaviour
 void BOB_pixelbuffer_upload(BOB_Pixelbuffer_Handle pb);
 
 //Initialises a blank texture atlas

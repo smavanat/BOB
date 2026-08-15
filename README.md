@@ -455,29 +455,12 @@ uint8_t BOB_pixelbuffer_init(BOB_Renderer_Handle r, size_t width, size_t height,
  * @param pb a pointer to the handle of the pixelbuffer to be destroyed
  */
 void BOB_pixelbuffer_free(BOB_Pixelbuffer_Handle *pb);
-//Binds the pixelbuffer represented by handle pb gpu memory to cpu memory. This can currently only be done by one pixelbuffer at a time
-uint8_t BOB_bind_pixelbuffer_memory(BOB_Pixelbuffer_Handle pb);
-//Unbinds the pixelbuffer represented by handle pb gpu memory from cpu space
+//Binds the pixelbuffers gpu memory to cpu memory. Returns a pointer to the mapped cpu region and its size in bytes
+uint8_t BOB_bind_pixelbuffer_memory(BOB_Pixelbuffer_Handle pb, void **mapped_mem_ptr, size_t *mem_sz);
+//Unbinds the pixelbuffer's gpu memory from cpu space. Must be called before BOB_pixelbuffer_upload
 void BOB_unbind_pixelbuffer_memory(BOB_Pixelbuffer_Handle pb);
-
-//NOTE: The following three functions must be called between BOB_bind_pixelbuffer_memory and BOB_unbind_pixelbuffer_memory otherwise they will fail/cause undefined behaviour
-
-/*
- * Updates the pixel data stored in a pixelbuffer
- * @param pb the handle of the pixelbuffer to use
- * @param data the data to be sent to the pixelbuffer
- * @param data_sz the size of the data buffer to be sent
- */
-void BOB_pixelbuffer_send_data(BOB_Pixelbuffer_Handle pb, uint8_t *data, size_t data_sz);
-/*
- * Gets the pixel data stored in a pixelbuffer
- * @param pb the handle of the pixelbuffer to use
- * @param dest the buffer to store the data retrieved from the pixelbuffer
- * @param data_sz the size of the pixelbuffer data to be retrieved
- */
-void BOB_pixelbuffer_get_data(BOB_Pixelbuffer_Handle pb, uint8_t *dest, size_t data_sz);
-//Uploads the pixel data from the pixelbuffer represented by handle pb into its associated texture
-void BOB_pixelbuffer_updload(BOB_Pixelbuffer_Handle pb);
+//Uploads the pixel data from the pixelbuffer into its associated texture
+void BOB_pixelbuffer_upload(BOB_Pixelbuffer_Handle pb);
 ```
 
 ### Font
