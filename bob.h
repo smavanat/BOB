@@ -3485,28 +3485,30 @@ void BOBi_quicksort_draw_calls(BOBi_Renderer_Impl *r, size_t subarr_start, size_
     }
 }
 
-//Helper function to clip a quad
+//Helper function to clip a quad. Only works if the quad is unrotated. Otherwise use BOBi_clip_polygon
 uint8_t BOBi_clip_quad(BOBi_Renderer_Impl *r, BOB_Quad *quad) {
     if(r->stack->size == 0) return 1; //No need to clip if no clip rects
     BOBi_Clip_Rect clip = BOB_peek_clip_rect(r->stack);
     if(clip.empty) return 0;
 
     if(clip.clip_horz) {
+        if(quad->x > clip.right) return 0; //Outside the clip region
         if(quad->x < clip.left) {
             quad->w -= clip.left - quad->x;
             quad->x = clip.left;
         }
-        if(quad->x + quad->w > clip.right) quad->w = clip.right - clip.left;
+        if(quad->x + quad->w > clip.right) quad->w = clip.right - quad->x;
     }
     if(clip.clip_vert) {
+        if(quad->y > clip.bottom) return 0; //Outside the clip region
         if(quad->y < clip.top) {
             quad->h -= clip.top - quad->y;
             quad->y = clip.top;
         }
-        if(quad->y + quad->h > clip.bottom) quad->h = clip.bottom - clip.top;
+        if(quad->y + quad->h > clip.bottom) quad->h = clip.bottom - quad->y;
     }
 
-    if(!quad->h || !quad->w) return 0; //If the clipped region is empty, return;
+    if((quad->h <= 0) || (quad->w <= 0)) return 0; //If the clipped region is empty, return;
 
     return 1;
 }
@@ -3768,7 +3770,6 @@ size_t BOBi_triangulate_ec(BOB_Vector2 *poly_points, size_t poly_size, uint32_t 
             processed[write++] = processed[read];
         }
     }
-    processed_size = write;
 
     //Converting normal vertices into doubly-linked list
     for(int i = 0; i < processed_size; i++) {
@@ -5093,22 +5094,39 @@ uint8_t BOB_draw_quad_mat(BOB_Renderer_Handle r, BOB_Quad quad, BOB_Vector4 colo
     BOBi_Renderer_Impl *renderer;
     if(!BOBi_get_renderer(r, &renderer)) return 0;
 
-    if(!BOBi_clip_quad(renderer, &quad)) return 1; //Early exit
+    //If the quad is not rotated or no clip region, can just clip/draw it like a quad
+    if(fabsf(rotation - 0.0f) < 1e-9 || BOB_peek_clip_rect(renderer->stack).empty) {
+        if(!BOBi_clip_quad(renderer, &quad)) return 1; //Early exit
+        BOB_Vector3 coords[4] = {
+            {quad.x, quad.y, layer},
+            {quad.x + quad.w, quad.y, layer},
+            {quad.x + quad.w, quad.y + quad.h, layer},
+            {quad.x, quad.y + quad.h, layer}
+        };
 
-    BOB_Vector2 rotated_coords[4];
-    BOBi_rotate_quad(quad, rotated_coords, rotation);
-    if(layer > BOB_MAX_LAYER) layer = BOB_MAX_LAYER-1; //Normalise it to be within the required range
+        BOBi_create_draw_call(r, coords, BOB_VERTICIES_PER_QUAD, NULL, BOB_INDECIES_PER_QUAD, colour, renderer->default_tex, renderer->default_mat, 0, BOBi_DRAW_QUAD);
+    }
+    //Otherwise need to clip/draw it like a polygon
+    else {
+        BOBi_Clip_Rect clip = BOB_peek_clip_rect(renderer->stack);
 
-    BOB_Vector3 strip[4] = {
-        {rotated_coords[0].x, rotated_coords[0].y, layer},
-        {rotated_coords[1].x, rotated_coords[1].y, layer},
-        {rotated_coords[2].x, rotated_coords[2].y, layer},
-        {rotated_coords[3].x, rotated_coords[3].y, layer}
-    };
+        BOB_Vector2 rotated_coords[8];
+        BOBi_rotate_quad(quad, rotated_coords, rotation);
 
-    BOBi_create_draw_call(r, strip, 4, NULL, 6, colour, renderer->default_tex, mat, 0, BOBi_DRAW_QUAD);
+        size_t new_size = BOBi_clip_polygon(renderer, rotated_coords, 4);
+        if(new_size < 3) return 1; //No need to draw an empty polygon
+
+        BOB_Vector3 coords[8];
+        for(size_t i = 0; i < new_size; i++) {
+            //Need to do this in reverse order to make sure the coords are counter-clockwise for ear clipping
+            coords[new_size - i - 1] = (BOB_Vector3){rotated_coords[i].x, rotated_coords[i].y, layer};
+        }
+
+        BOBi_create_draw_call(r, coords, new_size, NULL, (new_size == 4) ? BOB_INDECIES_PER_QUAD : 3 * (new_size - 2), colour, renderer->default_tex, mat, 0, (new_size == 4) ? BOBi_DRAW_QUAD : BOBi_DRAW_POLY);
+    }
     return 1;
 }
+
 
 //Draws a filled triangle with a specified material
 uint8_t BOB_draw_polygon_mat(BOB_Renderer_Handle r, BOB_Vector2* poly_points, size_t poly_size, BOB_Vector4 colour, uint16_t layer, float rotation, BOB_Material_Handle mat) {
@@ -5231,31 +5249,71 @@ uint8_t BOB_draw_texture_channel(BOB_Texture_Handle texture, BOB_Quad screen_qua
     uint32_t index;
     if(!BOBi_get_handle_data(texture, &renderer, &index)) return 0;
 
-    if(!BOBi_clip_quad(renderer, &screen_quad)) return 1; //Early exit
-
-    BOB_Vector2 rotated_coords[4];
-    BOBi_rotate_quad(screen_quad, rotated_coords, rotation);
-
     if(layer > BOB_MAX_LAYER) layer = BOB_MAX_LAYER-1; //Normalise it to be within the required range
-
-    BOB_Vector3 coords[4] = {
-        {rotated_coords[0].x, rotated_coords[0].y, layer},
-        {rotated_coords[1].x, rotated_coords[1].y, layer},
-        {rotated_coords[2].x, rotated_coords[2].y, layer},
-        {rotated_coords[3].x, rotated_coords[3].y, layer}
-    };
 
     float width = renderer->texture_table[index].width;
     float height = renderer->texture_table[index].height;
 
-    BOB_Vector2 uv[4] = {
-        {tex_sub_rect.x / width, tex_sub_rect.y / height},
-        {tex_sub_rect.x / width, (tex_sub_rect.y + tex_sub_rect.h) / height},
-        {(tex_sub_rect.x + tex_sub_rect.w) / width, (tex_sub_rect.y + tex_sub_rect.h) / height},
-        {(tex_sub_rect.x + tex_sub_rect.w) / width , tex_sub_rect.y / height}
-    };
+    //If the texture is not rotated or no clip region, can just clip/draw it like a quad
+    if(fabsf(rotation - 0.0f) < 1e-9 || BOB_peek_clip_rect(renderer->stack).empty) {
+        BOB_Quad clipped_quad = screen_quad;
+        if(!BOBi_clip_quad(renderer, &clipped_quad)) return 1; //Early exit
+        BOB_Vector3 coords[4] = {
+            {clipped_quad.x, clipped_quad.y, layer},
+            {clipped_quad.x, clipped_quad.y + clipped_quad.h, layer},
+            {clipped_quad.x + clipped_quad.w, clipped_quad.y + clipped_quad.h, layer},
+            {clipped_quad.x + clipped_quad.w, clipped_quad.y, layer}
+        };
 
-    BOBi_create_draw_call((texture >> 32), coords, BOB_VERTICIES_PER_QUAD, uv, BOB_INDECIES_PER_QUAD, colour, texture, mat, channel, BOBi_DRAW_QUAD);
+        //Getting the normalised difference of the screen quad after clipping
+        BOB_Quad norm_diff = {
+            (screen_quad.x - clipped_quad.x) / screen_quad.w,
+            (screen_quad.y - clipped_quad.y) / screen_quad.h,
+            (screen_quad.w - clipped_quad.w) / screen_quad.w,
+            (screen_quad.h - clipped_quad.h) / screen_quad.h,
+        };
+
+        //And moving the sub rect region accordingly
+        tex_sub_rect.x -= tex_sub_rect.x * norm_diff.x;
+        tex_sub_rect.y -= tex_sub_rect.y * norm_diff.y;
+        tex_sub_rect.w -= tex_sub_rect.w * norm_diff.w;
+        tex_sub_rect.h -= tex_sub_rect.h * norm_diff.h;
+
+        BOB_Vector2 uv[4] = {
+            {(tex_sub_rect.x / width), (tex_sub_rect.y / height)},
+            {(tex_sub_rect.x / width), ((tex_sub_rect.y + tex_sub_rect.h) / height)},
+            {((tex_sub_rect.x + tex_sub_rect.w) / width), ((tex_sub_rect.y + tex_sub_rect.h) / height)},
+            {((tex_sub_rect.x + tex_sub_rect.w) / width), (tex_sub_rect.y / height)}
+        };
+
+        BOBi_create_draw_call((texture >> 32), coords, BOB_VERTICIES_PER_QUAD, uv, BOB_INDECIES_PER_QUAD, colour, texture, mat, channel, BOBi_DRAW_QUAD);
+    }
+    //Otherwise need to clip/draw it like a polygon
+    else {
+        BOB_Vector2 rotated_coords[8];
+        BOBi_rotate_quad(screen_quad, rotated_coords, rotation);
+
+        size_t new_size = BOBi_clip_polygon(renderer, rotated_coords, 4);
+        if(new_size < 3) return 1; //No need to draw an empty polygon
+
+        //Rotate the clipped points back so we can calculate the new uv region
+        BOB_Vector2 orig_clipped_coords[8];
+        memcpy(orig_clipped_coords, rotated_coords, sizeof(rotated_coords));
+        BOBi_rotate_polygon(orig_clipped_coords, new_size, -rotation);
+
+        BOB_Vector2 uv[8];
+        BOB_Vector3 coords[8];
+        for(size_t i = 0; i < new_size; i++) {
+            //Getting the uv coords after clipping
+            uv[i].x = (tex_sub_rect.x + (tex_sub_rect.w * (orig_clipped_coords[i].x - screen_quad.x) / screen_quad.w)) / width;
+            uv[i].y = (tex_sub_rect.y + (tex_sub_rect.h * (orig_clipped_coords[i].y - screen_quad.y) / screen_quad.h)) / height;
+
+            //Need to do this in reverse order to make sure the coords are counter-clockwise for ear clipping
+            coords[new_size - i - 1] = (BOB_Vector3){rotated_coords[i].x, rotated_coords[i].y, layer};
+        }
+
+        BOBi_create_draw_call((texture >> 32), coords, new_size, uv, (new_size == 4) ? BOB_INDECIES_PER_QUAD : 3 * (new_size - 2), colour, texture, mat, channel, (new_size == 4) ? BOBi_DRAW_QUAD : BOBi_DRAW_POLY);
+    }
 
     return 1;
 }
