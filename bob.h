@@ -5298,7 +5298,7 @@ void BOB_start_clip(BOB_Renderer_Handle renderer, BOB_Quad rect, BOB_Clip_Dir di
     }
 
     BOBi_Clip_Rect clip_rect = (BOBi_Clip_Rect) {
-        rect.x, rect.x+rect.w, rect.y, rect.y+rect.w,
+        rect.x, rect.x+rect.w, rect.y, rect.y+rect.h,
         (dir == BOB_CLIP_VERT || dir == BOB_CLIP_BOTH) ? 1 : 0,
         (dir == BOB_CLIP_HORZ || dir == BOB_CLIP_BOTH) ? 1 : 0,
         0
