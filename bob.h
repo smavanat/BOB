@@ -26,17 +26,23 @@
 #include <stddef.h>
 
 //TODO: Change the vulkan memory code to use our allocator so the PBO memory mapping works properly -> Maybe a ring allocator to ensure constant memory usage
-//      Use macros to hide getting index and context from a handle and finding index where next object is placed
+//      Reduce number of memory allocations cpu-side and in the Vulkan backend
+//      Use macros to hide getting index and context from a handle
+//      Use texture arrays instead of binding textures every draw call (and ssbos for shaders (opengl))
+//
 //      Do proper error reporting and document what each error code means somewhere
 //      Debug mode with statistics
-//      Reduce number of memory allocations cpu-side and in the Vulkan backend
+//
 //      Allow more customisability in the shaders in general (and add push constants)
-//      Use texture arrays instead of binding textures every draw call (and ssbos for shaders (opengl))
+//      Compute shader support
+//
 //      Allow the user to define render passes -> Custom framebuffers
 //      Allow the user to define their own pipeline and sampler layout
 //      Allow the user to select what kind of device you want vulkan to use
+//
 //      Custom vertex layout
-//      Compute shader support
+//
+//      Software rendering backend + Terminal Rendering
 
 #ifdef __cplusplus
 extern "C" {
@@ -3309,6 +3315,25 @@ BOBi_Backend_Vtable renderer_functions[BOB_NUM_RENDERER_TYPES] = {
 
 //================================================= INTERNAL HELPER FUNCTIONS ===================================================
 
+//Macro to get next free slot in an array. Used when searching for objects
+//Uses linear search (good enough since the arrays in question should be small)
+//Updates the pointer to the next free slot once it finds the current one.
+//Uses UINT32_MAX as a dummy value to indicate no free slots
+#define GET_NEXT_INDEX(index, next_slot_idx, count, check_empty_func) do {          \
+    if(next_slot_idx == UINT32_MAX) {                                               \
+        index = count;                                                              \
+    }                                                                               \
+    else {                                                                          \
+        index = next_slot_idx;                                                      \
+        for (next_slot_idx = index + 1; next_slot_idx < count; next_slot_idx++) {   \
+            if (check_empty_func)                                                   \
+                break;                                                              \
+        }                                                                           \
+        if (next_slot_idx >= count)                                                 \
+            next_slot_idx = UINT32_MAX;                                             \
+    }                                                                               \
+} while(0);
+
 uint8_t BOBi_create_renderer(BOBi_Renderer_Type type, size_t atlas_capacity, size_t pixelbuf_capacity, size_t tex_capacity, size_t mat_capacity, size_t font_capacity, size_t vertex_capacity, size_t index_capacity, size_t draw_call_capacity, size_t width, size_t height, BOB_Renderer_Handle *renderer) {
     if(bob_state.renderer_count >= bob_state.renderer_capcity) {
         printf("ERROR: Exceeded renderer capacity\n");
@@ -3316,23 +3341,7 @@ uint8_t BOBi_create_renderer(BOBi_Renderer_Type type, size_t atlas_capacity, siz
     }
 
     uint32_t index;
-    if(bob_state.next_renderer_slot == UINT32_MAX) {
-        index = bob_state.renderer_count;
-    }
-    else {
-        index = bob_state.next_renderer_slot;
-
-        //Linearly searching to find the next empty slot. Yes I know that this is slow
-        for (bob_state.next_renderer_slot = index + 1; bob_state.next_renderer_slot < bob_state.renderer_count; bob_state.next_renderer_slot++) {
-            //Use the allocation status of the renderer's memory region as an initialisation tell
-            //Relies on setting pointer to NULL on renderer destruction and zeroing memory on creating the BOB instance
-            if (bob_state.renderers[bob_state.next_renderer_slot].renderer_memory.memory == NULL)
-                break;
-        }
-
-        if (bob_state.next_renderer_slot >= bob_state.renderer_count)
-            bob_state.next_renderer_slot = UINT32_MAX;
-    }
+    GET_NEXT_INDEX(index, bob_state.next_renderer_slot, bob_state.renderer_count, bob_state.renderers[bob_state.next_renderer_slot].renderer_memory.memory == NULL);
 
     BOBi_Renderer_Impl *intrn_renderer = &bob_state.renderers[index];
 
@@ -4419,21 +4428,7 @@ uint8_t BOB_create_texture(BOB_Renderer_Handle renderer, uint32_t width, uint32_
     }
 
     uint32_t index;
-    if (intrn_renderer->next_tex_slot == UINT32_MAX) {
-        index = intrn_renderer->num_textures;
-    }
-    else {
-        index = intrn_renderer->next_tex_slot;
-
-        //Linearly searching to find the next empty slot. Yes I know that this is slow
-        for (intrn_renderer->next_tex_slot = index + 1; intrn_renderer->next_tex_slot < intrn_renderer->num_textures; intrn_renderer->next_tex_slot++) {
-            if (!intrn_renderer->texture_table[intrn_renderer->next_tex_slot].init)
-                break;
-        }
-
-        if (intrn_renderer->next_tex_slot >= intrn_renderer->num_textures)
-            intrn_renderer->next_tex_slot = UINT32_MAX;
-    }
+    GET_NEXT_INDEX(index, intrn_renderer->next_tex_slot, intrn_renderer->num_textures, !intrn_renderer->texture_table[intrn_renderer->next_tex_slot].init);
 
     if(!renderer_functions[intrn_renderer->type].create_texture(intrn_renderer, index, width, height, data, format)) {
         *tex |= BOBi_MSB;
@@ -4514,20 +4509,7 @@ uint8_t BOB_create_material(BOB_Renderer_Handle renderer, BOB_Shader_Data *data,
     }
 
     uint32_t index;
-    if (intrn_renderer->next_mat_slot == UINT32_MAX) {
-        index = intrn_renderer->num_materials;
-    }
-    else {
-        index = intrn_renderer->next_mat_slot;
-
-        for (intrn_renderer->next_mat_slot = index + 1; intrn_renderer->next_mat_slot < intrn_renderer->num_materials; intrn_renderer->next_mat_slot++) {
-            if (!intrn_renderer->material_table[intrn_renderer->next_mat_slot].init)
-                break;
-        }
-
-        if (intrn_renderer->next_mat_slot >= intrn_renderer->num_materials)
-            intrn_renderer->next_mat_slot = UINT32_MAX;
-    }
+    GET_NEXT_INDEX(index, intrn_renderer->next_mat_slot, intrn_renderer->num_materials, !intrn_renderer->material_table[intrn_renderer->next_mat_slot].init);
 
     //TODO: Make an arena for this. Currently need to do this since cannot have references to stack memory in heap memory
     //otherwise will get pointer badness
@@ -4773,21 +4755,7 @@ uint8_t BOB_atlas_init(BOB_Renderer_Handle renderer, uint32_t width, uint32_t he
     }
 
     uint32_t index;
-    if (intrn_renderer->next_atlas_slot == UINT32_MAX) {
-        index = intrn_renderer->num_atlases;
-    }
-    else {
-        index = intrn_renderer->next_atlas_slot;
-
-        //Linearly searching to find the next empty slot. Yes I know that this is slow
-        for (intrn_renderer->next_atlas_slot = index + 1; intrn_renderer->next_atlas_slot < intrn_renderer->num_atlases; intrn_renderer->next_atlas_slot++) {
-            if (!intrn_renderer->atlas_table[intrn_renderer->next_atlas_slot].init)
-                break;
-        }
-
-        if (intrn_renderer->next_atlas_slot >= intrn_renderer->num_atlases)
-            intrn_renderer->next_atlas_slot = UINT32_MAX;
-    }
+    GET_NEXT_INDEX(index, intrn_renderer->next_atlas_slot, intrn_renderer->num_atlases, !intrn_renderer->atlas_table[intrn_renderer->next_atlas_slot].init);
 
     if(!BOB_create_texture(renderer, width, height, NULL, format, &intrn_renderer->atlas_table[index].texture)) {
         intrn_renderer->atlas_table[index] = (BOBi_Atlas_Impl){0};
@@ -4875,22 +4843,7 @@ uint8_t BOB_pixelbuffer_init(BOB_Renderer_Handle renderer, size_t width, size_t 
     }
 
     uint32_t index;
-    if (intrn_renderer->next_pixelbuf_slot == UINT32_MAX) {
-        index = intrn_renderer->num_pixelbuffers;
-    }
-    else {
-        index = intrn_renderer->next_pixelbuf_slot;
-
-        //Linearly searching to find the next empty slot. Yes I know that this is slow
-        for (intrn_renderer->next_pixelbuf_slot = index + 1; intrn_renderer->next_pixelbuf_slot < intrn_renderer->num_pixelbuffers; intrn_renderer->next_pixelbuf_slot++) {
-            if (!intrn_renderer->pixelbuffer_table[intrn_renderer->next_pixelbuf_slot].init)
-                break;
-        }
-
-        if (intrn_renderer->next_pixelbuf_slot >= intrn_renderer->num_pixelbuffers)
-            intrn_renderer->next_pixelbuf_slot = UINT32_MAX;
-    }
-
+    GET_NEXT_INDEX(index, intrn_renderer->next_pixelbuf_slot, intrn_renderer->num_pixelbuffers, !intrn_renderer->pixelbuffer_table[intrn_renderer->next_pixelbuf_slot].init);
 
     //Setting up the texture for the pixel simulations:
     if(!BOB_create_texture(renderer, width, height, NULL, format, &intrn_renderer->pixelbuffer_table[index].pixel_tex)) {
@@ -5749,21 +5702,7 @@ uint8_t BOB_load_bmf_font(BOB_Renderer_Handle renderer, const char *font_path, B
     }
 
     uint32_t index;
-    if (intrn_renderer->next_font_slot == UINT32_MAX) {
-        index = intrn_renderer->num_fonts;
-    }
-    else {
-        index = intrn_renderer->next_font_slot;
-
-        //Linearly searching to find the next empty slot. Yes I know that this is slow
-        for (intrn_renderer->next_font_slot = index + 1; intrn_renderer->next_font_slot < intrn_renderer->num_fonts; intrn_renderer->next_font_slot++) {
-            if (!intrn_renderer->font_table[intrn_renderer->next_font_slot].init)
-                break;
-        }
-
-        if (intrn_renderer->next_font_slot >= intrn_renderer->num_fonts)
-            intrn_renderer->next_font_slot = UINT32_MAX;
-    }
+    GET_NEXT_INDEX(index, intrn_renderer->next_font_slot, intrn_renderer->num_fonts, !intrn_renderer->font_table[intrn_renderer->next_font_slot].init);
 
     intrn_renderer->font_table[index].init = 1; //Setting the value to be initialised
 
@@ -5798,21 +5737,7 @@ uint8_t BOB_create_custom_font(BOB_Renderer_Handle renderer, size_t num_glyphs, 
     }
 
     uint32_t index;
-    if (intrn_renderer->next_font_slot == UINT32_MAX) {
-        index = intrn_renderer->num_fonts;
-    }
-    else {
-        index = intrn_renderer->next_font_slot;
-
-        //Linearly searching to find the next empty slot. Yes I know that this is slow
-        for (intrn_renderer->next_font_slot = index + 1; intrn_renderer->next_font_slot < intrn_renderer->num_fonts; intrn_renderer->next_font_slot++) {
-            if (!intrn_renderer->font_table[intrn_renderer->next_font_slot].init)
-                break;
-        }
-
-        if (intrn_renderer->next_font_slot >= intrn_renderer->num_fonts)
-            intrn_renderer->next_font_slot = UINT32_MAX;
-    }
+    GET_NEXT_INDEX(index, intrn_renderer->next_font_slot, intrn_renderer->num_fonts, !intrn_renderer->font_table[intrn_renderer->next_font_slot].init);
 
     intrn_renderer->font_table[index].init = 1; //Setting the value to be initialised
     intrn_renderer->font_table[index].base = base;
