@@ -27,7 +27,7 @@
 
 //TODO: Change the vulkan memory code to use our allocator so the PBO memory mapping works properly -> Maybe a ring allocator to ensure constant memory usage
 //      Reduce number of memory allocations cpu-side and in the Vulkan backend
-//      Use macros to hide getting index and context from a handle
+//      Fix image transitioning and blending in Vulkan backend
 //      Use texture arrays instead of binding textures every draw call (and ssbos for shaders (opengl))
 //
 //      Do proper error reporting and document what each error code means somewhere
@@ -83,32 +83,32 @@ typedef struct {
 #ifndef BOB_CIRCLE_LINE_SEGMENTS
 #define BOB_CIRCLE_LINE_SEGMENTS 64 //Number of line segments that make up the circumference of a circle
 #endif
-#ifndef BOB_MAX_VERTEX_CAPACITY
-#define BOB_MAX_VERTEX_CAPACITY 1048576
+#ifndef BOB_DEFAULT_VERTEX_CAPACITY
+#define BOB_DEFAULT_VERTEX_CAPACITY 1048576
 #endif
-#ifndef BOB_MAX_INDEX_CAPACITY
-#define BOB_MAX_INDEX_CAPACITY 2097152
+#ifndef BOB_DEFAULT_INDEX_CAPACITY
+#define BOB_DEFAULT_INDEX_CAPACITY 2097152
 #endif
-#ifndef BOB_MAX_TEX_CAPACITY
-#define BOB_MAX_TEX_CAPACITY 32
+#ifndef BOB_DEFAULT_TEX_CAPACITY
+#define BOB_DEFAULT_TEX_CAPACITY 32
 #endif
-#ifndef BOB_MAX_ATLAS_CAPACITY
-#define BOB_MAX_ATLAS_CAPACITY 8
+#ifndef BOB_DEFAULT_ATLAS_CAPACITY
+#define BOB_DEFAULT_ATLAS_CAPACITY 8
 #endif
-#ifndef BOB_MAX_PIXELBUFFER_CAPACITY
-#define BOB_MAX_PIXELBUFFER_CAPACITY 8
+#ifndef BOB_DEFAULT_PIXELBUFFER_CAPACITY
+#define BOB_DEFAULT_PIXELBUFFER_CAPACITY 8
 #endif
-#ifndef BOB_MAX_MATERIAL_CAPACITY
-#define BOB_MAX_MATERIAL_CAPACITY 16
+#ifndef BOB_DEFAULT_MATERIAL_CAPACITY
+#define BOB_DEFAULT_MATERIAL_CAPACITY 16
 #endif
-#ifndef BOB_MAX_FONT_CAPACITY
-#define BOB_MAX_FONT_CAPACITY 32
+#ifndef BOB_DEFAULT_FONT_CAPACITY
+#define BOB_DEFAULT_FONT_CAPACITY 32
 #endif
-#ifndef BOB_MAX_DRAW_CALL_CAPACITY
-#define BOB_MAX_DRAW_CALL_CAPACITY BOB_MAX_VERTEX_CAPACITY / 3 //Since minimum number of vertices in a draw call is 3
+#ifndef BOB_DEFAULT_DRAW_CALL_CAPACITY
+#define BOB_DEFAULT_DRAW_CALL_CAPACITY BOB_DEFAULT_VERTEX_CAPACITY / 3 //Since minimum number of vertices in a draw call is 3
 #endif
-#ifndef INIT_STACK_CAPACITY
-#define INIT_STACK_CAPACITY 64
+#ifndef BOB_DEFAULT_STACK_CAPACITY
+#define BOB_DEFAULT_STACK_CAPACITY 64
 #endif
 #ifndef BOB_MAX_LAYER
 #define BOB_MAX_LAYER 1024
@@ -125,12 +125,13 @@ typedef struct {
 
 #ifdef BOB_INCLUDE_GLAD
 uint8_t BOB_create_opengl_renderer(size_t atlas_capacity, size_t pixelbuf_capacity, size_t tex_capacity, size_t mat_capacity, size_t font_capacity,
-                                  size_t width, size_t height, size_t vertex_capacity, size_t index_capacity, size_t draw_call_capacity, BOB_Renderer_Handle *renderer);
+                                  size_t width, size_t height, size_t vertex_capacity, size_t index_capacity, size_t draw_call_capacity,
+                                  size_t clip_stack_capacity, BOB_Renderer_Handle *renderer);
 #endif //BOB_INCLUDE_GLAD
 #ifdef BOB_INCLUDE_VULKAN
 uint8_t BOB_create_vulkan_renderer(size_t atlas_capacity, size_t pixelbuf_capacity, size_t tex_capacity, size_t mat_capacity,
                             size_t font_capacity, size_t width, size_t height, size_t width_px, size_t height_px, size_t vertex_capacity,
-                            size_t index_capacity, size_t draw_call_capacity, BOB_vk_create_surface surface_func, BOB_Renderer_Handle *r);
+                            size_t index_capacity, size_t draw_call_capacity, size_t clip_stack_capacity, BOB_vk_create_surface surface_func, BOB_Renderer_Handle *r);
 #endif //BOB_INCLUDE_VULKAN
 void BOB_destroy_renderer(BOB_Renderer_Handle *r);
 
@@ -688,6 +689,9 @@ typedef struct {
     size_t pixelbuffer_capacity;
     size_t material_capacity;
     size_t font_capacity;
+    size_t vertex_capacity;
+    size_t index_capacity;
+    size_t draw_call_capacity;
 
     size_t num_vertices;
     size_t num_indices;
@@ -816,7 +820,7 @@ uint8_t BOBi_get_renderer(BOB_Renderer_Handle handle, BOBi_Renderer_Impl **out) 
     return 1;
 }
 
-uint8_t BOBi_create_renderer(BOBi_Renderer_Type type, size_t atlas_capacity, size_t pixelbuf_capacity, size_t tex_capacity, size_t mat_capacity, size_t font_capacity, size_t vertex_capacity, size_t index_capacity, size_t draw_call_capacity, size_t width, size_t height, BOB_Renderer_Handle *renderer);
+uint8_t BOBi_create_renderer(BOBi_Renderer_Type type, size_t atlas_capacity, size_t pixelbuf_capacity, size_t tex_capacity, size_t mat_capacity, size_t font_capacity, size_t vertex_capacity, size_t index_capacity, size_t draw_call_capacity, size_t clip_stack_capacity, size_t width, size_t height, BOB_Renderer_Handle *renderer);
 
 //Reads the entirety of a file into the given buffer
 int BOBi_read_to_end(char const *path, uint8_t **buf, uint8_t add_null) {
@@ -968,8 +972,8 @@ const char *fragment_shader = "#version 330 core\n"
                               "    }\n"
                               "}\n";
 
-uint8_t BOB_create_opengl_renderer(size_t atlas_capacity, size_t pixelbuf_capacity, size_t tex_capacity, size_t mat_capacity, size_t font_capacity, size_t width, size_t height, size_t vertex_capacity, size_t index_capacity, size_t draw_call_capacity, BOB_Renderer_Handle *renderer) {
-    if(!BOBi_create_renderer(BOB_OPENGL_RENDERER, atlas_capacity, pixelbuf_capacity, tex_capacity, mat_capacity, font_capacity, vertex_capacity, index_capacity, draw_call_capacity, width, height, renderer)) return 0;
+uint8_t BOB_create_opengl_renderer(size_t atlas_capacity, size_t pixelbuf_capacity, size_t tex_capacity, size_t mat_capacity, size_t font_capacity, size_t width, size_t height, size_t vertex_capacity, size_t index_capacity, size_t draw_call_capacity, size_t clip_stack_capacity, BOB_Renderer_Handle *renderer) {
+    if(!BOBi_create_renderer(BOB_OPENGL_RENDERER, atlas_capacity, pixelbuf_capacity, tex_capacity, mat_capacity, font_capacity, vertex_capacity, index_capacity, draw_call_capacity, clip_stack_capacity, width, height, renderer)) return 0;
 
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -2392,7 +2396,7 @@ uint8_t BOBi_vk_create_descriptor_pool(BOBi_Renderer_Impl *renderer) {
     VkDescriptorPoolCreateInfo pool_info = {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .pNext = NULL,
         .flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, 
-        .maxSets = BOB_MAX_MATERIAL_CAPACITY, .poolSizeCount = 2,
+        .maxSets = renderer->material_capacity, .poolSizeCount = 2,
         .pPoolSizes = pool_size
     };
 
@@ -2548,7 +2552,6 @@ uint8_t BOBi_vk_create_graphics_pipeline(BOBi_Renderer_Impl *renderer, BOBi_Mate
     VkRect2D scissor = {(VkOffset2D){0, 0}, renderer->vulkan.extent}; //Scissor rectangle
     VkPipelineViewportStateCreateInfo viewport_state = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .pNext = NULL, .viewportCount = 1, .scissorCount = 1};
 
-    //TODO: CHECK THAT THE OLD VERSION WORKS
     VkPipelineRasterizationStateCreateInfo rasteriser = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, .pNext = NULL,
         .depthClampEnable = VK_FALSE, //If set to true, fragments beyond near and far planes are clamped to them instead of discarded
@@ -2811,8 +2814,8 @@ uint8_t BOBi_vk_init_vulkan_renderer(BOBi_Renderer_Impl *renderer, size_t width,
 
 uint8_t BOB_create_vulkan_renderer(size_t atlas_capacity, size_t pixelbuf_capacity, size_t tex_capacity, size_t mat_capacity,
                             size_t font_capacity, size_t width, size_t height, size_t width_px, size_t height_px, size_t vertex_capacity,
-                            size_t index_capacity, size_t draw_call_capacity, BOB_vk_create_surface surface_func, BOB_Renderer_Handle *r) {
-    if(!BOBi_create_renderer(BOB_VULKAN_RENDERER, atlas_capacity, pixelbuf_capacity, tex_capacity, mat_capacity, font_capacity, vertex_capacity, index_capacity, draw_call_capacity, width, height, r)) return 0;
+                            size_t index_capacity, size_t draw_call_capacity, size_t clip_stack_capacity, BOB_vk_create_surface surface_func, BOB_Renderer_Handle *r) {
+    if(!BOBi_create_renderer(BOB_VULKAN_RENDERER, atlas_capacity, pixelbuf_capacity, tex_capacity, mat_capacity, font_capacity, vertex_capacity, index_capacity, draw_call_capacity, clip_stack_capacity, width, height, r)) return 0;
 
     BOBi_Renderer_Impl *intrn_renderer;
     BOBi_get_renderer(*r, &intrn_renderer);
@@ -3330,7 +3333,7 @@ BOBi_Backend_Vtable renderer_functions[BOB_NUM_RENDERER_TYPES] = {
     }                                                                               \
 } while(0);
 
-uint8_t BOBi_create_renderer(BOBi_Renderer_Type type, size_t atlas_capacity, size_t pixelbuf_capacity, size_t tex_capacity, size_t mat_capacity, size_t font_capacity, size_t vertex_capacity, size_t index_capacity, size_t draw_call_capacity, size_t width, size_t height, BOB_Renderer_Handle *renderer) {
+uint8_t BOBi_create_renderer(BOBi_Renderer_Type type, size_t atlas_capacity, size_t pixelbuf_capacity, size_t tex_capacity, size_t mat_capacity, size_t font_capacity, size_t vertex_capacity, size_t index_capacity, size_t draw_call_capacity, size_t clip_stack_capacity, size_t width, size_t height, BOB_Renderer_Handle *renderer) {
     if(bob_state.renderer_count >= bob_state.renderer_capcity) {
         printf("ERROR: Exceeded renderer capacity\n");
         return 0;
@@ -3347,10 +3350,10 @@ uint8_t BOBi_create_renderer(BOBi_Renderer_Type type, size_t atlas_capacity, siz
     size_t tex_sz = tex_capacity * sizeof(BOBi_Texture_Impl);
     size_t mat_sz = mat_capacity * sizeof(BOBi_Material_Impl);
     size_t font_sz = font_capacity * sizeof(BOBi_Font_Impl);
-
     size_t vert_buf_sz = vertex_capacity * sizeof(BOBi_Render_Vertex);
     size_t index_buf_sz = index_capacity * sizeof(uint32_t);
     size_t draw_call_sz = draw_call_capacity * sizeof(BOBi_Draw_Call);
+    size_t stack_sz = clip_stack_capacity * sizeof(BOBi_Clip_Rect);
 
     //Figuring out how much aligned memory we will need
     char *p = (char *)0;
@@ -3370,6 +3373,10 @@ uint8_t BOBi_create_renderer(BOBi_Renderer_Type type, size_t atlas_capacity, siz
     p += vert_buf_sz;
     p = (char *)BOBi_align_up((uintptr_t)p, alignof(BOBi_Draw_Call));
     p += draw_call_sz;
+    p = (char *)BOBi_align_up((uintptr_t)p, alignof(BOBi_Clip_Stack));
+    p += sizeof(BOBi_Clip_Stack);
+    p = (char *)BOBi_align_up((uintptr_t)p, alignof(BOBi_Clip_Rect));
+    p += stack_sz;
 
     size_t total = (size_t)p;
 
@@ -3386,6 +3393,8 @@ uint8_t BOBi_create_renderer(BOBi_Renderer_Type type, size_t atlas_capacity, siz
     intrn_renderer->vertex_index_arena = BOB_arena_alloc(&intrn_renderer->renderer_memory, (vert_buf_sz > index_buf_sz) ? vert_buf_sz : index_buf_sz, alignof(BOBi_Render_Vertex));
     intrn_renderer->vertex_arena = BOB_arena_alloc(&intrn_renderer->renderer_memory, vert_buf_sz, alignof(BOBi_Render_Vertex));
     intrn_renderer->draw_call_arena = BOB_arena_alloc(&intrn_renderer->renderer_memory, draw_call_sz, alignof(BOBi_Draw_Call));
+    intrn_renderer->stack = BOB_arena_alloc(&intrn_renderer->renderer_memory, sizeof(BOBi_Clip_Stack), alignof(BOBi_Clip_Stack));
+    intrn_renderer->stack->elems = BOB_arena_alloc(&intrn_renderer->renderer_memory, stack_sz, alignof(BOBi_Clip_Rect));
 
     //Assiging the capacity values
     intrn_renderer->atlas_capacity = atlas_capacity;
@@ -3393,6 +3402,10 @@ uint8_t BOBi_create_renderer(BOBi_Renderer_Type type, size_t atlas_capacity, siz
     intrn_renderer->texture_capacity = tex_capacity;
     intrn_renderer->material_capacity = mat_capacity;
     intrn_renderer->font_capacity = font_capacity;
+    intrn_renderer->vertex_capacity = vertex_capacity;
+    intrn_renderer->index_capacity = index_capacity;
+    intrn_renderer->draw_call_capacity = draw_call_capacity;
+    intrn_renderer->stack->capacity = clip_stack_capacity;
 
     //Setting the sizes to be 0
     intrn_renderer->num_atlases = 0;
@@ -3400,10 +3413,10 @@ uint8_t BOBi_create_renderer(BOBi_Renderer_Type type, size_t atlas_capacity, siz
     intrn_renderer->num_textures = 0;
     intrn_renderer->num_materials = 0;
     intrn_renderer->num_fonts = 0;
-
     intrn_renderer->num_vertices = 0;
     intrn_renderer->num_indices = 0;
     intrn_renderer->num_draw_calls = 0;
+    intrn_renderer->stack->size = 0;
 
     //Setting the next free slot to point to the first one
     intrn_renderer->next_atlas_slot = UINT32_MAX;
@@ -3416,13 +3429,6 @@ uint8_t BOBi_create_renderer(BOBi_Renderer_Type type, size_t atlas_capacity, siz
 
     intrn_renderer->screen_height = height;
     intrn_renderer->screen_width = width;
-
-    //Initialise the stack of clip rects
-    //TODO: Make this part of the arena
-    intrn_renderer->stack = malloc(sizeof(BOBi_Clip_Stack));
-    intrn_renderer->stack->elems = malloc(sizeof(BOBi_Clip_Rect) * INIT_STACK_CAPACITY);
-    intrn_renderer->stack->capacity = INIT_STACK_CAPACITY;
-    intrn_renderer->stack->size = 0;
 
     *renderer = index;
     return 1;
@@ -3960,9 +3966,9 @@ void BOBi_flush_draw_calls(BOBi_Renderer_Impl *r) {
 void BOBi_check_draw_capacity(BOB_Renderer_Handle renderer, uint32_t num_vertices, uint32_t num_indices) {
     BOBi_Renderer_Impl *r;
     BOBi_get_renderer(renderer, &r);
-    if(num_indices + r->num_indices >= BOB_MAX_INDEX_CAPACITY ||
-       num_vertices + r->num_vertices >= BOB_MAX_VERTEX_CAPACITY ||
-       r->num_draw_calls + 1 >= BOB_MAX_DRAW_CALL_CAPACITY) {
+    if(num_indices + r->num_indices >= r->index_capacity ||
+       num_vertices + r->num_vertices >= r->vertex_capacity ||
+       r->num_draw_calls + 1 >= r->draw_call_capacity) {
         BOBi_flush_draw_calls(r);
         r->num_draw_calls = 0;
         r->num_indices = 0;
@@ -4253,11 +4259,6 @@ void BOBi_destroy_renderer(uint32_t index) {
             BOBi_font_free(renderer, i);
     }
     BOB_destroy_arena(&renderer->renderer_memory);
-
-    free(renderer->stack->elems);
-    renderer->stack->elems = NULL;
-    free(renderer->stack);
-    renderer->stack = NULL;
 
     renderer_functions[renderer->type].destroy_renderer(renderer);
     *renderer = (BOBi_Renderer_Impl){0}; //Clear all of the data
@@ -4834,7 +4835,7 @@ uint8_t BOB_pixelbuffer_init(BOB_Renderer_Handle renderer, size_t width, size_t 
     BOBi_Renderer_Impl *intrn_renderer;
     if(!BOBi_get_renderer(renderer, &intrn_renderer)) return 0;
 
-    if(intrn_renderer->num_pixelbuffers >= BOB_MAX_PIXELBUFFER_CAPACITY) {
+    if(intrn_renderer->num_pixelbuffers >= intrn_renderer->pixelbuffer_capacity) {
         printf("ERROR: Exceeded Pixelbuffer Capacity");
         *pb |= BOBi_MSB;
         return 0;
@@ -5301,9 +5302,8 @@ void BOB_start_clip(BOB_Renderer_Handle renderer, BOB_Quad rect, BOB_Clip_Dir di
 
     BOBi_Clip_Stack *stack = r->stack;
     if(stack->size >= stack->capacity) {
-        size_t newCap = (stack->capacity == 0) ? 4 : stack->capacity * 2;
-        stack->elems = realloc(stack->elems, newCap);
-        stack->capacity = newCap;
+        printf("Exceeded Renderer's Clip Stack capacity\n");
+        return;
     }
 
     BOBi_Clip_Rect clip_rect = (BOBi_Clip_Rect) {
