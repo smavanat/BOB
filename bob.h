@@ -35,14 +35,15 @@
 //
 //      Allow more customisability in the shaders in general (and add push constants)
 //      Compute shader support
+//      Custom vertex layout
 //
 //      Allow the user to define render passes -> Custom framebuffers
 //      Allow the user to define their own pipeline and sampler layout
+//      Expand material functionality
 //      Allow the user to select what kind of device you want vulkan to use
 //
-//      Custom vertex layout
-//
-//      Software rendering backend + Terminal Rendering
+//      Software rendering backend
+//      Terminal Rendering
 
 #ifdef __cplusplus
 extern "C" {
@@ -566,15 +567,6 @@ typedef struct {
 } BOBi_Clip_Stack;
 
 typedef struct {
-    BOBi_Arena vertex_arena; //Used for indices as well
-    BOBi_Arena vertex_arena_2;
-    BOBi_Arena draw_call_arena;
-    size_t num_vertices;
-    size_t num_indices;
-    size_t num_draw_calls;
-} BOBi_RenderBatch;
-
-typedef struct {
     size_t size;
     size_t capacity;
     uint64_t *keys;
@@ -597,12 +589,26 @@ typedef struct {
     uint8_t init;
 } BOBi_Font_Impl;
 
-//TODO: Change renderers to also just return handles to the user and keep this struct internal
-//      Store renderers in bob_state alongside contexts
+typedef enum {
+    BOBi_DRAW_QUAD,
+    BOBi_DRAW_CIRCLE,
+    BOBi_DRAW_POLY,
+} BOBi_Draw_Type;
+
+typedef struct {
+    BOBi_Render_Vertex *vertices; //Pointer into the vertex arena where this draw call's vertices start
+    size_t num_vertices; //Number of vertices in the draw call
+    size_t num_indices; //Number of indices in the draw call
+    size_t index_offset; //Offset from the start of the index array
+    BOB_Texture_Handle tex; //Texture handle. Primary sorting key of draw calls
+    BOB_Material_Handle mat; //Material handle. Secondary sorting key of draw calls
+    uint32_t submission_id; //Tertiary sorting key of draw calls. Since this should be unique for each draw call associated with a renderer, this acts as a tiebreaker
+    BOBi_Draw_Type type; //Determines how the draw call's indicies are generated
+} BOBi_Draw_Call;
+
 typedef struct {
     BOBi_Clip_Stack *stack; //Stores the current clipping rect and the history
     BOB_Mat4 projection; //projection matrix for this renderer
-    BOBi_RenderBatch batch; //Vertex/Index/Draw call memory of the renderer
 
     BOBi_Arena renderer_memory; //Memory arena that this context uses. Each table is just a pointer into this arena
 
@@ -612,8 +618,11 @@ typedef struct {
     BOBi_Material_Impl *material_table;
     BOBi_Font_Impl *font_table;
 
-    // void *mapped_mem_ptr; //Pointer to cpu memory mapped from gpu memory
-    float *colour;
+    void *vertex_index_arena;
+    BOBi_Render_Vertex *vertex_arena;
+    BOBi_Draw_Call *draw_call_arena;
+
+    float *colour; //Use float * instead of BOB_Vector4 so it can be set to NULL to indicate to not clear the screen
 
     //TODO: Maybe make this a pointer instead of a union
     union {
@@ -679,6 +688,10 @@ typedef struct {
     size_t pixelbuffer_capacity;
     size_t material_capacity;
     size_t font_capacity;
+
+    size_t num_vertices;
+    size_t num_indices;
+    size_t num_draw_calls;
 
     uint32_t next_atlas_slot;
     uint32_t next_tex_slot;
@@ -804,23 +817,6 @@ uint8_t BOBi_get_renderer(BOB_Renderer_Handle handle, BOBi_Renderer_Impl **out) 
 }
 
 uint8_t BOBi_create_renderer(BOBi_Renderer_Type type, size_t atlas_capacity, size_t pixelbuf_capacity, size_t tex_capacity, size_t mat_capacity, size_t font_capacity, size_t vertex_capacity, size_t index_capacity, size_t draw_call_capacity, size_t width, size_t height, BOB_Renderer_Handle *renderer);
-
-typedef enum {
-    BOBi_DRAW_QUAD,
-    BOBi_DRAW_CIRCLE,
-    BOBi_DRAW_POLY,
-} BOBi_Draw_Type;
-
-typedef struct {
-    BOBi_Render_Vertex *vertices; //Pointer into the vertex arena where this draw call's vertices start
-    size_t num_vertices; //Number of vertices in the draw call
-    size_t num_indices; //Number of indices in the draw call
-    size_t index_offset; //Offset from the start of the index array
-    BOB_Texture_Handle tex; //Texture handle. Primary sorting key of draw calls
-    BOB_Material_Handle mat; //Material handle. Secondary sorting key of draw calls
-    uint32_t submission_id; //Tertiary sorting key of draw calls. Since this should be unique for each draw call associated with a renderer, this acts as a tiebreaker
-    BOBi_Draw_Type type; //Determines how the draw call's indicies are generated
-} BOBi_Draw_Call;
 
 //Reads the entirety of a file into the given buffer
 int BOBi_read_to_end(char const *path, uint8_t **buf, uint8_t add_null) {
@@ -1043,13 +1039,13 @@ uint8_t BOBi_gl_draw(BOBi_Renderer_Impl *r) {
     glBindBuffer(GL_ARRAY_BUFFER, r->opengl.vbo);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, r->opengl.ebo);
 
-    BOBi_Draw_Call start = BOBi_get_arena_elem(r->batch.draw_call_arena, 0, BOBi_Draw_Call);
-    glBufferSubData(GL_ARRAY_BUFFER, 0, r->batch.num_vertices * sizeof(BOBi_Render_Vertex), r->batch.vertex_arena_2.memory); //Copies the data from renderer's triangle data into the vbo
-    glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, r->batch.num_indices * sizeof(uint32_t), r->batch.vertex_arena.memory); //Copies the quad data into the vbo
+    BOBi_Draw_Call start = r->draw_call_arena[0];
+    glBufferSubData(GL_ARRAY_BUFFER, 0, r->num_vertices * sizeof(BOBi_Render_Vertex), r->vertex_arena); //Copies the data from renderer's triangle data into the vbo
+    glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, r->num_indices * sizeof(uint32_t), (uint32_t *)r->vertex_index_arena); //Copies the quad data into the vbo
 
     //TODO: At the very least make a texture array so we don't keep switching textures, but would also be nice to make an SSBO for the materials
-    for(size_t i = 0; i < r->batch.num_draw_calls; i++) {
-        BOBi_Draw_Call call = BOBi_get_arena_elem(r->batch.draw_call_arena, i, BOBi_Draw_Call);
+    for(size_t i = 0; i < r->num_draw_calls; i++) {
+        BOBi_Draw_Call call = r->draw_call_arena[i];
         uint32_t mat_index, tex_index;
         if(!BOBi_get_index_from_handle(call.mat, &mat_index)) return 0;
         if(!BOBi_get_index_from_handle(call.tex, &tex_index)) return 0;
@@ -3086,16 +3082,16 @@ uint8_t BOBi_vk_draw(BOBi_Renderer_Impl *renderer) {
         .pDepthAttachment = &depth_attachment_info
     };
 
-    size_t index_sz = sizeof(uint32_t) * renderer->batch.num_indices;
-    size_t vertex_sz = sizeof(BOBi_Render_Vertex) * renderer->batch.num_vertices;
+    size_t index_sz = sizeof(uint32_t) * renderer->num_indices;
+    size_t vertex_sz = sizeof(BOBi_Render_Vertex) * renderer->num_vertices;
     //Map the staging buffer to CPU memory and copy the index data into it
-    VULKAN_ERROR(!BOBi_vk_stream_to_buffer(renderer->vulkan.log_device, renderer->batch.vertex_arena.memory, index_sz, &renderer->vulkan.index_staging_buf), "Failed to stream data into a Vulkan Buffer");
+    VULKAN_ERROR(!BOBi_vk_stream_to_buffer(renderer->vulkan.log_device, renderer->vertex_index_arena, index_sz, &renderer->vulkan.index_staging_buf), "Failed to stream data into a Vulkan Buffer");
     //Copy the data
     VkBufferCopy copy_region = {0, 0, index_sz};
     vkCmdCopyBuffer(buffer, renderer->vulkan.index_staging_buf.buffer, renderer->vulkan.index_buffer.buffer, 1, &copy_region);
 
     //Map the staging buffer to CPU memory and copy the vertex data into it
-    VULKAN_ERROR(!BOBi_vk_stream_to_buffer(renderer->vulkan.log_device, renderer->batch.vertex_arena_2.memory, vertex_sz, &renderer->vulkan.vert_staging_buf), "Failed to stream data into a Vulkan Buffer");
+    VULKAN_ERROR(!BOBi_vk_stream_to_buffer(renderer->vulkan.log_device, renderer->vertex_arena, vertex_sz, &renderer->vulkan.vert_staging_buf), "Failed to stream data into a Vulkan Buffer");
     //Create the actual destination buffer and copy the staging buffer data into it
     copy_region = (VkBufferCopy){0, 0, vertex_sz};
     vkCmdCopyBuffer(buffer, renderer->vulkan.vert_staging_buf.buffer, renderer->vulkan.vertex_buffer.buffer, 1, &copy_region);
@@ -3157,8 +3153,8 @@ uint8_t BOBi_vk_draw(BOBi_Renderer_Impl *renderer) {
     vkCmdBindIndexBuffer(buffer, renderer->vulkan.index_buffer.buffer, 0, VK_INDEX_TYPE_UINT32);
 
     uint32_t old_mat = UINT32_MAX, old_tex = UINT32_MAX;
-    for(size_t i = 0; i < renderer->batch.num_draw_calls; i++) {
-        BOBi_Draw_Call call = BOBi_get_arena_elem(renderer->batch.draw_call_arena, i, BOBi_Draw_Call);
+    for(size_t i = 0; i < renderer->num_draw_calls; i++) {
+        BOBi_Draw_Call call = renderer->draw_call_arena[i];
 
         uint32_t mat_index, tex_index;
         if(!BOBi_get_index_from_handle(call.mat, &mat_index)) return 0;
@@ -3352,6 +3348,10 @@ uint8_t BOBi_create_renderer(BOBi_Renderer_Type type, size_t atlas_capacity, siz
     size_t mat_sz = mat_capacity * sizeof(BOBi_Material_Impl);
     size_t font_sz = font_capacity * sizeof(BOBi_Font_Impl);
 
+    size_t vert_buf_sz = vertex_capacity * sizeof(BOBi_Render_Vertex);
+    size_t index_buf_sz = index_capacity * sizeof(uint32_t);
+    size_t draw_call_sz = draw_call_capacity * sizeof(BOBi_Draw_Call);
+
     //Figuring out how much aligned memory we will need
     char *p = (char *)0;
     p = (char *)BOBi_align_up((uintptr_t)p, alignof(BOBi_Atlas_Impl));
@@ -3364,6 +3364,12 @@ uint8_t BOBi_create_renderer(BOBi_Renderer_Type type, size_t atlas_capacity, siz
     p += mat_sz;
     p = (char *)BOBi_align_up((uintptr_t)p, alignof(BOBi_Font_Impl));
     p += font_sz;
+    p = (char *)BOBi_align_up((uintptr_t)p, alignof(BOBi_Render_Vertex));
+    p += (index_buf_sz > vert_buf_sz) ? index_buf_sz : vert_buf_sz;
+    p = (char *)BOBi_align_up((uintptr_t)p, alignof(BOBi_Render_Vertex));
+    p += vert_buf_sz;
+    p = (char *)BOBi_align_up((uintptr_t)p, alignof(BOBi_Draw_Call));
+    p += draw_call_sz;
 
     size_t total = (size_t)p;
 
@@ -3377,6 +3383,9 @@ uint8_t BOBi_create_renderer(BOBi_Renderer_Type type, size_t atlas_capacity, siz
     intrn_renderer->texture_table = BOB_arena_alloc(&intrn_renderer->renderer_memory, tex_sz, alignof(BOBi_Texture_Impl));
     intrn_renderer->material_table = BOB_arena_alloc(&intrn_renderer->renderer_memory, mat_sz, alignof(BOBi_Material_Impl));
     intrn_renderer->font_table = BOB_arena_alloc(&intrn_renderer->renderer_memory, font_sz, alignof(BOBi_Font_Impl));
+    intrn_renderer->vertex_index_arena = BOB_arena_alloc(&intrn_renderer->renderer_memory, (vert_buf_sz > index_buf_sz) ? vert_buf_sz : index_buf_sz, alignof(BOBi_Render_Vertex));
+    intrn_renderer->vertex_arena = BOB_arena_alloc(&intrn_renderer->renderer_memory, vert_buf_sz, alignof(BOBi_Render_Vertex));
+    intrn_renderer->draw_call_arena = BOB_arena_alloc(&intrn_renderer->renderer_memory, draw_call_sz, alignof(BOBi_Draw_Call));
 
     //Assiging the capacity values
     intrn_renderer->atlas_capacity = atlas_capacity;
@@ -3392,6 +3401,10 @@ uint8_t BOBi_create_renderer(BOBi_Renderer_Type type, size_t atlas_capacity, siz
     intrn_renderer->num_materials = 0;
     intrn_renderer->num_fonts = 0;
 
+    intrn_renderer->num_vertices = 0;
+    intrn_renderer->num_indices = 0;
+    intrn_renderer->num_draw_calls = 0;
+
     //Setting the next free slot to point to the first one
     intrn_renderer->next_atlas_slot = UINT32_MAX;
     intrn_renderer->next_pixelbuf_slot = UINT32_MAX;
@@ -3401,21 +3414,16 @@ uint8_t BOBi_create_renderer(BOBi_Renderer_Type type, size_t atlas_capacity, siz
 
     intrn_renderer->type = type;
 
-    size_t vert_buf_sz = vertex_capacity * sizeof(BOBi_Render_Vertex);
-    size_t index_buf_sz = index_capacity * sizeof(uint32_t);
-
     intrn_renderer->screen_height = height;
     intrn_renderer->screen_width = width;
 
     //Initialise the stack of clip rects
+    //TODO: Make this part of the arena
     intrn_renderer->stack = malloc(sizeof(BOBi_Clip_Stack));
     intrn_renderer->stack->elems = malloc(sizeof(BOBi_Clip_Rect) * INIT_STACK_CAPACITY);
     intrn_renderer->stack->capacity = INIT_STACK_CAPACITY;
     intrn_renderer->stack->size = 0;
 
-    BOB_init_arena(&intrn_renderer->batch.vertex_arena, (vert_buf_sz > index_buf_sz) ? vert_buf_sz : index_buf_sz); //Since this dual use need to take the max of the two
-    BOB_init_arena(&intrn_renderer->batch.vertex_arena_2, vert_buf_sz);
-    BOB_init_arena(&intrn_renderer->batch.draw_call_arena, draw_call_capacity * sizeof(BOBi_Draw_Call));
     *renderer = index;
     return 1;
 }
@@ -3443,9 +3451,9 @@ size_t BOBi_quicksort_median_of_three(BOBi_Renderer_Impl *r, size_t lo, size_t h
 {
     size_t mid = lo + (hi - lo) / 2;
 
-    BOBi_Draw_Call *a = &BOBi_get_arena_elem(r->batch.draw_call_arena, lo, BOBi_Draw_Call);
-    BOBi_Draw_Call *b = &BOBi_get_arena_elem(r->batch.draw_call_arena, mid, BOBi_Draw_Call);
-    BOBi_Draw_Call *c = &BOBi_get_arena_elem(r->batch.draw_call_arena, hi, BOBi_Draw_Call);
+    BOBi_Draw_Call *a = &r->draw_call_arena[lo];
+    BOBi_Draw_Call *b = &r->draw_call_arena[mid];
+    BOBi_Draw_Call *c = &r->draw_call_arena[hi];
 
     if (BOBi_compare_draw_calls(*a, *b, 1) > 0)
         BOBi_swap_draw_calls(a, b);
@@ -3464,20 +3472,20 @@ size_t BOBi_quicksort_median_of_three(BOBi_Renderer_Impl *r, size_t lo, size_t h
 size_t BOBi_quicksort_partition(BOBi_Renderer_Impl *r, size_t subarr_start, size_t subarr_end) {
     size_t pivot = BOBi_quicksort_median_of_three(r, subarr_start, subarr_end);
 
-    BOBi_Draw_Call pivot_call = BOBi_get_arena_elem(r->batch.draw_call_arena, pivot, BOBi_Draw_Call);
+    BOBi_Draw_Call pivot_call = r->draw_call_arena[pivot];
     size_t i = subarr_start, j = subarr_end;
     while(1) {
         //Find leftmost element >= pivot
-        while(BOBi_compare_draw_calls(BOBi_get_arena_elem(r->batch.draw_call_arena, i, BOBi_Draw_Call), pivot_call, 1) < 0)
+        while(BOBi_compare_draw_calls(r->draw_call_arena[i], pivot_call, 1) < 0)
             i++;
 
         //Find rightmost element <= pivot;
-        while(BOBi_compare_draw_calls(BOBi_get_arena_elem(r->batch.draw_call_arena, j, BOBi_Draw_Call), pivot_call, 1) > 0)
+        while(BOBi_compare_draw_calls(r->draw_call_arena[j], pivot_call, 1) > 0)
             j--;
 
         if(i >= j) return j;
 
-        BOBi_swap_draw_calls(&BOBi_get_arena_elem(r->batch.draw_call_arena, i, BOBi_Draw_Call), &BOBi_get_arena_elem(r->batch.draw_call_arena, j, BOBi_Draw_Call));
+        BOBi_swap_draw_calls(&r->draw_call_arena[i], &r->draw_call_arena[j]);
 
         i++;
         j--;
@@ -3835,39 +3843,34 @@ size_t BOBi_triangulate_ec(BOB_Vector2 *poly_points, size_t poly_size, uint32_t 
 }
 
 void BOBi_renderer_reset(BOBi_Renderer_Impl *r) {
-    BOB_arena_clear(&r->batch.vertex_arena);
-    BOB_arena_clear(&r->batch.vertex_arena_2);
-    BOB_arena_clear(&r->batch.draw_call_arena);
-
-    r->batch.num_draw_calls = 0;
-    r->batch.num_indices = 0;
-    r->batch.num_vertices = 0;
+    r->num_draw_calls = 0;
+    r->num_indices = 0;
+    r->num_vertices = 0;
 }
 
 void BOBi_renderer_draw(BOBi_Renderer_Impl *r) {
-    if(r->batch.num_draw_calls == 0 || r->batch.num_indices == 0 || r->batch.num_vertices == 0) return;
+    // //Sort the draw calls
+    if(r->num_draw_calls == 0 || r->num_indices == 0 || r->num_vertices == 0) return;
     //Sort the draw calls
-    BOBi_quicksort_draw_calls(r, 0, r->batch.num_draw_calls-1);
+    BOBi_quicksort_draw_calls(r, 0, r->num_draw_calls-1);
 
     //Copy the vertices to be in sorted order
-    for(size_t i = 0; i < r->batch.num_draw_calls; i++) {
-        BOBi_Draw_Call *call = (BOBi_Draw_Call *)r->batch.draw_call_arena.memory + i;
-        BOBi_Render_Vertex *new_pos = BOB_arena_alloc(&r->batch.vertex_arena_2, call->num_vertices * sizeof(BOBi_Render_Vertex), alignof(BOBi_Render_Vertex));
-        memcpy(new_pos, call->vertices, call->num_vertices * sizeof(BOBi_Render_Vertex));
-        call->vertices = new_pos;
+    size_t num_copied_vertices = 0;
+    for(size_t i = 0; i < r->num_draw_calls; i++) {
+        BOBi_Draw_Call *call = &r->draw_call_arena[i];
+        memcpy(&r->vertex_arena[num_copied_vertices], call->vertices, call->num_vertices * sizeof(BOBi_Render_Vertex));
+        call->vertices = &r->vertex_arena[num_copied_vertices];
+        num_copied_vertices += call->num_vertices;
     }
-
-    //Clear the orginial vertex arena so that we can re-use it for indicies
-    BOB_arena_clear(&r->batch.vertex_arena);
 
     //Generate the indices for each draw call
     size_t cur_vertex = 0;
     size_t index_count = 0;
     uint32_t *indices;
-    for(size_t i = 0; i < r->batch.num_draw_calls; i++) {
-        BOBi_Draw_Call *call = (BOBi_Draw_Call *)r->batch.draw_call_arena.memory + i;
+    for(size_t i = 0; i < r->num_draw_calls; i++) {
+        BOBi_Draw_Call *call = &r->draw_call_arena[i];
         call->index_offset = index_count;
-        indices = BOB_arena_alloc(&r->batch.vertex_arena, sizeof(uint32_t) * call->num_indices, alignof(uint32_t));
+        indices = &((uint32_t *)r->vertex_index_arena)[index_count];
         switch(call->type) {
             case BOBi_DRAW_CIRCLE: {
                 size_t circ_index = 0;
@@ -3929,12 +3932,12 @@ void BOBi_renderer_draw(BOBi_Renderer_Impl *r) {
     //Compress the draw calls:
     size_t num_unique_calls = 1;
     size_t i = 0;
-    BOBi_Draw_Call *curr = (BOBi_Draw_Call *)r->batch.draw_call_arena.memory + i;
-    while(i < r->batch.num_draw_calls-1) {
-        BOBi_Draw_Call next = BOBi_get_arena_elem(r->batch.draw_call_arena, i+1, BOBi_Draw_Call);
+    BOBi_Draw_Call *curr = &r->draw_call_arena[0];
+    while(i < r->num_draw_calls-1) {
+        BOBi_Draw_Call next = r->draw_call_arena[i+1];
         if(BOBi_compare_draw_calls(*curr, next, 0) != 0) {
-            BOBi_get_arena_elem(r->batch.draw_call_arena, num_unique_calls, BOBi_Draw_Call) = next;
-            curr = (BOBi_Draw_Call *)r->batch.draw_call_arena.memory + num_unique_calls;
+            r->draw_call_arena[num_unique_calls] = next;
+            curr = &r->draw_call_arena[num_unique_calls];
             num_unique_calls++;
         }
         else {
@@ -3944,7 +3947,7 @@ void BOBi_renderer_draw(BOBi_Renderer_Impl *r) {
         i++;
     }
 
-    r->batch.num_draw_calls = num_unique_calls;
+    r->num_draw_calls = num_unique_calls;
 
     renderer_functions[r->type].draw(r);
 }
@@ -3957,13 +3960,13 @@ void BOBi_flush_draw_calls(BOBi_Renderer_Impl *r) {
 void BOBi_check_draw_capacity(BOB_Renderer_Handle renderer, uint32_t num_vertices, uint32_t num_indices) {
     BOBi_Renderer_Impl *r;
     BOBi_get_renderer(renderer, &r);
-    if(num_indices + r->batch.num_indices >= BOB_MAX_INDEX_CAPACITY ||
-       num_vertices + r->batch.num_vertices >= BOB_MAX_VERTEX_CAPACITY ||
-       r->batch.num_draw_calls + 1 >= BOB_MAX_DRAW_CALL_CAPACITY) {
+    if(num_indices + r->num_indices >= BOB_MAX_INDEX_CAPACITY ||
+       num_vertices + r->num_vertices >= BOB_MAX_VERTEX_CAPACITY ||
+       r->num_draw_calls + 1 >= BOB_MAX_DRAW_CALL_CAPACITY) {
         BOBi_flush_draw_calls(r);
-        r->batch.num_draw_calls = 0;
-        r->batch.num_indices = 0;
-        r->batch.num_vertices = 0;
+        r->num_draw_calls = 0;
+        r->num_indices = 0;
+        r->num_vertices = 0;
     }
 }
 
@@ -3972,19 +3975,18 @@ void BOBi_create_draw_call(BOB_Renderer_Handle renderer, BOB_Vector3 *vertices, 
 
     BOBi_Renderer_Impl *r;
     BOBi_get_renderer(renderer, &r);
-    BOBi_Draw_Call *dc = (BOBi_Draw_Call *)BOB_arena_alloc(&r->batch.draw_call_arena, sizeof(BOBi_Draw_Call), alignof(BOBi_Draw_Call));
-    BOBi_Render_Vertex *alloc_vertices = (BOBi_Render_Vertex *)BOB_arena_alloc(&r->batch.vertex_arena, sizeof(BOBi_Render_Vertex) * vertex_count, alignof(BOBi_Render_Vertex));
+    BOBi_Draw_Call *dc = &r->draw_call_arena[r->num_draw_calls];
     dc->num_indices = index_count;
     dc->num_vertices = vertex_count;
-    dc->vertices = alloc_vertices;
+    dc->vertices = &((BOBi_Render_Vertex *)r->vertex_index_arena)[r->num_vertices];
     dc->type = type;
     dc->mat = mat;
     dc->tex = tex;
-    dc->submission_id = r->batch.num_draw_calls;
+    dc->submission_id = r->num_draw_calls;
 
-    r->batch.num_draw_calls++;
-    r->batch.num_indices += index_count;
-    r->batch.num_vertices += vertex_count;
+    r->num_draw_calls++;
+    r->num_indices += index_count;
+    r->num_vertices += vertex_count;
 
     for(size_t i = 0; i < vertex_count; i++) {
         dc->vertices[i] = (BOBi_Render_Vertex){colour, vertices[i], (uv == NULL) ? (BOB_Vector2){0} : uv[i], channel};
@@ -4256,10 +4258,6 @@ void BOBi_destroy_renderer(uint32_t index) {
     renderer->stack->elems = NULL;
     free(renderer->stack);
     renderer->stack = NULL;
-
-    BOB_destroy_arena(&renderer->batch.vertex_arena);
-    BOB_destroy_arena(&renderer->batch.vertex_arena_2);
-    BOB_destroy_arena(&renderer->batch.draw_call_arena);
 
     renderer_functions[renderer->type].destroy_renderer(renderer);
     *renderer = (BOBi_Renderer_Impl){0}; //Clear all of the data
