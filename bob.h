@@ -29,6 +29,7 @@
 //      Reduce number of memory allocations cpu-side and in the Vulkan backend
 //      Fix image transitioning and blending in Vulkan backend
 //      Use texture arrays instead of binding textures every draw call (and ssbos for shaders (opengl))
+//      Let quads have rounded corners
 //
 //      Do proper error reporting and document what each error code means somewhere
 //      Debug mode with statistics
@@ -126,12 +127,13 @@ typedef struct {
 #ifdef BOB_INCLUDE_GLAD
 uint8_t BOB_create_opengl_renderer(size_t atlas_capacity, size_t pixelbuf_capacity, size_t tex_capacity, size_t mat_capacity, size_t font_capacity,
                                   size_t width, size_t height, size_t vertex_capacity, size_t index_capacity, size_t draw_call_capacity,
-                                  size_t clip_stack_capacity, BOB_Renderer_Handle *renderer);
+                                  size_t clip_stack_capacity, size_t uniform_capacity, BOB_Renderer_Handle *renderer);
 #endif //BOB_INCLUDE_GLAD
 #ifdef BOB_INCLUDE_VULKAN
 uint8_t BOB_create_vulkan_renderer(size_t atlas_capacity, size_t pixelbuf_capacity, size_t tex_capacity, size_t mat_capacity,
                             size_t font_capacity, size_t width, size_t height, size_t width_px, size_t height_px, size_t vertex_capacity,
-                            size_t index_capacity, size_t draw_call_capacity, size_t clip_stack_capacity, BOB_vk_create_surface surface_func, BOB_Renderer_Handle *r);
+                            size_t index_capacity, size_t draw_call_capacity, size_t clip_stack_capacity, size_t uniform_capacity,
+                            BOB_vk_create_surface surface_func, BOB_Renderer_Handle *r);
 #endif //BOB_INCLUDE_VULKAN
 void BOB_destroy_renderer(BOB_Renderer_Handle *r);
 
@@ -448,6 +450,63 @@ typedef struct {
     size_t offset;
 } BOBi_Arena;
 
+//Header used by free memory blocks
+typedef struct {
+    size_t size;
+} BOBi_Free_Header;
+
+//Header used by allocated memory blocks
+typedef struct {
+    size_t payload_size; //Size of usable data stored in the block aligned up to the requested alignment. THIS DOES NOT STORE THE ORIGINAL REQUESTED SIZE
+    size_t payload_offset; //Distance from the beginning of the block to the actual data (this offset is padding + header)
+} BOBi_Allocated_Header;
+
+typedef enum Color: char {
+    BLACK,
+    RED
+} BOBi_RB_Color;
+
+//Linked list/rb tree object that holds the free block data
+typedef struct BOBi_Free_Memory_Block {
+    //For linked list
+    struct BOBi_Free_Memory_Block *next, *prev;
+
+    //For RB tree
+    struct BOBi_Free_Memory_Block *parent;
+    union {
+        //Union so we can use ->left/->right or ->child[0]/->child[1]
+        struct {
+            struct BOBi_Free_Memory_Block *left, *right;
+        };
+        struct BOBi_Free_Memory_Block *child[2];
+    };
+    BOBi_RB_Color color;
+
+    BOBi_Free_Header data;
+} BOBi_Free_Memory_Block;
+
+//Linked list to hold our free blocks
+typedef struct {
+    BOBi_Free_Memory_Block header;
+} BOBi_Memory_Doubly_Linked_List;
+
+typedef enum Direction: char {
+    LEFT,
+    RIGHT,
+} BOBi_RB_Direction;
+
+typedef struct {
+    BOBi_Free_Memory_Block *root;
+} BOBi_Memory_RB_Tree;
+
+//Free-list allocator
+typedef struct {
+    BOBi_Memory_Doubly_Linked_List list;
+    BOBi_Memory_RB_Tree tree;
+    void *memory;
+    size_t size;
+} BOBi_FL_Allocator;
+
 //Data structure to hold data about a single render vertex
 typedef struct {
     BOB_Vector4 colour; //The colour of the vertex
@@ -524,7 +583,6 @@ typedef struct {
     BOB_Uniform_Type type;
     uint8_t is_reference;
 } BOBi_Uniform_Impl;
-
 
 //TODO: Make the shader/pipeline independent of the material?
 //      Only when we add other stuff to the material like blend modes etc
@@ -612,6 +670,7 @@ typedef struct {
     BOB_Mat4 projection; //projection matrix for this renderer
 
     BOBi_Arena renderer_memory; //Memory arena that this context uses. Each table is just a pointer into this arena
+    BOBi_FL_Allocator uniform_memory; //Allocator for assigning memory regions for uniforms. Gets its memory from renderer_memory
 
     BOBi_Atlas_Impl *atlas_table;
     BOBi_Pixelbuffer_Impl *pixelbuffer_table;
@@ -733,8 +792,6 @@ BOBi_Internal_State bob_state = {0};
 
 // ================================ BOB ARENA IMPLEMENTATION =================================
 
-#define MIN_ALIGNMENT alignof(max_align_t)
-
 size_t BOBi_align_up(size_t value, size_t alignment) {
     //Assert that alignments are powers of 2
     assert(alignment != 0);
@@ -778,6 +835,535 @@ void BOB_arena_clear(BOBi_Arena *arena) {
 
 #define BOBi_get_arena_elem(arena, index, type) ((type *)(arena).memory)[(index)]
 
+// =================================================== FREE LIST ALLOCATOR IMPLEMENTATION ===========================================================
+
+#define BOBi_MIN_ALIGNMENT alignof(max_align_t)
+#define BOBi_MIN_FREE_BLOCK_SIZE sizeof(BOBi_Free_Memory_Block) + (BOBi_MIN_ALIGNMENT - 1)
+
+//Functions for the doubly linked list used by the free list allocator to manage free memory block headers
+
+//Initialises the linked list to have a circularly defined sentinel node
+void BOBi_init_mem_dll(BOBi_Memory_Doubly_Linked_List *list) {
+    list->header.prev = &list->header;
+    list->header.next = &list->header;
+    list->header.data.size = 0;
+}
+
+//Inserts an element into the linked list
+void BOBi_mem_dll_insert(BOBi_Free_Memory_Block *node, BOBi_Free_Memory_Block *prev) {
+    node->next = prev->next;
+    node->prev = prev;
+
+    prev->next->prev = node;
+    prev->next = node;
+}
+
+//Removes an element from the linked list
+void BOBi_mem_dll_remove(BOBi_Free_Memory_Block *node) {
+    node->prev->next = node->next;
+    node->next->prev = node->prev;
+}
+
+//Red-Black tree implementation
+//Most of this rb tree implementation was based off of the wikipedia article:
+//https://en.wikipedia.org/wiki/Red%E2%80%93black_tree#Implementation
+//However the deletion code was based off of the pseudocode found in CLRS 3rd Ed:
+//https://edutechlearners.com/download/Introduction_to_algorithms-3rd%20Edition.pdf
+static BOBi_RB_Direction BOBi_mem_rb_direction(const BOBi_Free_Memory_Block *n) {
+    return n == n->parent->right ? RIGHT : LEFT;
+}
+
+BOBi_Free_Memory_Block *BOBi_mem_rb_rotate_subtree(BOBi_Memory_RB_Tree *tree, BOBi_Free_Memory_Block *sub, int dir) {
+    BOBi_Free_Memory_Block *sub_parent = sub->parent;
+    BOBi_Free_Memory_Block *new_root = sub->child[1-dir];
+    BOBi_Free_Memory_Block *new_child = new_root->child[dir];
+
+    sub->child[1-dir] = new_child;
+
+    if(new_child) {
+        new_child->parent = sub;
+    }
+
+    new_root->child[dir] = sub;
+
+    new_root->parent = sub_parent;
+    sub->parent = new_root;
+    if(sub_parent)
+        sub_parent->child[sub == sub_parent->right] = new_root;
+    else
+        tree->root = new_root;
+
+    return new_root;
+}
+
+static inline BOBi_RB_Color BOBi_mem_rb_color(BOBi_Free_Memory_Block *n) {
+    return n ? n->color : BLACK;
+}
+
+void BOBi_mem_rb_insert_intrn(BOBi_Memory_RB_Tree *tree, BOBi_Free_Memory_Block *node, BOBi_Free_Memory_Block *parent, BOBi_RB_Direction dir) {
+    node->color = RED;
+    node->parent = parent;
+    node->left = NULL;
+    node->right = NULL;
+
+    //Inserting at the root
+    if(!parent) {
+        tree->root = node;
+        return;
+    }
+
+    parent->child[dir] = node;
+
+    //rebalance the tree
+    do {
+        //Case #1
+        if(BOBi_mem_rb_color(parent) == BLACK) return;
+
+        BOBi_Free_Memory_Block *grandparent = parent->parent;
+
+        //Case #4
+        if(!grandparent) {
+            parent->color = BLACK;
+            return;
+        }
+
+        dir = BOBi_mem_rb_direction(parent);
+        BOBi_Free_Memory_Block *uncle = grandparent->child[1-dir];
+        if(!uncle || BOBi_mem_rb_color(uncle) == BLACK) {
+            //Case #5
+            if(node == parent->child[1-dir]) {
+                BOBi_mem_rb_rotate_subtree(tree, parent, dir);
+                node = parent;
+                parent = grandparent->child[dir];
+            }
+
+            //Case #6
+            BOBi_mem_rb_rotate_subtree(tree, parent, dir);
+            parent->color = BLACK;
+            grandparent->color = RED;
+            return;
+        }
+
+        //Case #2
+        parent->color = BLACK;
+        uncle->color = BLACK;
+        grandparent->color = RED;
+        node = grandparent;
+    } while((parent = node->parent));
+
+    //Case #3
+}
+
+static int BOBi_mem_compare_blocks(const BOBi_Free_Memory_Block *a, const BOBi_Free_Memory_Block *b) {
+    if(a->data.size < b->data.size) return -1;
+    if(a->data.size > b->data.size) return 1;
+
+    if(a < b) return -1;
+    if(a > b) return 1;
+
+    return 0;
+}
+
+void BOBi_mem_rb_insert(BOBi_Memory_RB_Tree *tree, BOBi_Free_Memory_Block *b) {
+    BOBi_Free_Memory_Block *parent = NULL;
+    BOBi_Free_Memory_Block **link = &tree->root;
+    BOBi_RB_Direction dir = LEFT;
+
+    while(*link) {
+        parent = *link;
+
+        if(BOBi_mem_compare_blocks(b, parent) < 0) {
+            link = &parent->left;
+            dir = LEFT;
+        }
+        else {
+            link = &parent->right;
+            dir = RIGHT;
+        }
+    }
+
+    BOBi_mem_rb_insert_intrn(tree, b, parent, dir);
+}
+
+void BOBi_mem_rb_transplant(BOBi_Memory_RB_Tree *tree, BOBi_Free_Memory_Block *a, BOBi_Free_Memory_Block *b) {
+    if(a->parent == NULL) tree->root = b;
+    else if(a == a->parent->left) a->parent->left = b;
+    else a->parent->right = b;
+    if(b) b->parent = a->parent;
+}
+
+BOBi_Free_Memory_Block *BOBi_mem_rb_tree_minimum(BOBi_Free_Memory_Block *x) {
+    while(x->left != NULL) {
+        x = x->left;
+    }
+
+    return x;
+}
+
+void BOBi_mem_rb_delete_fixup(BOBi_Memory_RB_Tree *tree, BOBi_Free_Memory_Block *node, BOBi_Free_Memory_Block *parent) {
+    if(node == NULL || parent == NULL) return;
+    while(node != tree->root && BOBi_mem_rb_color(node) == BLACK) {
+        BOBi_RB_Direction dir = (node == parent->right) ? RIGHT : LEFT;
+        BOBi_Free_Memory_Block *w = parent->child[1-dir];
+        printf("Got free memory block\n");
+        if(BOBi_mem_rb_color(w) == RED) {
+            w->color = BLACK;
+            parent->color = RED;
+            BOBi_mem_rb_rotate_subtree(tree, parent, dir);
+            w = parent->child[1-dir];
+        }
+        if(!w || (BOBi_mem_rb_color(w->left) == BLACK && BOBi_mem_rb_color(w->right) == BLACK)) {
+            if(w) w->color = RED;
+            node = parent;
+        }
+        else {
+            if(!w || BOBi_mem_rb_color(w->child[1-dir]) == BLACK) {
+                if(w->child[dir]) w->child[dir]->color = BLACK;
+                if(w) w->color = RED;
+                BOBi_mem_rb_rotate_subtree(tree, w, 1-dir);
+                w = parent->child[1-dir];
+            }
+            if(w) w->color = parent->color;
+            parent->color = BLACK;
+            if(w->child[1-dir]) w->child[1-dir]->color = BLACK;
+            BOBi_mem_rb_rotate_subtree(tree, parent, dir);
+            node = tree->root;
+        }
+
+        if(node != tree->root) parent = node->parent;
+    }
+    node->color = BLACK;
+}
+
+void BOBi_mem_rb_remove(BOBi_Memory_RB_Tree *tree, BOBi_Free_Memory_Block *node) {
+    BOBi_Free_Memory_Block *x, *p, *y = node;
+    BOBi_RB_Color y_orig_col = y->color;
+
+    if(node->left == NULL) {
+        x = node->right;
+        p = node;
+        BOBi_mem_rb_transplant(tree, node, node->right);
+    }
+    else if(node->right == NULL) {
+        x = node->left;
+        p = node;
+        BOBi_mem_rb_transplant(tree, node, node->left);
+    }
+    else {
+        y = BOBi_mem_rb_tree_minimum(node->right);
+        y_orig_col = y->color;
+        x = y->right;
+        if(y->parent == node) {
+            p = y;
+            if(x) x->parent = y;
+        }
+        else {
+            p = y->parent;
+            BOBi_mem_rb_transplant(tree, y, y->right);
+            y->right = node->right;
+            y->right->parent = y;
+        }
+        BOBi_mem_rb_transplant(tree, node, y);
+        y->left = node->left;
+        y->left->parent = y;
+        y->color = node->color;
+    }
+    if(y_orig_col == BLACK) BOBi_mem_rb_delete_fixup(tree, x, p);
+
+    node->parent = NULL;
+    node->left = NULL;
+    node->right = NULL;
+}
+
+//Helper function to compute the aligned padding we will need to add after the block header to ensure the
+//memory region allocated after it has its start aligned
+size_t BOBi_fl_compute_payload_offset(BOBi_Free_Memory_Block *block, size_t alignment, size_t header_size) {
+    uintptr_t start_addr = (uintptr_t)block;
+    uintptr_t aligned = BOBi_align_up(start_addr + header_size, alignment);
+    return aligned - header_size - start_addr;
+}
+
+uint8_t BOBi_mem_rb_search(BOBi_Memory_RB_Tree *tree, size_t desired_size, size_t alignment, BOBi_Free_Memory_Block **out) {
+    BOBi_Free_Memory_Block *best = NULL;
+    BOBi_Free_Memory_Block *b = tree->root;
+    size_t padding = 0;
+
+    while(b) {
+        padding = BOBi_fl_compute_payload_offset(b, alignment, sizeof(BOBi_Allocated_Header));
+        if(b->data.size < desired_size + padding) {
+            b = b->right;
+        }
+        else {
+            best = b;
+            b = b->left;
+        }
+    }
+
+    if(best == NULL) return 0;
+    *out = best;
+    return 1;
+}
+
+//Allocator Functions
+
+//Initialises the allocator
+uint8_t BOBi_create_fl_allocator(size_t size, BOBi_FL_Allocator *out) {
+    //Actual assinged memory region is the region + the size of the header to track it
+    size_t total_sz = size + sizeof(BOBi_Free_Memory_Block);
+    out->memory = malloc(total_sz);
+    if(!out->memory) return 0;
+
+    //Setup data structures
+    BOBi_init_mem_dll(&out->list);
+    out->tree = (BOBi_Memory_RB_Tree){0};
+
+    //Set up the first free memory to account for the entire assigned memory region
+    BOBi_Free_Memory_Block *first = (BOBi_Free_Memory_Block *)out->memory;
+    first->data.size = total_sz;
+    BOBi_mem_dll_insert(first, &out->list.header);
+    BOBi_mem_rb_insert(&out->tree, first);
+
+    out->size = total_sz;
+
+    return 1;
+}
+
+//Destroys the allocator
+void BOBi_destroy_fl_allocator(BOBi_FL_Allocator *alloc) {
+    free(alloc->memory);
+    alloc->memory = NULL;
+    alloc->size = 0;
+}
+
+//Main allocation function
+void *BOBi_fl_allocate_memory(BOBi_FL_Allocator *alloc, size_t size, size_t alignment) {
+    size_t allocation_header_size = sizeof(BOBi_Allocated_Header);
+    alignment = (alignment > BOBi_MIN_ALIGNMENT) ? alignment : BOBi_MIN_ALIGNMENT; //Set the alignment to a proper value
+
+    //Search through the free list for a free block that has enough space to allocate the data
+    BOBi_Free_Memory_Block *affected_block;
+    if(!BOBi_mem_rb_search(&alloc->tree, size + allocation_header_size, alignment, &affected_block)) {
+        printf("Not enough memory\n");
+        return NULL;
+    }
+    size_t payload_offset = BOBi_fl_compute_payload_offset(affected_block, alignment, allocation_header_size);
+
+    size_t required_size = size + payload_offset + allocation_header_size;
+    size_t rest = affected_block->data.size - required_size;
+
+    //If there is a substantial amount of memory space left over, create a new free region from it
+    if(rest >= BOBi_MIN_FREE_BLOCK_SIZE) {
+        BOBi_Free_Memory_Block *new_free_block = (BOBi_Free_Memory_Block *)((uint8_t *)affected_block + required_size);
+        new_free_block->data.size = rest;
+        BOBi_mem_dll_insert(new_free_block, affected_block);
+        BOBi_mem_rb_insert(&alloc->tree, new_free_block);
+    }
+    //Otherwise just add it on to the end of the current one
+    else {
+        size += rest;
+    }
+    BOBi_mem_dll_remove(affected_block); //Get rid of the allocated block
+    BOBi_mem_rb_remove(&alloc->tree, affected_block);
+
+    //Creating the block header and the pointer to start of memory
+    uintptr_t data_addr = (uintptr_t)affected_block + payload_offset + allocation_header_size;
+    uintptr_t header_addr = data_addr - allocation_header_size;
+    ((BOBi_Allocated_Header *)header_addr)->payload_size= size;
+    ((BOBi_Allocated_Header *)header_addr)->payload_offset = payload_offset;
+
+    return (void *)data_addr;
+}
+
+//Coalesces two adjacent free regions together to form one large free region
+void BOBi_fl_coalesce(BOBi_FL_Allocator *alloc, BOBi_Free_Memory_Block *prev, BOBi_Free_Memory_Block *new_block) {
+    //If the next header isn't the sentinel value and the pointers are adjacnet, combine
+    if(new_block->next != &alloc->list.header && (uintptr_t)new_block + new_block->data.size == (uintptr_t)new_block->next) {
+        BOBi_mem_rb_remove(&alloc->tree, new_block);
+        BOBi_mem_rb_remove(&alloc->tree, new_block->next);
+        BOBi_mem_dll_remove(new_block->next);
+        new_block->data.size += new_block->next->data.size;
+        BOBi_mem_rb_insert(&alloc->tree, new_block);
+    }
+
+    //If the previous header isn't the sentinel value and the pointers are adjacnet, combine
+    if(prev != &alloc->list.header && (uintptr_t)prev + prev->data.size == (uintptr_t)new_block) {
+        BOBi_mem_rb_remove(&alloc->tree, prev);
+        BOBi_mem_rb_remove(&alloc->tree, new_block);
+        BOBi_mem_dll_remove(new_block);
+        prev->data.size += new_block->data.size;
+        BOBi_mem_rb_insert(&alloc->tree, prev);
+    }
+}
+
+//Helper function to create a new free block at the given start address
+//with the given size. Only blocks of size at least BOBi_MIN_FREE_BLOCK_SIZE will be created
+void BOBi_fl_create_new_free_block(BOBi_FL_Allocator *alloc, uintptr_t start, size_t size) {
+    if(size < BOBi_MIN_FREE_BLOCK_SIZE) return; //Early exit
+
+    //Create the new block
+    BOBi_Free_Memory_Block *block = (BOBi_Free_Memory_Block *)(start);
+    block->data.size = size;
+    block->next = NULL;
+    block->prev = NULL;
+
+    //Seach where to place it in the linked list
+    BOBi_Free_Memory_Block *b = &alloc->list.header;
+    while(b->next != &alloc->list.header) {
+        if(block < b->next) break;
+
+        b = b->next;
+    }
+    if(b) {
+        BOBi_mem_dll_insert(block, b);
+        BOBi_mem_rb_insert(&alloc->tree, block);
+    }
+
+    //Combine it with adjacent regions
+    BOBi_fl_coalesce(alloc, b, block);
+}
+
+//Frees a block of memory
+void BOBi_fl_free_memory(BOBi_FL_Allocator *alloc, void *ptr) {
+    uintptr_t curr_addr = (uintptr_t)ptr; //Changing the pointer address into a value
+    uintptr_t header_addr = curr_addr - sizeof(BOBi_Allocated_Header); //Getting the address of the header for the block
+    BOBi_Allocated_Header *allocation_header = (BOBi_Allocated_Header *)header_addr; //Getting the header data for the block
+
+    //Create a new free memory block to hold the freed region
+    BOBi_fl_create_new_free_block(alloc, curr_addr - allocation_header->payload_offset, allocation_header->payload_size + allocation_header->payload_offset);
+}
+
+//Function to reallocate the region of memory that starts at ptr to a new region
+//of new_sz bytes aligned up to match the given alignment. Returns a pointer to the new region
+//Follows the following strategy:
+//1. Determine the size of the aligned memory region we would need to allocate
+//2. If aligned_sz can fit into the current region
+//      a. If aligned_sz < curr_region_sz / 2 and curr_region_sz - aligned_sz > BOBi_MIN_FREE_BLOCK_SIZE
+//         spin out the remainder into a new free region. The returned pointer is the original
+//      b. Otherwise do nothing and return the original pointer
+//3. Else if aligned_sz cannot fit into the current region but there is a free region following the current one
+//   which can fit the extra memory, expand into it, and if the leftover memory is > BOBi_MIN_FREE_BLOCK_SIZE,
+//   spin it out into a new free region and return the original pointer
+//4. Else if aligned_sz cannot fit into the current region but there is a free region before the current one
+//   which can fit the extra memory, expand into it, and if the leftover memory is > BOBi_MIN_FREE_BLOCK_SIZE,
+//   spin it out into a new free region and return a pointer to the padded start of the previous region
+//5. If aligned_sz cannot fit into the current region and both adjacent regions are free and the combined
+//   region can fit the new aligned memory, create a new allocated region spanning the three blocks, craeting
+//   a new free region if the leftover memory is > BOBi_MIN_FREE_BLOCK_SIZE and return a pointer to the padded
+//   start of the previous region
+void *BOBi_fl_reallocate_memory(BOBi_FL_Allocator *alloc, void *ptr, size_t new_sz, size_t alignment) {
+    alignment = alignment < BOBi_MIN_ALIGNMENT ? BOBi_MIN_ALIGNMENT : alignment;
+    uintptr_t curr_addr = (uintptr_t)ptr;
+    uintptr_t header_addr = curr_addr - sizeof(BOBi_Allocated_Header);
+    BOBi_Allocated_Header *header = (BOBi_Allocated_Header *)header_addr;
+    uintptr_t block_start = curr_addr - header->payload_offset;
+    size_t aligned_size = BOBi_align_up(new_sz, alignment);
+
+    //If the new memory size can fit into the currently allocated region
+    if(header->payload_size >= aligned_size) {
+        //If the region is being shrunk try and see if we can spin out some
+        //of the memory into a new free region
+        size_t rest = header->payload_size - aligned_size;
+
+        if(aligned_size < header->payload_size / 2 && rest > BOBi_MIN_FREE_BLOCK_SIZE) {
+            header->payload_size = aligned_size;
+            BOBi_fl_create_new_free_block(alloc, curr_addr + aligned_size, rest);
+        }
+
+        return ptr;
+    }
+    else {
+        size_t needed = aligned_size - header->payload_size; //How much data we need to fit
+
+        //Find adjacent free blocks (if they exists)
+        uintptr_t next_block = curr_addr + header->payload_size; //The address of where the next free block should be
+        BOBi_Free_Memory_Block *foundr = NULL; //Free right block
+        BOBi_Free_Memory_Block *foundl = NULL; //Free left block
+        BOBi_Free_Memory_Block *b = &alloc->list.header; //Searching block
+
+        while(b->next != &alloc->list.header) {
+            if(next_block < (uintptr_t)b->next) break;
+            else if(next_block == (uintptr_t)b->next) {
+                foundr = b->next;
+                break;
+            }
+            else if(block_start == (uintptr_t)b->next + b->data.size) foundl = b->next;
+
+            b = b->next;
+        }
+
+        //Adjust data on the free regions
+        uintptr_t offset = 0;
+        size_t required = aligned_size;
+        size_t available = header->payload_offset + header->payload_size;
+        if(foundl != NULL) {
+            offset = BOBi_fl_compute_payload_offset(foundl, alignment, sizeof(BOBi_Allocated_Header));
+            available += foundl->data.size;
+            required += offset;
+        }
+        if(foundr) available += foundr->data.size;
+
+        //Size is growing, current block isn't big enough, but the next block is free
+        //and has enough space to fit the rest of the required data
+        if(foundr != NULL && foundr->data.size >= needed) {
+            BOBi_mem_dll_remove(foundr);
+            BOBi_mem_rb_remove(&alloc->tree, foundr);
+
+            size_t remainder = foundr->data.size - needed;
+            //If the new data block is too large keep the remainder as a free block
+            if(remainder > BOBi_MIN_FREE_BLOCK_SIZE) {
+                BOBi_fl_create_new_free_block(alloc, next_block + needed, remainder);
+                foundr->data.size = needed;
+            }
+            header->payload_size += foundr->data.size;
+            return ptr;
+        }
+        //Size is growing, current block isn't big enough, but both previous block is free
+        //and has enough space to contain all of the extra data. Also handles the case
+        //where both sides are free and can be used
+        else if (foundl != NULL && available >= required) {
+            //Get rid of all of the old blocks
+            BOBi_mem_dll_remove(foundl);
+            BOBi_mem_rb_remove(&alloc->tree, foundl);
+            if(foundr != NULL) {
+                BOBi_mem_dll_remove(foundr);
+                BOBi_mem_rb_remove(&alloc->tree, foundr);
+            }
+
+            //Compute the new allocated block values
+            uintptr_t new_start = (uintptr_t)foundl + offset;
+
+            //Check if there is going to be any significant remainder
+            size_t remainder = available - required;
+            uint8_t need_new_block = 0;
+            //Do not allocate the free block memory now as it may override some of the data we need to copy into the
+            //new allocated region. Just set a flag to true
+            if(remainder > BOBi_MIN_FREE_BLOCK_SIZE) need_new_block = 1;
+            else aligned_size += remainder;
+
+            //Create the new allocated region and copy the data into it
+            BOBi_Allocated_Header *new_header = (BOBi_Allocated_Header *)(new_start - sizeof(BOBi_Allocated_Header));
+            new_header->payload_size = aligned_size;
+            new_header->payload_offset = offset;
+            memmove(ptr, (void *)new_start, header->payload_size);
+
+            //Create the new free region if necessary
+            if(need_new_block) BOBi_fl_create_new_free_block(alloc, new_start + aligned_size, remainder);
+
+            return (void *)new_start;
+        }
+        //Have to realloc to a new block
+        else {
+            void *new_block = BOBi_fl_allocate_memory(alloc, new_sz, alignment);
+            if(new_block == NULL) return NULL;
+            memmove(ptr, new_block, header->payload_size);
+            BOBi_fl_free_memory(alloc, ptr);
+            return new_block;
+        }
+    }
+}
+
+// ================= RENDERER HANDLE HELPERS ============================
+
 uint8_t BOBi_get_renderer_from_handle(uint64_t handle, BOBi_Renderer_Impl **out) {
     if(handle & BOBi_MSB) return 0; //Do not work with invalid handles
 
@@ -820,7 +1406,7 @@ uint8_t BOBi_get_renderer(BOB_Renderer_Handle handle, BOBi_Renderer_Impl **out) 
     return 1;
 }
 
-uint8_t BOBi_create_renderer(BOBi_Renderer_Type type, size_t atlas_capacity, size_t pixelbuf_capacity, size_t tex_capacity, size_t mat_capacity, size_t font_capacity, size_t vertex_capacity, size_t index_capacity, size_t draw_call_capacity, size_t clip_stack_capacity, size_t width, size_t height, BOB_Renderer_Handle *renderer);
+uint8_t BOBi_create_renderer(BOBi_Renderer_Type type, size_t atlas_capacity, size_t pixelbuf_capacity, size_t tex_capacity, size_t mat_capacity, size_t font_capacity, size_t vertex_capacity, size_t index_capacity, size_t draw_call_capacity, size_t clip_stack_capacity, size_t uniform_capacity, size_t width, size_t height, size_t width_px, size_t height_px, BOB_Renderer_Handle *renderer);
 
 //Reads the entirety of a file into the given buffer
 int BOBi_read_to_end(char const *path, uint8_t **buf, uint8_t add_null) {
@@ -972,8 +1558,8 @@ const char *fragment_shader = "#version 330 core\n"
                               "    }\n"
                               "}\n";
 
-uint8_t BOB_create_opengl_renderer(size_t atlas_capacity, size_t pixelbuf_capacity, size_t tex_capacity, size_t mat_capacity, size_t font_capacity, size_t width, size_t height, size_t vertex_capacity, size_t index_capacity, size_t draw_call_capacity, size_t clip_stack_capacity, BOB_Renderer_Handle *renderer) {
-    if(!BOBi_create_renderer(BOB_OPENGL_RENDERER, atlas_capacity, pixelbuf_capacity, tex_capacity, mat_capacity, font_capacity, vertex_capacity, index_capacity, draw_call_capacity, clip_stack_capacity, width, height, renderer)) return 0;
+uint8_t BOB_create_opengl_renderer(size_t atlas_capacity, size_t pixelbuf_capacity, size_t tex_capacity, size_t mat_capacity, size_t font_capacity, size_t width, size_t height, size_t vertex_capacity, size_t index_capacity, size_t draw_call_capacity, size_t clip_stack_capacity, size_t uniform_capacity, BOB_Renderer_Handle *renderer) {
+    if(!BOBi_create_renderer(BOB_OPENGL_RENDERER, atlas_capacity, pixelbuf_capacity, tex_capacity, mat_capacity, font_capacity, vertex_capacity, index_capacity, draw_call_capacity, clip_stack_capacity, uniform_capacity, width, height, width, height, renderer)) return 0;
 
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -2814,8 +3400,9 @@ uint8_t BOBi_vk_init_vulkan_renderer(BOBi_Renderer_Impl *renderer, size_t width,
 
 uint8_t BOB_create_vulkan_renderer(size_t atlas_capacity, size_t pixelbuf_capacity, size_t tex_capacity, size_t mat_capacity,
                             size_t font_capacity, size_t width, size_t height, size_t width_px, size_t height_px, size_t vertex_capacity,
-                            size_t index_capacity, size_t draw_call_capacity, size_t clip_stack_capacity, BOB_vk_create_surface surface_func, BOB_Renderer_Handle *r) {
-    if(!BOBi_create_renderer(BOB_VULKAN_RENDERER, atlas_capacity, pixelbuf_capacity, tex_capacity, mat_capacity, font_capacity, vertex_capacity, index_capacity, draw_call_capacity, clip_stack_capacity, width, height, r)) return 0;
+                            size_t index_capacity, size_t draw_call_capacity, size_t clip_stack_capacity, size_t uniform_capacity,
+                            BOB_vk_create_surface surface_func, BOB_Renderer_Handle *r) {
+    if(!BOBi_create_renderer(BOB_VULKAN_RENDERER, atlas_capacity, pixelbuf_capacity, tex_capacity, mat_capacity, font_capacity, vertex_capacity, index_capacity, draw_call_capacity, clip_stack_capacity, uniform_capacity, width, height, width_px, height_px, r)) return 0;
 
     BOBi_Renderer_Impl *intrn_renderer;
     BOBi_get_renderer(*r, &intrn_renderer);
@@ -3333,7 +3920,7 @@ BOBi_Backend_Vtable renderer_functions[BOB_NUM_RENDERER_TYPES] = {
     }                                                                               \
 } while(0);
 
-uint8_t BOBi_create_renderer(BOBi_Renderer_Type type, size_t atlas_capacity, size_t pixelbuf_capacity, size_t tex_capacity, size_t mat_capacity, size_t font_capacity, size_t vertex_capacity, size_t index_capacity, size_t draw_call_capacity, size_t clip_stack_capacity, size_t width, size_t height, BOB_Renderer_Handle *renderer) {
+uint8_t BOBi_create_renderer(BOBi_Renderer_Type type, size_t atlas_capacity, size_t pixelbuf_capacity, size_t tex_capacity, size_t mat_capacity, size_t font_capacity, size_t vertex_capacity, size_t index_capacity, size_t draw_call_capacity, size_t clip_stack_capacity, size_t uniform_capacity, size_t width, size_t height, size_t width_px, size_t height_px, BOB_Renderer_Handle *renderer) {
     if(bob_state.renderer_count >= bob_state.renderer_capcity) {
         printf("ERROR: Exceeded renderer capacity\n");
         return 0;
@@ -3343,6 +3930,11 @@ uint8_t BOBi_create_renderer(BOBi_Renderer_Type type, size_t atlas_capacity, siz
     GET_NEXT_INDEX(index, bob_state.next_renderer_slot, bob_state.renderer_count, bob_state.renderers[bob_state.next_renderer_slot].renderer_memory.memory == NULL);
 
     BOBi_Renderer_Impl *intrn_renderer = &bob_state.renderers[index];
+
+    //Account for the fact that we are going to have a default material/texture
+    tex_capacity++;
+    mat_capacity++;
+    uniform_capacity++; //Default material has one uniform for the projection matrix
 
     //Calculating the size of the memory regions each buffer will end up using
     size_t atlas_sz = atlas_capacity * sizeof(BOBi_Atlas_Impl);
@@ -3396,6 +3988,9 @@ uint8_t BOBi_create_renderer(BOBi_Renderer_Type type, size_t atlas_capacity, siz
     intrn_renderer->stack = BOB_arena_alloc(&intrn_renderer->renderer_memory, sizeof(BOBi_Clip_Stack), alignof(BOBi_Clip_Stack));
     intrn_renderer->stack->elems = BOB_arena_alloc(&intrn_renderer->renderer_memory, stack_sz, alignof(BOBi_Clip_Rect));
 
+    //Allocate memory with the worst case assumption that each uniform gets its own allocated header
+    BOBi_create_fl_allocator((sizeof(BOBi_Allocated_Header) + sizeof(BOBi_Uniform_Impl)) * uniform_capacity, &intrn_renderer->uniform_memory);
+
     //Assiging the capacity values
     intrn_renderer->atlas_capacity = atlas_capacity;
     intrn_renderer->pixelbuffer_capacity = pixelbuf_capacity;
@@ -3429,6 +4024,8 @@ uint8_t BOBi_create_renderer(BOBi_Renderer_Type type, size_t atlas_capacity, siz
 
     intrn_renderer->screen_height = height;
     intrn_renderer->screen_width = width;
+    intrn_renderer->screen_width_px = width_px;
+    intrn_renderer->screen_height_px = height_px;
 
     *renderer = index;
     return 1;
@@ -4059,7 +4656,7 @@ void BOBi_pixelbuffer_free(BOBi_Renderer_Impl *renderer, uint32_t index) {
 }
 void BOBi_material_free(BOBi_Renderer_Impl *renderer, uint32_t index) {
     renderer_functions[renderer->type].destroy_material(renderer, index);
-    free(renderer->material_table[index].uniforms);
+    BOBi_fl_free_memory(&renderer->uniform_memory, renderer->material_table[index].uniforms);
     renderer->material_table[index] = (BOBi_Material_Impl){0}; //Clear the data
 }
 
@@ -4259,6 +4856,7 @@ void BOBi_destroy_renderer(uint32_t index) {
             BOBi_font_free(renderer, i);
     }
     BOB_destroy_arena(&renderer->renderer_memory);
+    BOBi_destroy_fl_allocator(&renderer->uniform_memory);
 
     renderer_functions[renderer->type].destroy_renderer(renderer);
     *renderer = (BOBi_Renderer_Impl){0}; //Clear all of the data
@@ -4510,9 +5108,7 @@ uint8_t BOB_create_material(BOB_Renderer_Handle renderer, BOB_Shader_Data *data,
     uint32_t index;
     GET_NEXT_INDEX(index, intrn_renderer->next_mat_slot, intrn_renderer->num_materials, !intrn_renderer->material_table[intrn_renderer->next_mat_slot].init);
 
-    //TODO: Make an arena for this. Currently need to do this since cannot have references to stack memory in heap memory
-    //otherwise will get pointer badness
-    BOBi_Uniform_Impl *temp = malloc(sizeof(BOBi_Uniform_Impl) * num_uniforms);
+    BOBi_Uniform_Impl *temp = BOBi_fl_allocate_memory(&intrn_renderer->uniform_memory, sizeof(BOBi_Uniform_Impl) * num_uniforms, alignof(BOBi_Uniform_Impl));
     for(size_t i = 0; i < num_uniforms; i++) {
         temp[i] = (BOBi_Uniform_Impl){.name = uniforms[i].name, .type = uniforms[i].type, .is_reference = uniforms[i].is_reference};
         memcpy(&temp[i].value, &uniforms[i].value, sizeof(uniforms[i].value));
@@ -4524,7 +5120,7 @@ uint8_t BOB_create_material(BOB_Renderer_Handle renderer, BOB_Shader_Data *data,
                 printf("Invalid shader stage\n");
                 *mat |= BOBi_MSB;
                 intrn_renderer->material_table[index].init = 0;
-                free(intrn_renderer->material_table[index].uniforms); //TODO: Change this to be arena based
+                BOBi_fl_free_memory(&intrn_renderer->uniform_memory, intrn_renderer->material_table[index].uniforms);
                 return 0;
         }
         #endif
@@ -4535,7 +5131,7 @@ uint8_t BOB_create_material(BOB_Renderer_Handle renderer, BOB_Shader_Data *data,
     if(!renderer_functions[intrn_renderer->type].create_material(intrn_renderer, index, data, num_shaders)) {
         *mat |= BOBi_MSB;
         intrn_renderer->material_table[index].init = 0;
-        free(intrn_renderer->material_table[index].uniforms); //TODO: Change this to be arena based
+        BOBi_fl_free_memory(&intrn_renderer->uniform_memory, intrn_renderer->material_table[index].uniforms);
         return 0;
     }
 
