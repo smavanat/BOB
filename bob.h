@@ -26,7 +26,7 @@
 #include <stddef.h>
 
 //TODO: Change the vulkan memory code to use our allocator so the PBO memory mapping works properly -> Maybe a ring allocator to ensure constant memory usage
-//      Reduce number of memory allocations cpu-side and in the Vulkan backend
+//      Reduce number of memory allocations in the Vulkan backend
 //      Fix image transitioning and blending in Vulkan backend
 //      Use texture arrays instead of binding textures every draw call (and ssbos for shaders (opengl))
 //      Let quads have rounded corners
@@ -625,6 +625,9 @@ typedef struct {
     size_t capacity;
 } BOBi_Clip_Stack;
 
+//NOTE: I'm not happy with the spread out memory allocations in the hashmap
+//      and font parsing, but I can't figure out a way of making it nicer
+//      without making the parsing very ugly and slow
 typedef struct {
     size_t size;
     size_t capacity;
