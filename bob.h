@@ -28,13 +28,14 @@
 //TODO: Change the vulkan memory code to use our allocator so the PBO memory mapping works properly -> Maybe a ring allocator to ensure constant memory usage
 //      Reduce number of memory allocations in the Vulkan backend
 //      Fix image transitioning and blending in Vulkan backend
-//      Use texture arrays instead of binding textures every draw call (and ssbos for shaders (opengl))
+//      Use texture arrays instead of binding textures every draw call 
 //      Let quads have rounded corners
 //
 //      Do proper error reporting and document what each error code means somewhere
 //      Debug mode with statistics
 //
 //      Allow more customisability in the shaders in general (and add push constants)
+//      Store ssbos for shaders (opengl)
 //      Compute shader support
 //      Custom vertex layout
 //
@@ -452,38 +453,92 @@ typedef struct {
 
 //Header used by free memory blocks
 typedef struct {
-    size_t size;
-} BOBi_Free_Header;
+    uint32_t size;
+} BOBi_CPU_Free_Header;
 
-//Header used by allocated memory blocks
+#ifdef BOB_INCLUDE_VULKAN
+//Header used by free memory blocks
 typedef struct {
-    size_t payload_size; //Size of usable data stored in the block aligned up to the requested alignment. THIS DOES NOT STORE THE ORIGINAL REQUESTED SIZE
-    size_t payload_offset; //Distance from the beginning of the block to the actual data (this offset is padding + header)
-} BOBi_Allocated_Header;
+    VkDeviceSize size;
+    VkDeviceSize offset;
+} BOBi_vk_Free_Header;
+#endif //BOB_INCLUDE_VULKAN
 
-typedef enum Color: char {
-    BLACK,
-    RED
+typedef enum Color : char {
+    BOBi_RB_BLACK,
+    BOBi_RB_RED
 } BOBi_RB_Color;
 
-//Linked list/rb tree object that holds the free block data
-typedef struct BOBi_Free_Memory_Block {
-    //For linked list
-    struct BOBi_Free_Memory_Block *next, *prev;
+typedef enum : char {
+    BOBi_FREE_HEADER_CPU,
+    #ifdef BOB_INCLUDE_VULKAN
+    BOBi_FREE_HEADER_VULKAN,
+    #endif //BOB_INCLUDE_VULKAN
+} BOBi_Free_Header_Type;
 
+//Pool allocator is just a linked list that we use to store the headers
+//Types of metadata that can be stored in a pool allocator
+typedef enum: char {
+    BOBi_FREE_BLOCK_HEADER, //Free block headers
+    BOBi_ALLOCATED_BLOCK_HEADER, //Allocated block headers
+} BOBi_Alloc_Metadata_Type;
+
+typedef struct BOBi_RB_Node {
     //For RB tree
-    struct BOBi_Free_Memory_Block *parent;
+    struct BOBi_RB_Node *parent;
     union {
         //Union so we can use ->left/->right or ->child[0]/->child[1]
         struct {
-            struct BOBi_Free_Memory_Block *left, *right;
+            struct BOBi_RB_Node *left, *right;
         };
-        struct BOBi_Free_Memory_Block *child[2];
+        struct BOBi_RB_Node *child[2];
     };
     BOBi_RB_Color color;
+    BOBi_Alloc_Metadata_Type type;
+} BOBi_RB_Node;
 
-    BOBi_Free_Header data;
+//Header used by allocated memory blocks
+//Generated using a pool allocator rather than being stored in memory to
+//avoid confusion on how much memory is being used
+typedef struct {
+    BOBi_RB_Node node;
+    void *payload_start; //Pointer to the start of the allocated region
+    uint32_t payload_size; //Size of usable data stored in the block aligned up to the requested alignment. THIS DOES NOT STORE THE ORIGINAL REQUESTED SIZE
+    uint8_t payload_offset; //Distance from the beginning of the block to the actual data (this offset is padding + header)
+} BOBi_Allocated_Header;
+
+//Linked list/rb tree object that holds the free block data
+typedef struct BOBi_Free_Memory_Block {
+    BOBi_RB_Node node;
+    //For linked list
+    struct BOBi_Free_Memory_Block *next, *prev;
+
+    union {
+        BOBi_CPU_Free_Header cpu;
+        #ifdef BOB_INCLUDE_VULKAN
+        BOBi_vk_Free_Header vulkan;
+        #endif
+    };
+    BOBi_Free_Header_Type type;
 } BOBi_Free_Memory_Block;
+
+//A single node in the pool allocator doubly linked list
+typedef struct Vulkan_Metadata_Elem{
+    struct Vulkan_Metadata_Elem *prev, *next; //Links to other nodes
+
+    //Data stored in the node
+    union {
+        BOBi_Allocated_Header allocation_data;
+        BOBi_Free_Memory_Block free_data;
+    };
+    BOBi_Alloc_Metadata_Type type; //Type of the node. This should match the pool allocator's type as well
+} BOBi_Alloc_Metadata_Elem;
+
+//Pool allocator itself
+typedef struct {
+    BOBi_Alloc_Metadata_Elem *allocation_data; //Memory region that actually holds the data
+    BOBi_Alloc_Metadata_Elem header; //Pointer to the start and end of the circular linked list
+} BOBi_Metadata_Pool;
 
 //Linked list to hold our free blocks
 typedef struct {
@@ -491,18 +546,20 @@ typedef struct {
 } BOBi_Memory_Doubly_Linked_List;
 
 typedef enum Direction: char {
-    LEFT,
-    RIGHT,
+    BOBi_RB_LEFT,
+    BOBi_RB_RIGHT,
 } BOBi_RB_Direction;
 
 typedef struct {
-    BOBi_Free_Memory_Block *root;
+    BOBi_RB_Node *root;
 } BOBi_Memory_RB_Tree;
 
 //Free-list allocator
 typedef struct {
     BOBi_Memory_Doubly_Linked_List list;
-    BOBi_Memory_RB_Tree tree;
+    BOBi_Memory_RB_Tree free_header_tree;
+    BOBi_Memory_RB_Tree alloc_header_tree;
+    BOBi_Metadata_Pool alloc_header_pool;
     void *memory;
     size_t size;
 } BOBi_FL_Allocator;
@@ -840,16 +897,94 @@ void BOB_arena_clear(BOBi_Arena *arena) {
 
 // =================================================== FREE LIST ALLOCATOR IMPLEMENTATION ===========================================================
 
+//TODO: Figure out what happens when the pool allocator runs out of space
+//Initialises the pool allocator and all of the nodes in the linked list that make it up
+uint8_t BOBi_initialise_metadata_pool(size_t capacity, BOBi_Metadata_Pool *out) {
+    //Allocate the memory region to store the data
+    out->allocation_data = malloc(sizeof(BOBi_Alloc_Metadata_Elem) * capacity);
+    if(!out->allocation_data) return 0;
+
+    //Set the links between the nodes
+    for(size_t i = 0; i < capacity; i++) {
+        if(i < capacity - 1) out->allocation_data[i].next = &out->allocation_data[i+1];
+        if(i > 0) out->allocation_data[i].prev = &out->allocation_data[i-1];
+    }
+
+    //Set the links to the header pointer node
+    out->allocation_data[0].prev = &out->header;
+    out->allocation_data[capacity-1].next = &out->header;
+    out->header.next = &out->allocation_data[0];
+    out->header.prev = &out->allocation_data[capacity-1];
+
+    return 1;
+}
+
+//Pops the first node from the list and assigns a pointer to the start of the
+//metadata stored in the pool allocator node to the out argument
+//It is technically possible to store data of both free and allocated headers in the
+//same pool allocator as we use a union type
+uint8_t BOBi_create_metadata(BOBi_Metadata_Pool *pool, BOBi_Alloc_Metadata_Type type, void **out) {
+    //Metadata exhausted
+    if(pool->header.next == &pool->header) {
+        printf("Metadata exhausted\n");
+        return 0;
+    }
+
+    //Get the next available node
+    BOBi_Alloc_Metadata_Elem *data = pool->header.next;
+
+    //Remove it from the linked list
+    pool->header.next = data->next;
+    data->next->prev = &pool->header;
+    data->type = type;
+
+    //Get the offset to the start of the data
+    switch (type) {
+        case BOBi_FREE_BLOCK_HEADER: *out = (char *)data + offsetof(BOBi_Alloc_Metadata_Elem, free_data); break;
+        case BOBi_ALLOCATED_BLOCK_HEADER: *out = (char *)data + offsetof(BOBi_Alloc_Metadata_Elem, allocation_data); break;
+    }
+
+    return 1;
+}
+
+//Given a pointer to the start of a data offset, uses pointer arithmetic to find the start of
+//the pool allocator linked list node that actually stores the data and adds it to the end of the
+//allocator linked list
+uint8_t BOBi_destroy_metadata(BOBi_Metadata_Pool *pool, BOBi_Alloc_Metadata_Type type, void *data) {
+    //Find the start of the node. No need to do capacity checks, since we can just keep adding
+    //nodes. If the user wants, this means they can allocate their own node memory and
+    //add them to the end of the list as long as they are careful
+    BOBi_Alloc_Metadata_Elem *node;
+    switch (type) {
+        case BOBi_FREE_BLOCK_HEADER: node = (BOBi_Alloc_Metadata_Elem *)((char *)data - offsetof(BOBi_Alloc_Metadata_Elem, free_data)); break;
+        case BOBi_ALLOCATED_BLOCK_HEADER: node = (BOBi_Alloc_Metadata_Elem *)((char *)data - offsetof(BOBi_Alloc_Metadata_Elem, allocation_data)); break;
+    }
+
+    //Add it to the back of the linked list
+    BOBi_Alloc_Metadata_Elem *prev = pool->header.prev;
+    node->next = prev->next;
+    node->prev = prev;
+    prev->next->prev = node;
+    prev->next = node;
+
+    return 1;
+}
+
+//Frees the memory used by a pool allocator
+void BOBi_destroy_pool_allocator(BOBi_Metadata_Pool *pool) {
+    free(pool->allocation_data);
+}
+
 #define BOBi_MIN_ALIGNMENT alignof(max_align_t)
 #define BOBi_MIN_FREE_BLOCK_SIZE sizeof(BOBi_Free_Memory_Block) + (BOBi_MIN_ALIGNMENT - 1)
 
 //Functions for the doubly linked list used by the free list allocator to manage free memory block headers
 
 //Initialises the linked list to have a circularly defined sentinel node
-void BOBi_init_mem_dll(BOBi_Memory_Doubly_Linked_List *list) {
+void BOBi_init_mem_dll(BOBi_Memory_Doubly_Linked_List *list, BOBi_Free_Header_Type type) {
     list->header.prev = &list->header;
     list->header.next = &list->header;
-    list->header.data.size = 0;
+    list->header.type = type;
 }
 
 //Inserts an element into the linked list
@@ -872,14 +1007,14 @@ void BOBi_mem_dll_remove(BOBi_Free_Memory_Block *node) {
 //https://en.wikipedia.org/wiki/Red%E2%80%93black_tree#Implementation
 //However the deletion code was based off of the pseudocode found in CLRS 3rd Ed:
 //https://edutechlearners.com/download/Introduction_to_algorithms-3rd%20Edition.pdf
-static BOBi_RB_Direction BOBi_mem_rb_direction(const BOBi_Free_Memory_Block *n) {
-    return n == n->parent->right ? RIGHT : LEFT;
+static BOBi_RB_Direction BOBi_mem_rb_direction(const BOBi_RB_Node *n) {
+    return n == n->parent->right ? BOBi_RB_RIGHT : BOBi_RB_LEFT;
 }
 
-BOBi_Free_Memory_Block *BOBi_mem_rb_rotate_subtree(BOBi_Memory_RB_Tree *tree, BOBi_Free_Memory_Block *sub, int dir) {
-    BOBi_Free_Memory_Block *sub_parent = sub->parent;
-    BOBi_Free_Memory_Block *new_root = sub->child[1-dir];
-    BOBi_Free_Memory_Block *new_child = new_root->child[dir];
+BOBi_RB_Node *BOBi_mem_rb_rotate_subtree(BOBi_Memory_RB_Tree *tree, BOBi_RB_Node *sub, int dir) {
+    BOBi_RB_Node *sub_parent = sub->parent;
+    BOBi_RB_Node *new_root = sub->child[1-dir];
+    BOBi_RB_Node *new_child = new_root->child[dir];
 
     sub->child[1-dir] = new_child;
 
@@ -899,12 +1034,12 @@ BOBi_Free_Memory_Block *BOBi_mem_rb_rotate_subtree(BOBi_Memory_RB_Tree *tree, BO
     return new_root;
 }
 
-static inline BOBi_RB_Color BOBi_mem_rb_color(BOBi_Free_Memory_Block *n) {
-    return n ? n->color : BLACK;
+static inline BOBi_RB_Color BOBi_mem_rb_color(BOBi_RB_Node *n) {
+    return n ? n->color : BOBi_RB_BLACK;
 }
 
-void BOBi_mem_rb_insert_intrn(BOBi_Memory_RB_Tree *tree, BOBi_Free_Memory_Block *node, BOBi_Free_Memory_Block *parent, BOBi_RB_Direction dir) {
-    node->color = RED;
+void BOBi_mem_rb_insert_intrn(BOBi_Memory_RB_Tree *tree, BOBi_RB_Node *node, BOBi_RB_Node *parent, BOBi_RB_Direction dir) {
+    node->color = BOBi_RB_RED;
     node->parent = parent;
     node->left = NULL;
     node->right = NULL;
@@ -920,19 +1055,19 @@ void BOBi_mem_rb_insert_intrn(BOBi_Memory_RB_Tree *tree, BOBi_Free_Memory_Block 
     //rebalance the tree
     do {
         //Case #1
-        if(BOBi_mem_rb_color(parent) == BLACK) return;
+        if(BOBi_mem_rb_color(parent) == BOBi_RB_BLACK) return;
 
-        BOBi_Free_Memory_Block *grandparent = parent->parent;
+        BOBi_RB_Node *grandparent = parent->parent;
 
         //Case #4
         if(!grandparent) {
-            parent->color = BLACK;
+            parent->color = BOBi_RB_BLACK;
             return;
         }
 
         dir = BOBi_mem_rb_direction(parent);
-        BOBi_Free_Memory_Block *uncle = grandparent->child[1-dir];
-        if(!uncle || BOBi_mem_rb_color(uncle) == BLACK) {
+        BOBi_RB_Node *uncle = grandparent->child[1-dir];
+        if(!uncle || BOBi_mem_rb_color(uncle) == BOBi_RB_BLACK) {
             //Case #5
             if(node == parent->child[1-dir]) {
                 BOBi_mem_rb_rotate_subtree(tree, parent, dir);
@@ -942,60 +1077,88 @@ void BOBi_mem_rb_insert_intrn(BOBi_Memory_RB_Tree *tree, BOBi_Free_Memory_Block 
 
             //Case #6
             BOBi_mem_rb_rotate_subtree(tree, parent, dir);
-            parent->color = BLACK;
-            grandparent->color = RED;
+            parent->color = BOBi_RB_BLACK;
+            grandparent->color = BOBi_RB_RED;
             return;
         }
 
         //Case #2
-        parent->color = BLACK;
-        uncle->color = BLACK;
-        grandparent->color = RED;
+        parent->color = BOBi_RB_BLACK;
+        uncle->color = BOBi_RB_BLACK;
+        grandparent->color = BOBi_RB_RED;
         node = grandparent;
     } while((parent = node->parent));
 
     //Case #3
 }
 
-static int BOBi_mem_compare_blocks(const BOBi_Free_Memory_Block *a, const BOBi_Free_Memory_Block *b) {
-    if(a->data.size < b->data.size) return -1;
-    if(a->data.size > b->data.size) return 1;
+static int BOBi_mem_compare_blocks(const BOBi_RB_Node *n, const BOBi_RB_Node *m) {
+    if(n->type == m->type) {
+        switch(n->type) {
+            case BOBi_FREE_BLOCK_HEADER: {
+                BOBi_Free_Memory_Block *a = (BOBi_Free_Memory_Block *)n, *b = (BOBi_Free_Memory_Block *)m;
+                if(a->type != b->type) break;
+                switch(a->type) {
+                    case BOBi_FREE_HEADER_CPU:
+                        if(a->cpu.size < b->cpu.size) return -1;
+                        if(a->cpu.size > b->cpu.size) return 1;
 
-    if(a < b) return -1;
-    if(a > b) return 1;
+                        if(a < b) return -1;
+                        if(a > b) return 1;
+                    break;
+                    #ifdef BOB_INCLUDE_VULKAN
+                    case BOBi_FREE_HEADER_VULKAN:
+                        if(a->vulkan.size < b->vulkan.size) return -1;
+                        if(a->vulkan.size > b->vulkan.size) return 1;
+
+                        if(a->vulkan.offset < b->vulkan.offset) return -1;
+                        if(a->vulkan.offset > b->vulkan.offset) return 1;
+                    break;
+                    #endif
+                }
+            }
+            break;
+            case BOBi_ALLOCATED_BLOCK_HEADER: {
+                BOBi_Allocated_Header *a = (BOBi_Allocated_Header *)n, *b = (BOBi_Allocated_Header *)m;
+                if(a->payload_start < b->payload_start) return -1;
+                if(a->payload_start > b->payload_start) return 1;
+            }
+            default: break;
+        }
+    }
 
     return 0;
 }
 
-void BOBi_mem_rb_insert(BOBi_Memory_RB_Tree *tree, BOBi_Free_Memory_Block *b) {
-    BOBi_Free_Memory_Block *parent = NULL;
-    BOBi_Free_Memory_Block **link = &tree->root;
-    BOBi_RB_Direction dir = LEFT;
+void BOBi_mem_rb_insert(BOBi_Memory_RB_Tree *tree, BOBi_RB_Node *b) {
+    BOBi_RB_Node *parent = NULL;
+    BOBi_RB_Node **link = &tree->root;
+    BOBi_RB_Direction dir = BOBi_RB_LEFT;
 
     while(*link) {
         parent = *link;
 
         if(BOBi_mem_compare_blocks(b, parent) < 0) {
             link = &parent->left;
-            dir = LEFT;
+            dir = BOBi_RB_LEFT;
         }
         else {
             link = &parent->right;
-            dir = RIGHT;
+            dir = BOBi_RB_RIGHT;
         }
     }
 
     BOBi_mem_rb_insert_intrn(tree, b, parent, dir);
 }
 
-void BOBi_mem_rb_transplant(BOBi_Memory_RB_Tree *tree, BOBi_Free_Memory_Block *a, BOBi_Free_Memory_Block *b) {
+void BOBi_mem_rb_transplant(BOBi_Memory_RB_Tree *tree, BOBi_RB_Node *a, BOBi_RB_Node *b) {
     if(a->parent == NULL) tree->root = b;
     else if(a == a->parent->left) a->parent->left = b;
     else a->parent->right = b;
     if(b) b->parent = a->parent;
 }
 
-BOBi_Free_Memory_Block *BOBi_mem_rb_tree_minimum(BOBi_Free_Memory_Block *x) {
+BOBi_RB_Node *BOBi_mem_rb_tree_minimum(BOBi_RB_Node *x) {
     while(x->left != NULL) {
         x = x->left;
     }
@@ -1003,43 +1166,42 @@ BOBi_Free_Memory_Block *BOBi_mem_rb_tree_minimum(BOBi_Free_Memory_Block *x) {
     return x;
 }
 
-void BOBi_mem_rb_delete_fixup(BOBi_Memory_RB_Tree *tree, BOBi_Free_Memory_Block *node, BOBi_Free_Memory_Block *parent) {
+void BOBi_mem_rb_delete_fixup(BOBi_Memory_RB_Tree *tree, BOBi_RB_Node *node, BOBi_RB_Node *parent) {
     if(node == NULL || parent == NULL) return;
-    while(node != tree->root && BOBi_mem_rb_color(node) == BLACK) {
-        BOBi_RB_Direction dir = (node == parent->right) ? RIGHT : LEFT;
-        BOBi_Free_Memory_Block *w = parent->child[1-dir];
-        printf("Got free memory block\n");
-        if(BOBi_mem_rb_color(w) == RED) {
-            w->color = BLACK;
-            parent->color = RED;
+    while(node != tree->root && BOBi_mem_rb_color(node) == BOBi_RB_BLACK) {
+        BOBi_RB_Direction dir = (node == parent->right) ? BOBi_RB_RIGHT : BOBi_RB_LEFT;
+        BOBi_RB_Node *w = parent->child[1-dir];
+        if(BOBi_mem_rb_color(w) == BOBi_RB_RED) {
+            w->color = BOBi_RB_BLACK;
+            parent->color = BOBi_RB_RED;
             BOBi_mem_rb_rotate_subtree(tree, parent, dir);
             w = parent->child[1-dir];
         }
-        if(!w || (BOBi_mem_rb_color(w->left) == BLACK && BOBi_mem_rb_color(w->right) == BLACK)) {
-            if(w) w->color = RED;
+        if(!w || (BOBi_mem_rb_color(w->left) == BOBi_RB_BLACK && BOBi_mem_rb_color(w->right) == BOBi_RB_BLACK)) {
+            if(w) w->color = BOBi_RB_RED;
             node = parent;
         }
         else {
-            if(!w || BOBi_mem_rb_color(w->child[1-dir]) == BLACK) {
-                if(w->child[dir]) w->child[dir]->color = BLACK;
-                if(w) w->color = RED;
+            if(!w || BOBi_mem_rb_color(w->child[1-dir]) == BOBi_RB_BLACK) {
+                if(w->child[dir]) w->child[dir]->color = BOBi_RB_BLACK;
+                if(w) w->color = BOBi_RB_RED;
                 BOBi_mem_rb_rotate_subtree(tree, w, 1-dir);
                 w = parent->child[1-dir];
             }
             if(w) w->color = parent->color;
-            parent->color = BLACK;
-            if(w->child[1-dir]) w->child[1-dir]->color = BLACK;
+            parent->color = BOBi_RB_BLACK;
+            if(w->child[1-dir]) w->child[1-dir]->color = BOBi_RB_BLACK;
             BOBi_mem_rb_rotate_subtree(tree, parent, dir);
             node = tree->root;
         }
 
         if(node != tree->root) parent = node->parent;
     }
-    node->color = BLACK;
+    node->color = BOBi_RB_BLACK;
 }
 
-void BOBi_mem_rb_remove(BOBi_Memory_RB_Tree *tree, BOBi_Free_Memory_Block *node) {
-    BOBi_Free_Memory_Block *x, *p, *y = node;
+void BOBi_mem_rb_remove(BOBi_Memory_RB_Tree *tree, BOBi_RB_Node *node) {
+    BOBi_RB_Node *x, *p, *y = node;
     BOBi_RB_Color y_orig_col = y->color;
 
     if(node->left == NULL) {
@@ -1071,7 +1233,7 @@ void BOBi_mem_rb_remove(BOBi_Memory_RB_Tree *tree, BOBi_Free_Memory_Block *node)
         y->left->parent = y;
         y->color = node->color;
     }
-    if(y_orig_col == BLACK) BOBi_mem_rb_delete_fixup(tree, x, p);
+    if(y_orig_col == BOBi_RB_BLACK) BOBi_mem_rb_delete_fixup(tree, x, p);
 
     node->parent = NULL;
     node->left = NULL;
@@ -1086,19 +1248,46 @@ size_t BOBi_fl_compute_payload_offset(BOBi_Free_Memory_Block *block, size_t alig
     return aligned - header_size - start_addr;
 }
 
-uint8_t BOBi_mem_rb_search(BOBi_Memory_RB_Tree *tree, size_t desired_size, size_t alignment, BOBi_Free_Memory_Block **out) {
-    BOBi_Free_Memory_Block *best = NULL;
-    BOBi_Free_Memory_Block *b = tree->root;
+uint8_t BOBi_mem_rb_search(BOBi_Memory_RB_Tree *tree, size_t desired_size, size_t alignment, BOBi_RB_Node **out) {
+    if(tree->root == NULL) return 0;
+    BOBi_RB_Node *best = NULL;
+    BOBi_RB_Node *b = tree->root;
     size_t padding = 0;
 
     while(b) {
-        padding = BOBi_fl_compute_payload_offset(b, alignment, sizeof(BOBi_Allocated_Header));
-        if(b->data.size < desired_size + padding) {
+        BOBi_Free_Memory_Block *block = (BOBi_Free_Memory_Block *)b;
+        padding = BOBi_fl_compute_payload_offset(block, alignment, 0);
+        if(block->cpu.size < desired_size + padding) {
             b = b->right;
         }
         else {
             best = b;
             b = b->left;
+        }
+    }
+
+    if(best == NULL) return 0;
+    *out = best;
+    return 1;
+}
+
+uint8_t BOBi_mem_rb_alloc_header_search(BOBi_Memory_RB_Tree *tree, void *ptr, BOBi_RB_Node **out) {
+    if(tree->root == NULL) return 0;
+    BOBi_RB_Node *best = NULL;
+    BOBi_RB_Node *b = tree->root;
+    size_t padding = 0;
+
+    while(b) {
+        BOBi_Allocated_Header *header = (BOBi_Allocated_Header *)b;
+        if(header->payload_start < ptr) {
+            b = b->right;
+        }
+        else if(header->payload_start > ptr) {
+            b = b->left;
+        }
+        else {
+            best = b;
+            break;
         }
     }
 
@@ -1117,14 +1306,16 @@ uint8_t BOBi_create_fl_allocator(size_t size, BOBi_FL_Allocator *out) {
     if(!out->memory) return 0;
 
     //Setup data structures
-    BOBi_init_mem_dll(&out->list);
-    out->tree = (BOBi_Memory_RB_Tree){0};
+    BOBi_init_mem_dll(&out->list, BOBi_FREE_HEADER_CPU);
+    out->free_header_tree = (BOBi_Memory_RB_Tree){0};
+    BOBi_initialise_metadata_pool(1024, &out->alloc_header_pool);
 
     //Set up the first free memory to account for the entire assigned memory region
     BOBi_Free_Memory_Block *first = (BOBi_Free_Memory_Block *)out->memory;
-    first->data.size = total_sz;
+    first->cpu.size = total_sz;
+    first->type = BOBi_FREE_HEADER_CPU;
     BOBi_mem_dll_insert(first, &out->list.header);
-    BOBi_mem_rb_insert(&out->tree, first);
+    BOBi_mem_rb_insert(&out->free_header_tree, &first->node);
 
     out->size = total_sz;
 
@@ -1133,6 +1324,7 @@ uint8_t BOBi_create_fl_allocator(size_t size, BOBi_FL_Allocator *out) {
 
 //Destroys the allocator
 void BOBi_destroy_fl_allocator(BOBi_FL_Allocator *alloc) {
+    BOBi_destroy_pool_allocator(&alloc->alloc_header_pool);
     free(alloc->memory);
     alloc->memory = NULL;
     alloc->size = 0;
@@ -1140,39 +1332,44 @@ void BOBi_destroy_fl_allocator(BOBi_FL_Allocator *alloc) {
 
 //Main allocation function
 void *BOBi_fl_allocate_memory(BOBi_FL_Allocator *alloc, size_t size, size_t alignment) {
-    size_t allocation_header_size = sizeof(BOBi_Allocated_Header);
     alignment = (alignment > BOBi_MIN_ALIGNMENT) ? alignment : BOBi_MIN_ALIGNMENT; //Set the alignment to a proper value
 
     //Search through the free list for a free block that has enough space to allocate the data
     BOBi_Free_Memory_Block *affected_block;
-    if(!BOBi_mem_rb_search(&alloc->tree, size + allocation_header_size, alignment, &affected_block)) {
+    if(!BOBi_mem_rb_search(&alloc->free_header_tree, size, alignment, (BOBi_RB_Node **)&affected_block)) {
         printf("Not enough memory\n");
         return NULL;
     }
-    size_t payload_offset = BOBi_fl_compute_payload_offset(affected_block, alignment, allocation_header_size);
+    size_t payload_offset = BOBi_fl_compute_payload_offset(affected_block, alignment, 0);
 
-    size_t required_size = size + payload_offset + allocation_header_size;
-    size_t rest = affected_block->data.size - required_size;
+    size_t required_size = size + payload_offset;
+    size_t rest = affected_block->cpu.size - required_size;
 
     //If there is a substantial amount of memory space left over, create a new free region from it
     if(rest >= BOBi_MIN_FREE_BLOCK_SIZE) {
         BOBi_Free_Memory_Block *new_free_block = (BOBi_Free_Memory_Block *)((uint8_t *)affected_block + required_size);
-        new_free_block->data.size = rest;
+        new_free_block->node.type = BOBi_FREE_BLOCK_HEADER;
+        new_free_block->cpu.size = rest;
         BOBi_mem_dll_insert(new_free_block, affected_block);
-        BOBi_mem_rb_insert(&alloc->tree, new_free_block);
+        BOBi_mem_rb_insert(&alloc->free_header_tree, &new_free_block->node);
     }
     //Otherwise just add it on to the end of the current one
     else {
         size += rest;
     }
     BOBi_mem_dll_remove(affected_block); //Get rid of the allocated block
-    BOBi_mem_rb_remove(&alloc->tree, affected_block);
+    BOBi_mem_rb_remove(&alloc->free_header_tree, &affected_block->node);
 
     //Creating the block header and the pointer to start of memory
-    uintptr_t data_addr = (uintptr_t)affected_block + payload_offset + allocation_header_size;
-    uintptr_t header_addr = data_addr - allocation_header_size;
-    ((BOBi_Allocated_Header *)header_addr)->payload_size= size;
-    ((BOBi_Allocated_Header *)header_addr)->payload_offset = payload_offset;
+    uintptr_t data_addr = (uintptr_t)affected_block + payload_offset;
+    BOBi_Allocated_Header *header;
+    if(!BOBi_create_metadata(&alloc->alloc_header_pool, BOBi_ALLOCATED_BLOCK_HEADER, (void **)&header)) return 0;
+    header->node = (BOBi_RB_Node){0};
+    header->node.type = BOBi_ALLOCATED_BLOCK_HEADER;
+    header->payload_start = (void *)data_addr;
+    header->payload_offset = payload_offset;
+    header->payload_size = size;
+    BOBi_mem_rb_insert(&alloc->alloc_header_tree, &header->node);
 
     return (void *)data_addr;
 }
@@ -1180,21 +1377,21 @@ void *BOBi_fl_allocate_memory(BOBi_FL_Allocator *alloc, size_t size, size_t alig
 //Coalesces two adjacent free regions together to form one large free region
 void BOBi_fl_coalesce(BOBi_FL_Allocator *alloc, BOBi_Free_Memory_Block *prev, BOBi_Free_Memory_Block *new_block) {
     //If the next header isn't the sentinel value and the pointers are adjacnet, combine
-    if(new_block->next != &alloc->list.header && (uintptr_t)new_block + new_block->data.size == (uintptr_t)new_block->next) {
-        BOBi_mem_rb_remove(&alloc->tree, new_block);
-        BOBi_mem_rb_remove(&alloc->tree, new_block->next);
+    if(new_block->next != &alloc->list.header && (uintptr_t)new_block + new_block->cpu.size == (uintptr_t)new_block->next) {
+        BOBi_mem_rb_remove(&alloc->free_header_tree, &new_block->node);
+        BOBi_mem_rb_remove(&alloc->free_header_tree, &new_block->next->node);
         BOBi_mem_dll_remove(new_block->next);
-        new_block->data.size += new_block->next->data.size;
-        BOBi_mem_rb_insert(&alloc->tree, new_block);
+        new_block->cpu.size += new_block->next->cpu.size;
+        BOBi_mem_rb_insert(&alloc->free_header_tree, &new_block->node);
     }
 
     //If the previous header isn't the sentinel value and the pointers are adjacnet, combine
-    if(prev != &alloc->list.header && (uintptr_t)prev + prev->data.size == (uintptr_t)new_block) {
-        BOBi_mem_rb_remove(&alloc->tree, prev);
-        BOBi_mem_rb_remove(&alloc->tree, new_block);
+    if(prev != &alloc->list.header && (uintptr_t)prev + prev->cpu.size == (uintptr_t)new_block) {
+        BOBi_mem_rb_remove(&alloc->free_header_tree, &prev->node);
+        BOBi_mem_rb_remove(&alloc->free_header_tree, &new_block->node);
         BOBi_mem_dll_remove(new_block);
-        prev->data.size += new_block->data.size;
-        BOBi_mem_rb_insert(&alloc->tree, prev);
+        prev->cpu.size += new_block->cpu.size;
+        BOBi_mem_rb_insert(&alloc->free_header_tree, &prev->node);
     }
 }
 
@@ -1205,7 +1402,9 @@ void BOBi_fl_create_new_free_block(BOBi_FL_Allocator *alloc, uintptr_t start, si
 
     //Create the new block
     BOBi_Free_Memory_Block *block = (BOBi_Free_Memory_Block *)(start);
-    block->data.size = size;
+    block->node.type = BOBi_FREE_BLOCK_HEADER;
+    block->cpu.size = size;
+    block->type = BOBi_FREE_HEADER_CPU;
     block->next = NULL;
     block->prev = NULL;
 
@@ -1218,7 +1417,7 @@ void BOBi_fl_create_new_free_block(BOBi_FL_Allocator *alloc, uintptr_t start, si
     }
     if(b) {
         BOBi_mem_dll_insert(block, b);
-        BOBi_mem_rb_insert(&alloc->tree, block);
+        BOBi_mem_rb_insert(&alloc->free_header_tree, &block->node);
     }
 
     //Combine it with adjacent regions
@@ -1228,11 +1427,13 @@ void BOBi_fl_create_new_free_block(BOBi_FL_Allocator *alloc, uintptr_t start, si
 //Frees a block of memory
 void BOBi_fl_free_memory(BOBi_FL_Allocator *alloc, void *ptr) {
     uintptr_t curr_addr = (uintptr_t)ptr; //Changing the pointer address into a value
-    uintptr_t header_addr = curr_addr - sizeof(BOBi_Allocated_Header); //Getting the address of the header for the block
-    BOBi_Allocated_Header *allocation_header = (BOBi_Allocated_Header *)header_addr; //Getting the header data for the block
+    BOBi_Allocated_Header *allocation_header;
+    if(!BOBi_mem_rb_alloc_header_search(&alloc->alloc_header_tree, ptr, (BOBi_RB_Node **)&allocation_header)) return; //If there is no allocation header with this pointer, return
 
     //Create a new free memory block to hold the freed region
     BOBi_fl_create_new_free_block(alloc, curr_addr - allocation_header->payload_offset, allocation_header->payload_size + allocation_header->payload_offset);
+    BOBi_mem_rb_remove(&alloc->alloc_header_tree, (BOBi_RB_Node *)allocation_header);
+    BOBi_destroy_metadata(&alloc->alloc_header_pool, BOBi_ALLOCATED_BLOCK_HEADER, allocation_header);
 }
 
 //Function to reallocate the region of memory that starts at ptr to a new region
@@ -1256,8 +1457,10 @@ void BOBi_fl_free_memory(BOBi_FL_Allocator *alloc, void *ptr) {
 void *BOBi_fl_reallocate_memory(BOBi_FL_Allocator *alloc, void *ptr, size_t new_sz, size_t alignment) {
     alignment = alignment < BOBi_MIN_ALIGNMENT ? BOBi_MIN_ALIGNMENT : alignment;
     uintptr_t curr_addr = (uintptr_t)ptr;
-    uintptr_t header_addr = curr_addr - sizeof(BOBi_Allocated_Header);
-    BOBi_Allocated_Header *header = (BOBi_Allocated_Header *)header_addr;
+    //Find the allocated header for the region, if no such header exists, do not reallocate and return NULL
+    BOBi_Allocated_Header *header;
+    if(!BOBi_mem_rb_alloc_header_search(&alloc->alloc_header_tree, ptr, (BOBi_RB_Node **)&header)) return NULL;
+
     uintptr_t block_start = curr_addr - header->payload_offset;
     size_t aligned_size = BOBi_align_up(new_sz, alignment);
 
@@ -1277,7 +1480,7 @@ void *BOBi_fl_reallocate_memory(BOBi_FL_Allocator *alloc, void *ptr, size_t new_
     else {
         size_t needed = aligned_size - header->payload_size; //How much data we need to fit
 
-        //Find adjacent free blocks (if they exists)
+        //Find adjacent free blocks (if they exist)
         uintptr_t next_block = curr_addr + header->payload_size; //The address of where the next free block should be
         BOBi_Free_Memory_Block *foundr = NULL; //Free right block
         BOBi_Free_Memory_Block *foundl = NULL; //Free left block
@@ -1289,7 +1492,7 @@ void *BOBi_fl_reallocate_memory(BOBi_FL_Allocator *alloc, void *ptr, size_t new_
                 foundr = b->next;
                 break;
             }
-            else if(block_start == (uintptr_t)b->next + b->data.size) foundl = b->next;
+            else if(block_start == (uintptr_t)b->next + b->cpu.size) foundl = b->next;
 
             b = b->next;
         }
@@ -1299,25 +1502,25 @@ void *BOBi_fl_reallocate_memory(BOBi_FL_Allocator *alloc, void *ptr, size_t new_
         size_t required = aligned_size;
         size_t available = header->payload_offset + header->payload_size;
         if(foundl != NULL) {
-            offset = BOBi_fl_compute_payload_offset(foundl, alignment, sizeof(BOBi_Allocated_Header));
-            available += foundl->data.size;
+            offset = BOBi_fl_compute_payload_offset(foundl, alignment, 0);
+            available += foundl->cpu.size;
             required += offset;
         }
-        if(foundr) available += foundr->data.size;
+        if(foundr) available += foundr->cpu.size;
 
         //Size is growing, current block isn't big enough, but the next block is free
         //and has enough space to fit the rest of the required data
-        if(foundr != NULL && foundr->data.size >= needed) {
+        if(foundr != NULL && foundr->cpu.size >= needed) {
             BOBi_mem_dll_remove(foundr);
-            BOBi_mem_rb_remove(&alloc->tree, foundr);
+            BOBi_mem_rb_remove(&alloc->free_header_tree, &foundr->node);
 
-            size_t remainder = foundr->data.size - needed;
+            size_t remainder = foundr->cpu.size - needed;
             //If the new data block is too large keep the remainder as a free block
             if(remainder > BOBi_MIN_FREE_BLOCK_SIZE) {
                 BOBi_fl_create_new_free_block(alloc, next_block + needed, remainder);
-                foundr->data.size = needed;
+                foundr->cpu.size = needed;
             }
-            header->payload_size += foundr->data.size;
+            header->payload_size += foundr->cpu.size;
             return ptr;
         }
         //Size is growing, current block isn't big enough, but both previous block is free
@@ -1326,10 +1529,10 @@ void *BOBi_fl_reallocate_memory(BOBi_FL_Allocator *alloc, void *ptr, size_t new_
         else if (foundl != NULL && available >= required) {
             //Get rid of all of the old blocks
             BOBi_mem_dll_remove(foundl);
-            BOBi_mem_rb_remove(&alloc->tree, foundl);
+            BOBi_mem_rb_remove(&alloc->free_header_tree, &foundl->node);
             if(foundr != NULL) {
                 BOBi_mem_dll_remove(foundr);
-                BOBi_mem_rb_remove(&alloc->tree, foundr);
+                BOBi_mem_rb_remove(&alloc->free_header_tree, &foundr->node);
             }
 
             //Compute the new allocated block values
@@ -1344,10 +1547,12 @@ void *BOBi_fl_reallocate_memory(BOBi_FL_Allocator *alloc, void *ptr, size_t new_
             else aligned_size += remainder;
 
             //Create the new allocated region and copy the data into it
-            BOBi_Allocated_Header *new_header = (BOBi_Allocated_Header *)(new_start - sizeof(BOBi_Allocated_Header));
-            new_header->payload_size = aligned_size;
-            new_header->payload_offset = offset;
+            BOBi_mem_rb_remove(&alloc->alloc_header_tree, (BOBi_RB_Node *)header);
             memmove(ptr, (void *)new_start, header->payload_size);
+            header->payload_start = (void *)new_start;
+            header->payload_size = aligned_size;
+            header->payload_offset = offset;
+            BOBi_mem_rb_insert(&alloc->alloc_header_tree, (BOBi_RB_Node *)header);
 
             //Create the new free region if necessary
             if(need_new_block) BOBi_fl_create_new_free_block(alloc, new_start + aligned_size, remainder);
@@ -5975,9 +6180,8 @@ BOBi_Parse_Error_Data error_data = {0};
 void BOBi_append_glyph(BOBi_Font_Impl *font, BOB_Glyph g) {
     if(font->glyphs == NULL) font->glyphs = malloc(sizeof(BOB_Glyph) * font->glyph_capacity);
     if(font->glyph_count >= font->glyph_capacity) {
-        size_t new_cap = (font->glyph_capacity > 0) ? font->glyph_capacity * 2 : 16;
-        font->glyphs = realloc(font->glyphs, new_cap);
-        font->glyph_capacity = new_cap;
+        printf("Exceeded font glyph capacity\n");
+        return;
     }
 
     BOBi_hashmap_add(font->glyph_map, g.codepoint, font->glyph_count);
@@ -5986,9 +6190,8 @@ void BOBi_append_glyph(BOBi_Font_Impl *font, BOB_Glyph g) {
 void BOBi_append_kerning(BOBi_Font_Impl *font, BOB_Kerning k) {
     if(font->kernings == NULL) font->kernings = malloc(sizeof(BOB_Kerning) * font->kerning_capacity);
     if(font->kerning_count >= font->kerning_capacity) {
-        size_t new_cap = (font->kerning_capacity > 0) ? font->kerning_capacity * 2 : 16;
-        font->kernings = realloc(font->kernings, new_cap);
-        font->kerning_capacity = new_cap;
+        printf("Exceeded font kerning capacity\n");
+        return;
     }
 
     BOBi_hashmap_add(font->kerning_map, ((uint64_t)k.first << 32) | k.second, font->kerning_count);
