@@ -26,7 +26,6 @@
 #include <stddef.h>
 
 //TODO: Change the vulkan memory code to use our allocator so the PBO memory mapping works properly -> Maybe a ring allocator to ensure constant memory usage
-//      Reduce number of memory allocations in the Vulkan backend
 //      Fix image transitioning and blending in Vulkan backend
 //      Use texture arrays instead of binding textures every draw call 
 //      Let quads have rounded corners
@@ -564,6 +563,19 @@ typedef struct {
     size_t size;
 } BOBi_FL_Allocator;
 
+#ifdef BOB_INCLUDE_VULKAN
+//Our Free List Allocator for Vulkan memory allocations
+typedef struct {
+    BOBi_Memory_Doubly_Linked_List list;
+    BOBi_Memory_RB_Tree tree;
+    BOBi_Metadata_Pool free_header_pool;
+    VkDeviceMemory memory;
+    VkDeviceSize size;
+    VkDevice device;
+    VkMemoryType type;
+} BOBi_vk_FL_Allocator;
+#endif
+
 //Data structure to hold data about a single render vertex
 typedef struct {
     BOB_Vector4 colour; //The colour of the vertex
@@ -898,6 +910,7 @@ void BOB_arena_clear(BOBi_Arena *arena) {
 // =================================================== FREE LIST ALLOCATOR IMPLEMENTATION ===========================================================
 
 //TODO: Figure out what happens when the pool allocator runs out of space
+
 //Initialises the pool allocator and all of the nodes in the linked list that make it up
 uint8_t BOBi_initialise_metadata_pool(size_t capacity, BOBi_Metadata_Pool *out) {
     //Allocate the memory region to store the data
@@ -1242,10 +1255,8 @@ void BOBi_mem_rb_remove(BOBi_Memory_RB_Tree *tree, BOBi_RB_Node *node) {
 
 //Helper function to compute the aligned padding we will need to add after the block header to ensure the
 //memory region allocated after it has its start aligned
-size_t BOBi_fl_compute_payload_offset(BOBi_Free_Memory_Block *block, size_t alignment, size_t header_size) {
-    uintptr_t start_addr = (uintptr_t)block;
-    uintptr_t aligned = BOBi_align_up(start_addr + header_size, alignment);
-    return aligned - header_size - start_addr;
+size_t BOBi_fl_compute_payload_offset(uintptr_t start, size_t alignment) {
+    return BOBi_align_up(start, alignment) - start;
 }
 
 uint8_t BOBi_mem_rb_search(BOBi_Memory_RB_Tree *tree, size_t desired_size, size_t alignment, BOBi_RB_Node **out) {
@@ -1256,7 +1267,7 @@ uint8_t BOBi_mem_rb_search(BOBi_Memory_RB_Tree *tree, size_t desired_size, size_
 
     while(b) {
         BOBi_Free_Memory_Block *block = (BOBi_Free_Memory_Block *)b;
-        padding = BOBi_fl_compute_payload_offset(block, alignment, 0);
+        padding = BOBi_fl_compute_payload_offset((uintptr_t)block, alignment);
         if(block->cpu.size < desired_size + padding) {
             b = b->right;
         }
@@ -1340,7 +1351,7 @@ void *BOBi_fl_allocate_memory(BOBi_FL_Allocator *alloc, size_t size, size_t alig
         printf("Not enough memory\n");
         return NULL;
     }
-    size_t payload_offset = BOBi_fl_compute_payload_offset(affected_block, alignment, 0);
+    size_t payload_offset = BOBi_fl_compute_payload_offset((uintptr_t)affected_block, alignment);
 
     size_t required_size = size + payload_offset;
     size_t rest = affected_block->cpu.size - required_size;
@@ -1502,7 +1513,7 @@ void *BOBi_fl_reallocate_memory(BOBi_FL_Allocator *alloc, void *ptr, size_t new_
         size_t required = aligned_size;
         size_t available = header->payload_offset + header->payload_size;
         if(foundl != NULL) {
-            offset = BOBi_fl_compute_payload_offset(foundl, alignment, 0);
+            offset = BOBi_fl_compute_payload_offset((uintptr_t)foundl, alignment);
             available += foundl->cpu.size;
             required += offset;
         }
@@ -2411,28 +2422,22 @@ unsigned char shader_vert_spv[] = {
 };
 unsigned int shader_vert_spv_len = 1700;
 
-//Validation layers we are using. TODO: Figure out memory leaks
+//Validation layers we are using.
 const char *validation_layers[] = {"VK_LAYER_KHRONOS_validation"};
 size_t num_validation_layers = 1;
 //Extensions we are using
 const char *required_device_extensions[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME}; //Need the swapchain extension for drawing surfaces to a window
 size_t num_required_device_extensions = 1;
 
-BOBi_Render_Vertex vertices[4] = {
-    (BOBi_Render_Vertex){.pos = {-0.5f, -0.5f}},
-    (BOBi_Render_Vertex){.pos = {-0.5f,  0.5f}},
-    (BOBi_Render_Vertex){.pos = { 0.5f,  0.5f}},
-    (BOBi_Render_Vertex){.pos = { 0.5f, -0.5f}},
-};
-size_t num_vertices = 4;
-uint32_t indices[6] = {
-    0,1,3,1,2,3
-};
-size_t num_indices = 6;
-BOBi_Vulkan_Buffer index_buf;
-BOBi_Vulkan_Buffer vertex_buf;
+//Allocation header returned to the user
+typedef struct {
+    VkDeviceMemory memory; //Vulkan memory used
+    VkDeviceSize size; //Size of usable data stored in the block aligned up to the requested alignment. THIS DOES NOT STORE THE ORIGINAL REQUESTED SIZE
+    VkDeviceSize offset; //Offset from start of memory block
+    VkDeviceSize padding; //Padding placed in front of the memory region to ensure that it is aligned
+} BOBi_vk_Allocation_Header;
 
-//Not really used ig?
+//TODO: Integrate into a wider debugging interface
 #ifdef NDEBUG
 #define ENABLE_VALIDATION_LAYERS 0
 #else
@@ -2465,6 +2470,149 @@ BOBi_Vulkan_Buffer vertex_buf;
         return 0;                                        \
     }                                                    \
 } while(0)
+
+// VULKAN ALLOCATOR FUNCTIONS
+
+//Initialises the allocator
+uint8_t BOBi_vk_initialise_allocator(size_t size, VkDevice device, BOBi_vk_FL_Allocator *out) {
+    //Actual assinged memory region is the region + the size of the header to track it
+    size_t total_sz = size;
+
+    VkMemoryAllocateInfo alloc_info = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = NULL, .allocationSize = total_sz };
+    VULKAN_ERROR(vkAllocateMemory(device, &alloc_info, NULL, &out->memory), "Failed to allocate initial memory\n");
+
+    //Setup data structures
+    BOBi_init_mem_dll(&out->list, BOBi_FREE_HEADER_VULKAN);
+    out->tree = (BOBi_Memory_RB_Tree){0};
+    BOBi_initialise_metadata_pool(1024, &out->free_header_pool);
+
+    //Set up the first free memory to account for the entire assigned memory region
+    BOBi_Free_Memory_Block *first;
+    if(!BOBi_create_metadata(&out->free_header_pool, BOBi_FREE_BLOCK_HEADER, (void **)&first)) return 0;
+    first->vulkan.size = total_sz;
+    first->vulkan.offset = 0;
+    BOBi_mem_dll_insert(first, &out->list.header);
+    BOBi_mem_rb_insert(&out->tree, &first->node);
+
+    out->size = total_sz;
+    out->device = device;
+
+    return 1;
+}
+
+//Destroys the allocator
+void BOBi_vk_destroy_allocator(BOBi_vk_FL_Allocator *alloc, VkDevice device) {
+    BOBi_destroy_pool_allocator(&alloc->free_header_pool);
+    vkFreeMemory(device, alloc->memory, NULL);
+    alloc->memory = NULL;
+    alloc->size = 0;
+}
+
+void BOBi_vk_destroy_free_block(BOBi_vk_FL_Allocator *alloc, BOBi_Free_Memory_Block *block) {
+    BOBi_mem_dll_remove(block);
+    BOBi_mem_rb_remove(&alloc->tree, &block->node);
+    BOBi_destroy_metadata(&alloc->free_header_pool, BOBi_FREE_BLOCK_HEADER, block);
+}
+
+//Main allocation function
+uint8_t BOBi_vk_allocate_memory(BOBi_vk_FL_Allocator *alloc, size_t size, size_t alignment, BOBi_vk_Allocation_Header **out_alloc) {
+    alignment = (alignment > BOBi_MIN_ALIGNMENT) ? alignment : BOBi_MIN_ALIGNMENT; //Set the alignment to a proper value
+
+    //Search through the free list for a free block that has enough space to allocate the data
+    BOBi_Free_Memory_Block *affected_block;
+    if(!BOBi_mem_rb_search(&alloc->tree, size, alignment, (BOBi_RB_Node **)&affected_block)) {
+        printf("Not enough memory\n");
+        return 0;
+    }
+    size_t payload_offset = BOBi_fl_compute_payload_offset(affected_block->vulkan.offset, alignment);
+
+    size_t required_size = size + payload_offset;
+    size_t rest = affected_block->vulkan.size - required_size;
+
+    //If there is a substantial amount of memory space left over, create a new free region from it
+    if(rest >= BOBi_MIN_FREE_BLOCK_SIZE) {
+        BOBi_Free_Memory_Block *new_free_block;
+        if(!BOBi_create_metadata(&alloc->free_header_pool, BOBi_FREE_BLOCK_HEADER, (void **)&new_free_block)) return 0;
+        new_free_block->vulkan.size = rest;
+        new_free_block->vulkan.offset = affected_block->vulkan.offset + required_size;
+        BOBi_mem_dll_insert(new_free_block, affected_block);
+        BOBi_mem_rb_insert(&alloc->tree, &new_free_block->node);
+    }
+    //Otherwise just add it on to the end of the current one
+    else {
+        size += rest;
+    }
+    //Creating the block header and the pointer to start of memory
+    (*out_alloc)->memory = alloc->memory;
+    (*out_alloc)->offset = affected_block->vulkan.offset + payload_offset;
+    (*out_alloc)->size = size;
+    (*out_alloc)->padding = payload_offset;
+
+    //Destroy the affected block
+    BOBi_vk_destroy_free_block(alloc, affected_block);
+    return 1;
+}
+
+//Coalesces two adjacent free regions together to form one large free region
+void BOBi_vk_coalesce(BOBi_vk_FL_Allocator *alloc, BOBi_Free_Memory_Block *prev, BOBi_Free_Memory_Block *new_block) {
+    //If the next header isn't the sentinel value and the pointers are adjacnet, combine
+    if(new_block->next != &alloc->list.header && new_block->vulkan.offset + new_block->vulkan.size == new_block->next->vulkan.offset) {
+        BOBi_Free_Memory_Block *next = new_block->next;
+        BOBi_mem_rb_remove(&alloc->tree, &new_block->node);
+        BOBi_vk_destroy_free_block(alloc, next);
+        new_block->vulkan.size += next->vulkan.size;
+        BOBi_mem_rb_insert(&alloc->tree, &new_block->node);
+    }
+
+    //If the previous header isn't the sentinel value and the pointers are adjacnet, combine
+    if(prev != &alloc->list.header && prev->vulkan.offset + prev->vulkan.size == new_block->vulkan.offset) {
+        BOBi_mem_rb_remove(&alloc->tree, &prev->node);
+        BOBi_vk_destroy_free_block(alloc, new_block);
+        prev->vulkan.size += new_block->vulkan.size;
+        BOBi_mem_rb_insert(&alloc->tree, &prev->node);
+    }
+}
+
+//Helper function to create a new free block at the given start address
+//with the given size. Only blocks of size at least MIN_FREE_BLOCK_SIZE will be created
+void create_new_free_block(BOBi_vk_FL_Allocator *alloc, uintptr_t start, size_t size) {
+    if(size < BOBi_MIN_FREE_BLOCK_SIZE) return; //Early exit
+
+    //Create the new block
+    BOBi_Free_Memory_Block *block;
+    if(!BOBi_create_metadata(&alloc->free_header_pool, BOBi_FREE_BLOCK_HEADER, (void **)&block)) return;
+    block->vulkan.size = size;
+    block->vulkan.offset = start;
+    block->next = NULL;
+    block->prev = NULL;
+
+    //Seach where to place it in the linked list
+    BOBi_Free_Memory_Block *b = &alloc->list.header;
+    while(b->next != &alloc->list.header) {
+        if(block->vulkan.offset < b->next->vulkan.offset) break;
+
+        b = b->next;
+    }
+    if(b) {
+        BOBi_mem_dll_insert(block, b);
+        BOBi_mem_rb_insert(&alloc->tree, &block->node);
+    }
+
+    //Combine it with adjacent regions
+    BOBi_vk_coalesce(alloc, b, block);
+}
+
+//Frees a block of memory
+void free_memory(BOBi_vk_FL_Allocator *alloc, BOBi_vk_Allocation_Header *ptr) {
+    //Create a new free memory block to hold the freed region
+    create_new_free_block(alloc, ptr->offset, ptr->size);
+    ptr->memory = VK_NULL_HANDLE;
+    ptr->offset = 0;
+    ptr->padding = 0;
+    ptr->size = 0;
+}
+
+// VULKAN BACKEND
 
 //A vertex binding describes the rate at which to load data from memory throughout the vertices
 VkVertexInputBindingDescription BOBi_vk_get_binding_desc() {
