@@ -421,9 +421,35 @@ typedef struct {
 #include <vulkan/vulkan.h>
 #include <vulkan/vulkan_core.h>
 
+typedef enum {
+    BOBi_VK_DEVICE_LOCAL_IMAGE_COLOUR_MEMORY,
+    BOBi_VK_DEVICE_LOCAL_IMAGE_DEPTH_MEMORY,
+    BOBi_VK_DEVICE_LOCAL_VERTEX_BUFFER_MEMORY,
+    BOBi_VK_DEVICE_LOCAL_INDEX_BUFFER_MEMORY,
+    BOBi_VK_CPU_ACCESSIBLE_BUFFER_MEMORY,
+    BOBi_VK_NUM_MEMORY_TYPES,
+} BOBi_vk_Alloc_Memory_Type;
+
+//Allocation header returned to the user
+typedef struct {
+    VkDeviceMemory memory; //Vulkan memory used
+    VkDeviceSize size; //Size of usable data stored in the block aligned up to the requested alignment. THIS DOES NOT STORE THE ORIGINAL REQUESTED SIZE
+    union {
+        struct {
+            VkDeviceSize offset; //Offset from start of memory block
+            VkDeviceSize padding; //Padding placed in front of the memory region to ensure that it is aligned
+        } device_local;
+        struct {
+            size_t pool_idx;
+        } cpu_acc;
+    };
+    BOBi_vk_Alloc_Memory_Type type;
+} BOBi_vk_Allocation_Header;
+
 typedef struct {
     VkBuffer buffer;
-    VkDeviceMemory memory;
+    BOBi_vk_Allocation_Header mem;
+    // VkDeviceMemory memory;
 } BOBi_Vulkan_Buffer;
 
 typedef struct {
@@ -574,6 +600,45 @@ typedef struct {
     VkDevice device;
     VkMemoryType type;
 } BOBi_vk_FL_Allocator;
+
+//TODO: Handling different Vulkan Memory types:
+//      Pretty good blog post on the topic: https://blog.io7m.com/2023/11/11/vulkan-memory-allocation.xhtml
+//      AFAIK each GPU can have different memory regions. This means that there are different memory heaps you can access, with different properties
+//      Depending on what type of memory flags you require from your memory region, you will be pointed towards a different heap.
+//      Therefore we need to allocate several different arenas if buffer and image memory points to different heaps
+//      Since we know beforehand what memory properties different allocations in our code require, can just preallocate the arenas on memory startup
+//      And since there should only be a handful of different heaps per gpu, can just stick them into an array and linearly search them for finding the one that matches our required type
+//      From what I can tell from testing, we should only have two types of GPU memory in BOB: GPU local memory (VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) used by the on-gpu index and vertex buffers as well as images, and CPU-visible memory (VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) which is used by staging buffers/pbos
+//      So we can just make two different arenas, one for each type, and this acheives our separation nicely
+
+//Individual pool of memory used by the Vulkan pool allocator
+typedef struct {
+    VkDeviceMemory memory; //Memory region of this pool
+    VkDeviceSize used; //How much of it is used
+} BOBi_vk_Memory_Pool;
+
+//Pool allocator. Index sizes are uint16_t since the number of concurrent allocations in a vulkan program is supposed to be around 4096
+//Currently the allocator is intended to only have one allocation per pool. If that changes will just integrate the FL allocator into it
+typedef struct {
+    BOBi_vk_Memory_Pool *memory_pools; //Each individual pool of memory in the allocator
+    uint16_t *free_list; //Circular array of indicies of the memory pools not currently in use
+    uint16_t *used_list; //Circular array of indicies of the memory pools in use
+    VkDeviceSize pool_memory_cap; //What is the memory capacity of each pool. This is same for all so can keep it in the main allcoator
+    uint16_t free_ptr; //Pointer to the head of the free_list array
+    uint16_t used_ptr; //Pointer to head of the used_list array
+    uint16_t num_free; //Size of the free_list array
+    uint16_t num_used; //Size of the used_list array
+} BOBi_vk_Pool_Allocator;
+
+//Something like this:
+typedef struct {
+    size_t heap_map[BOBi_VK_NUM_MEMORY_TYPES];
+    BOBi_vk_FL_Allocator *memory_heaps;
+    BOBi_vk_Pool_Allocator host_memory_pools;
+    size_t num_heaps;
+    size_t buffer_image_granularity;
+} BOBi_vk_Allocator;
+
 #endif
 
 //Data structure to hold data about a single render vertex
@@ -799,6 +864,8 @@ typedef struct {
             VkSampler sampler;
             VkDescriptorPool descriptor_pool;
             VkDescriptorSetLayout default_tex_layout;
+
+            BOBi_vk_Allocator vulkan_memory;
 
             //TODO: FIX VULKAN MEMORY
             BOBi_Vulkan_Buffer vert_staging_buf;
@@ -1267,13 +1334,31 @@ uint8_t BOBi_mem_rb_search(BOBi_Memory_RB_Tree *tree, size_t desired_size, size_
 
     while(b) {
         BOBi_Free_Memory_Block *block = (BOBi_Free_Memory_Block *)b;
-        padding = BOBi_fl_compute_payload_offset((uintptr_t)block, alignment);
-        if(block->cpu.size < desired_size + padding) {
-            b = b->right;
-        }
-        else {
-            best = b;
-            b = b->left;
+        printf("Type: %hhu\n", block->type);
+        switch(block->type) {
+            case BOBi_FREE_HEADER_CPU: {
+                padding = BOBi_fl_compute_payload_offset((uintptr_t)block, alignment);
+                if(block->cpu.size < desired_size + padding) {
+                    b = b->right;
+                }
+                else {
+                    best = b;
+                    b = b->left;
+                }
+                break;
+            }
+            #ifdef BOB_INCLUDE_VULKAN
+            case BOBi_FREE_HEADER_VULKAN: {
+                if(block->vulkan.size < desired_size) {
+                    b = b->right;
+                }
+                else {
+                    best = b;
+                    b = b->left;
+                }
+                break;
+            }
+            #endif
         }
     }
 
@@ -2429,14 +2514,6 @@ size_t num_validation_layers = 1;
 const char *required_device_extensions[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME}; //Need the swapchain extension for drawing surfaces to a window
 size_t num_required_device_extensions = 1;
 
-//Allocation header returned to the user
-typedef struct {
-    VkDeviceMemory memory; //Vulkan memory used
-    VkDeviceSize size; //Size of usable data stored in the block aligned up to the requested alignment. THIS DOES NOT STORE THE ORIGINAL REQUESTED SIZE
-    VkDeviceSize offset; //Offset from start of memory block
-    VkDeviceSize padding; //Padding placed in front of the memory region to ensure that it is aligned
-} BOBi_vk_Allocation_Header;
-
 //TODO: Integrate into a wider debugging interface
 #ifdef NDEBUG
 #define ENABLE_VALIDATION_LAYERS 0
@@ -2474,7 +2551,7 @@ typedef struct {
 // VULKAN ALLOCATOR FUNCTIONS
 
 //Initialises the allocator
-uint8_t BOBi_vk_initialise_allocator(size_t size, VkDevice device, BOBi_vk_FL_Allocator *out) {
+uint8_t BOBi_vk_init_fl_alloc(size_t size, VkDevice device, BOBi_vk_FL_Allocator *out) {
     //Actual assinged memory region is the region + the size of the header to track it
     size_t total_sz = size;
 
@@ -2489,6 +2566,8 @@ uint8_t BOBi_vk_initialise_allocator(size_t size, VkDevice device, BOBi_vk_FL_Al
     //Set up the first free memory to account for the entire assigned memory region
     BOBi_Free_Memory_Block *first;
     if(!BOBi_create_metadata(&out->free_header_pool, BOBi_FREE_BLOCK_HEADER, (void **)&first)) return 0;
+    first->type = BOBi_FREE_HEADER_VULKAN;
+    printf("Root type: %hhu\n", first->type);
     first->vulkan.size = total_sz;
     first->vulkan.offset = 0;
     BOBi_mem_dll_insert(first, &out->list.header);
@@ -2501,7 +2580,7 @@ uint8_t BOBi_vk_initialise_allocator(size_t size, VkDevice device, BOBi_vk_FL_Al
 }
 
 //Destroys the allocator
-void BOBi_vk_destroy_allocator(BOBi_vk_FL_Allocator *alloc, VkDevice device) {
+void BOBi_vk_destroy_fl_alloc(BOBi_vk_FL_Allocator *alloc, VkDevice device) {
     BOBi_destroy_pool_allocator(&alloc->free_header_pool);
     vkFreeMemory(device, alloc->memory, NULL);
     alloc->memory = NULL;
@@ -2512,45 +2591,6 @@ void BOBi_vk_destroy_free_block(BOBi_vk_FL_Allocator *alloc, BOBi_Free_Memory_Bl
     BOBi_mem_dll_remove(block);
     BOBi_mem_rb_remove(&alloc->tree, &block->node);
     BOBi_destroy_metadata(&alloc->free_header_pool, BOBi_FREE_BLOCK_HEADER, block);
-}
-
-//Main allocation function
-uint8_t BOBi_vk_allocate_memory(BOBi_vk_FL_Allocator *alloc, size_t size, size_t alignment, BOBi_vk_Allocation_Header **out_alloc) {
-    alignment = (alignment > BOBi_MIN_ALIGNMENT) ? alignment : BOBi_MIN_ALIGNMENT; //Set the alignment to a proper value
-
-    //Search through the free list for a free block that has enough space to allocate the data
-    BOBi_Free_Memory_Block *affected_block;
-    if(!BOBi_mem_rb_search(&alloc->tree, size, alignment, (BOBi_RB_Node **)&affected_block)) {
-        printf("Not enough memory\n");
-        return 0;
-    }
-    size_t payload_offset = BOBi_fl_compute_payload_offset(affected_block->vulkan.offset, alignment);
-
-    size_t required_size = size + payload_offset;
-    size_t rest = affected_block->vulkan.size - required_size;
-
-    //If there is a substantial amount of memory space left over, create a new free region from it
-    if(rest >= BOBi_MIN_FREE_BLOCK_SIZE) {
-        BOBi_Free_Memory_Block *new_free_block;
-        if(!BOBi_create_metadata(&alloc->free_header_pool, BOBi_FREE_BLOCK_HEADER, (void **)&new_free_block)) return 0;
-        new_free_block->vulkan.size = rest;
-        new_free_block->vulkan.offset = affected_block->vulkan.offset + required_size;
-        BOBi_mem_dll_insert(new_free_block, affected_block);
-        BOBi_mem_rb_insert(&alloc->tree, &new_free_block->node);
-    }
-    //Otherwise just add it on to the end of the current one
-    else {
-        size += rest;
-    }
-    //Creating the block header and the pointer to start of memory
-    (*out_alloc)->memory = alloc->memory;
-    (*out_alloc)->offset = affected_block->vulkan.offset + payload_offset;
-    (*out_alloc)->size = size;
-    (*out_alloc)->padding = payload_offset;
-
-    //Destroy the affected block
-    BOBi_vk_destroy_free_block(alloc, affected_block);
-    return 1;
 }
 
 //Coalesces two adjacent free regions together to form one large free region
@@ -2575,7 +2615,7 @@ void BOBi_vk_coalesce(BOBi_vk_FL_Allocator *alloc, BOBi_Free_Memory_Block *prev,
 
 //Helper function to create a new free block at the given start address
 //with the given size. Only blocks of size at least MIN_FREE_BLOCK_SIZE will be created
-void create_new_free_block(BOBi_vk_FL_Allocator *alloc, uintptr_t start, size_t size) {
+void BOBi_vk_fl_create_new_free_block(BOBi_vk_FL_Allocator *alloc, uintptr_t start, size_t size) {
     if(size < BOBi_MIN_FREE_BLOCK_SIZE) return; //Early exit
 
     //Create the new block
@@ -2585,6 +2625,7 @@ void create_new_free_block(BOBi_vk_FL_Allocator *alloc, uintptr_t start, size_t 
     block->vulkan.offset = start;
     block->next = NULL;
     block->prev = NULL;
+    block->type = BOBi_FREE_HEADER_VULKAN;
 
     //Seach where to place it in the linked list
     BOBi_Free_Memory_Block *b = &alloc->list.header;
@@ -2602,14 +2643,359 @@ void create_new_free_block(BOBi_vk_FL_Allocator *alloc, uintptr_t start, size_t 
     BOBi_vk_coalesce(alloc, b, block);
 }
 
+//Main allocation function
+uint8_t BOBi_vk_fl_allocate_memory(BOBi_vk_FL_Allocator *alloc, size_t size, size_t alignment, size_t big, BOBi_vk_Allocation_Header *out_alloc) {
+    alignment = (alignment > BOBi_MIN_ALIGNMENT) ? alignment : BOBi_MIN_ALIGNMENT; //Set the alignment to a proper value
+
+    //Search through the free list for a free block that has enough space to allocate the data
+    BOBi_Free_Memory_Block *affected_block;
+    if(!BOBi_mem_rb_search(&alloc->tree, size, alignment, (BOBi_RB_Node **)&affected_block)) {
+        printf("Not enough memory\n");
+        return 0;
+    }
+    size_t payload_offset = BOBi_fl_compute_payload_offset(affected_block->vulkan.offset, alignment);
+
+    size_t required_size = size + payload_offset;
+    required_size = big + required_size - (required_size % big);
+    size_t rest = affected_block->vulkan.size - required_size;
+
+    //If there is a substantial amount of memory space left over, create a new free region from it
+    if(rest >= BOBi_MIN_FREE_BLOCK_SIZE) {
+        BOBi_vk_fl_create_new_free_block(alloc, affected_block->vulkan.offset + required_size, rest);
+    }
+    //Otherwise just add it on to the end of the current one
+    else {
+        size += rest;
+    }
+    //Creating the block header and the pointer to start of memory
+    out_alloc->memory = alloc->memory;
+    out_alloc->device_local.offset = affected_block->vulkan.offset + payload_offset;
+    out_alloc->size = size;
+    out_alloc->device_local.padding = payload_offset;
+
+    //Destroy the affected block
+    BOBi_vk_destroy_free_block(alloc, affected_block);
+    return 1;
+}
+
 //Frees a block of memory
-void free_memory(BOBi_vk_FL_Allocator *alloc, BOBi_vk_Allocation_Header *ptr) {
+void BOBi_vk_fl_free_memory(BOBi_vk_FL_Allocator *alloc, BOBi_vk_Allocation_Header *ptr) {
     //Create a new free memory block to hold the freed region
-    create_new_free_block(alloc, ptr->offset, ptr->size);
+    BOBi_vk_fl_create_new_free_block(alloc, ptr->device_local.offset, ptr->size);
     ptr->memory = VK_NULL_HANDLE;
-    ptr->offset = 0;
-    ptr->padding = 0;
+    ptr->device_local.offset = 0;
+    ptr->device_local.padding = 0;
     ptr->size = 0;
+}
+
+//VULKAN POOL ALLOCATOR
+
+void BOBi_vk_destroy_pool_allocator(BOBi_vk_Pool_Allocator *alloc, VkDevice device) {
+    for(size_t i = 0; i < alloc->num_free + alloc->num_used; i++) {
+        vkFreeMemory(device, alloc->memory_pools[i].memory, NULL);
+    }
+
+    free(alloc->memory_pools);
+    free(alloc->free_list);
+    free(alloc->used_list);
+    alloc->memory_pools = NULL;
+    alloc->free_list = NULL;
+    alloc->used_list = NULL;
+}
+
+//Initialises the pool allocator and all of the memory pools
+uint8_t BOBi_vk_init_pool_allocator(VkDevice device, VkDeviceSize num_pools, VkDeviceSize pool_mem_sz, uint32_t memory_type, BOBi_vk_Pool_Allocator *out) {
+    out->pool_memory_cap = pool_mem_sz;
+    out->num_free = num_pools;
+    out->num_used = 0;
+    out->free_ptr = 0;
+    out->used_ptr = 0;
+
+    out->memory_pools = malloc(sizeof(BOBi_vk_Memory_Pool) * num_pools);
+    out->free_list = malloc(sizeof(uint16_t) * num_pools);
+    out->used_list = malloc(sizeof(uint16_t) * num_pools);
+
+    VkMemoryAllocateInfo info = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = NULL,
+        .allocationSize = pool_mem_sz, .memoryTypeIndex = memory_type
+    };
+
+    for(size_t i = 0; i < num_pools; i++) {
+        out->free_list[i] = i;
+        VULKAN_ERROR(vkAllocateMemory(device, &info, NULL, &out->memory_pools[i].memory), "Failed to allocate memory for pool", BOBi_vk_destroy_pool_allocator(out, device));
+        out->memory_pools[i].used = 0;
+    }
+
+    return 1;
+}
+
+uint8_t BOBi_vk_allocate_pool_mem(BOBi_vk_Pool_Allocator *alloc, VkDeviceSize mem_sz, uint16_t *pool_idx) {
+    if(alloc->num_free == 0) {
+        printf("No free memory pools\n");
+        return 0;
+    }
+
+    *pool_idx = alloc->free_list[alloc->free_ptr];
+    alloc->memory_pools[*pool_idx].used = mem_sz;
+
+    alloc->num_free--;
+    alloc->num_used++;
+    alloc->free_ptr = (alloc->free_ptr + 1) % (alloc->num_free + alloc->num_used);
+
+    return 1;
+}
+
+uint8_t BOBi_vk_free_pool_mem(BOBi_vk_Pool_Allocator *alloc, uint16_t pool_idx) {
+    if(alloc->num_used == 0) {
+        printf("No used memory pools\n");
+        return 0;
+    }
+
+    for(size_t i = 0; i < alloc->num_used; i++) {
+        size_t lst_idx = (alloc->used_ptr + 1) % (alloc->num_used + alloc->num_free); //Calculate the circular index
+
+        //Check if we have found the desired memory pool
+        if(alloc->used_list[lst_idx] == pool_idx) {
+            //Place the last element of the used list in the current free slot
+            alloc->used_list[lst_idx] = alloc->used_list[(alloc->used_ptr + alloc->num_used-1) % (alloc->num_free + alloc->num_used)];
+
+            //Change sizes
+            alloc->num_free++;
+            alloc->num_used--;
+
+            //Add the pool index to the free list
+            alloc->free_list[(alloc->free_ptr + alloc->num_free) % (alloc->num_free + alloc->num_used)] = pool_idx;
+            alloc->memory_pools[pool_idx].used = 0; //Reset memory size
+            break;
+        }
+    }
+
+    return 1;
+}
+
+//MAIN VULKAN ALLCOATOR
+
+//Gets the index of the memory type that matches our desired properties
+uint8_t BOBi_vk_find_memory_type(BOBi_Renderer_Impl *renderer, uint32_t type_filter, VkMemoryPropertyFlags properties, uint32_t *out) {
+    //Getting the properties used on our current physical device
+    VkPhysicalDeviceMemoryProperties mem_properties;
+    vkGetPhysicalDeviceMemoryProperties(renderer->vulkan.phy_device, &mem_properties);
+
+    //Search to find the one that matches our desired properties
+    for(size_t i = 0; i < mem_properties.memoryTypeCount; i++) {
+        if((type_filter & (1 << i)) && (mem_properties.memoryTypes[i].propertyFlags & properties) == properties) {
+            *out = i;
+            return 1;
+        }
+    }
+
+    //Throw an error on failure
+    printf("Failed to find suitable memory type\n");
+    return 0;
+}
+
+// NOTE: How Vulkan memory allocation works, and my strategy for implementing a vulkan allocator:
+//       Sources:
+//       https://blog.io7m.com/2023/11/11/vulkan-memory-allocation.xhtml
+//       https://stackoverflow.com/questions/36436493/could-someone-help-me-understand-vkphysicaldevicememoryproperties
+//       https://stackoverflow.com/questions/55445653/deriving-the-vkmemoryrequirements
+//       https://kylehalladay.com/blog/tutorial/2017/12/13/Custom-Allocators-Vulkan.html
+//       Vulkan memory can access several heaps, unlike the CPU, which presents access to just one.
+//       This is because the GPU can have device local VRAM, but can also access some amounts of CPU RAM (for memory mapping)
+//       On some devices these could be the same thing (like some integrated GPUs), and others may have these as distinct regions
+//       and perhaps also have other accessible heaps on top of this.
+//       Therefore when allocating memory in Vulkan, you need to tell it what kind of memory you would like to allocate (device local, host visible etc.)
+//       and then it points you towards which heap you should use.
+//       However, this is not the end yet, since even within the same heap, there will be different types of allocation for different types of memory (heaps and buffers),
+//       and so those need to be separated when building an allocator as well
+//       But even within the same object group, there will still be different allocation types. Images that have different tiling properties will be allocated differently,
+//       and colour images will be allocated differently from stencil/depth images
+//       In order to make the Vulkan allocator I am going to write for BOB manageable and not just a poor reimplementation of VMA, I have decided to limit the number
+//       of distinct memory regions to just the types currently used by BOB:
+//       - Device local Index Buffer
+//       - Device local Vertex Buffer
+//       - Device local colour images: All textures supplied by the user
+//       - Device local depth images
+//       - Host visible buffers: Staging/pbo buffers
+//       Currently all images in BOB use the same tiling (VK_TILING_OPTIMAL) so there should be no issue within these regions (however if that changes it will become an issue)
+//       Device local regions can be allocated to the same heap(s) depending on their memory type. Before allocation, we can simply check the number of unique memory types each
+//       of the device local regions requires and allocate accordingly, create an internal map of types to regions, and suballocate from those regions using BOB's type system
+//       in the future
+//       Host visible buffers will have to use a pool allocator. The reason for this is that Vulkan does not allow memory mapping from the same region multiple times, and since
+//       Host visible buffers are always for pbos/staging buffers, we need to take into account that there will have to be dedicated allocations for each of these
+//       Also, need to be careful when allocating device local images/buffers next to each other to take into account buffer-image granularity:
+//       https://docs.vulkan.org/spec/latest/chapters/resources.html#resources-bufferimagegranularity
+//       What defines linear/non-linear objects: https://docs.vulkan.org/spec/latest/appendices/glossary.html#glossary-linear-resource
+
+//TODO: Figure out what we are going to do about uniform buffers
+//      Change the free list allocator to account for image-buffer granularity
+uint8_t BOBi_vk_alloc_init(BOBi_Renderer_Impl *renderer, VkDeviceSize vert_buf_sz, VkDeviceSize indx_buf_sz, VkDeviceSize local_cimg_mem_sz, VkDeviceSize local_dimg_mem_sz, VkDeviceSize pool_reg_sz, size_t pool_sz, BOBi_vk_Allocator *alloc) {
+    //Getting and allocating the number of distinct memory heaps:
+    VkPhysicalDeviceMemoryProperties mem_prop;
+    vkGetPhysicalDeviceMemoryProperties(renderer->vulkan.phy_device, &mem_prop);
+
+    alloc->memory_heaps = malloc(sizeof(BOBi_vk_FL_Allocator) * mem_prop.memoryTypeCount);
+    memset(alloc->memory_heaps, 0, sizeof(BOBi_vk_FL_Allocator) * mem_prop.memoryTypeCount);
+    alloc->num_heaps = mem_prop.memoryTypeCount;
+
+    VkPhysicalDeviceProperties prop;
+    vkGetPhysicalDeviceProperties(renderer->vulkan.phy_device, &prop);
+    alloc->buffer_image_granularity = prop.limits.bufferImageGranularity;
+
+    //Allocating device local colour image (texture) memory.
+    //When allocating a big Vulkan region, you need to create an example object so that Vulkan can figure out what heap fits its memory properties and point you towards it
+
+    VkImage sample_image; //Var that holds this sample image
+    //Creating the struct that holds the image properties
+    VkImageCreateInfo image_info = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .pNext = NULL,
+        .imageType = VK_IMAGE_TYPE_2D,
+        .mipLevels = 1, .arrayLayers = 1,
+        .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .usage = VK_IMAGE_ASPECT_COLOR_BIT, .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+    };
+    VULKAN_ERROR(vkCreateImage(renderer->vulkan.log_device, &image_info, NULL, &sample_image), "Failed to create image");
+
+    //Get the memory requirements to store the image
+    VkMemoryRequirements mem_req;
+    vkGetImageMemoryRequirements(renderer->vulkan.log_device, sample_image, &mem_req);
+    uint32_t memory_type_index;
+    VULKAN_ERROR(!BOBi_vk_find_memory_type(renderer, mem_req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &memory_type_index), "Failed to find memory type",
+                 vkDestroyImage(renderer->vulkan.log_device, sample_image, NULL););
+
+    alloc->heap_map[BOBi_VK_DEVICE_LOCAL_IMAGE_COLOUR_MEMORY] = memory_type_index;
+    //Round up to next multiple of buffer-image granularity
+    alloc->memory_heaps[memory_type_index].size += alloc->buffer_image_granularity + local_cimg_mem_sz - (local_cimg_mem_sz % alloc->buffer_image_granularity);
+    // VULKAN_ERROR(!BOBi_vk_init_arena(&alloc->memory_heaps[BOBi_VK_DEVICE_LOCAL_IMAGE_COLOUR_MEMORY], local_cimg_mem_sz, renderer->vulkan.log_device, memory_type_index), "Failed to allocate device local memory", vkDestroyImage(renderer->vulkan.log_device, sample_image, NULL););
+
+    vkDestroyImage(renderer->vulkan.log_device, sample_image, NULL);
+
+    //Allocating device local depth image memory
+    image_info.usage = VK_IMAGE_ASPECT_DEPTH_BIT; //Change the usage to be a depth instead of a colour image
+    VULKAN_ERROR(vkCreateImage(renderer->vulkan.log_device, &image_info, NULL, &sample_image), "Failed to create image");
+
+    //Get the memory requirements to store the image
+    vkGetImageMemoryRequirements(renderer->vulkan.log_device, sample_image, &mem_req);
+    VULKAN_ERROR(!BOBi_vk_find_memory_type(renderer, mem_req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &memory_type_index), "Failed to find memory type",
+                 vkDestroyImage(renderer->vulkan.log_device, sample_image, NULL););
+
+    alloc->heap_map[BOBi_VK_DEVICE_LOCAL_IMAGE_DEPTH_MEMORY] = memory_type_index;
+    //Round up to next multiple of buffer-image granularity
+    alloc->memory_heaps[memory_type_index].size += alloc->buffer_image_granularity + local_dimg_mem_sz - (local_dimg_mem_sz % alloc->buffer_image_granularity);
+    // VULKAN_ERROR(!BOBi_vk_init_arena(&alloc->memory_heaps[BOBi_VK_DEVICE_LOCAL_IMAGE_DEPTH_MEMORY], local_dimg_mem_sz, renderer->vulkan.log_device, memory_type_index), "Failed to allocate device local memory", vkDestroyImage(renderer->vulkan.log_device, sample_image, NULL););
+
+    vkDestroyImage(renderer->vulkan.log_device, sample_image, NULL);
+
+    //Allocating device local vertex buffer memory:
+    VkBuffer sample_buf;
+    VkBufferCreateInfo buf_info = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .pNext = NULL,
+        .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, .sharingMode = VK_SHARING_MODE_EXCLUSIVE
+    };
+
+    VULKAN_ERROR(vkCreateBuffer(renderer->vulkan.log_device, &buf_info, NULL, &sample_buf), "Failed to create a buffer");
+
+    //Getting the memory requirements for this buffer
+    vkGetBufferMemoryRequirements(renderer->vulkan.log_device, sample_buf, &mem_req);
+    VULKAN_ERROR(!BOBi_vk_find_memory_type(renderer, mem_req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &memory_type_index), "Failed to find memory type",
+                 vkDestroyBuffer(renderer->vulkan.log_device, sample_buf, NULL));
+
+    alloc->heap_map[BOBi_VK_DEVICE_LOCAL_VERTEX_BUFFER_MEMORY] = memory_type_index;
+    alloc->memory_heaps[memory_type_index].size += alloc->buffer_image_granularity + vert_buf_sz - (vert_buf_sz % alloc->buffer_image_granularity);
+
+    vkDestroyBuffer(renderer->vulkan.log_device, sample_buf, NULL);
+
+    buf_info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+
+    VULKAN_ERROR(vkCreateBuffer(renderer->vulkan.log_device, &buf_info, NULL, &sample_buf), "Failed to create a buffer");
+
+    //Getting the memory requirements for this buffer
+    vkGetBufferMemoryRequirements(renderer->vulkan.log_device, sample_buf, &mem_req);
+    VULKAN_ERROR(!BOBi_vk_find_memory_type(renderer, mem_req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &memory_type_index), "Failed to find memory type",
+                 vkDestroyBuffer(renderer->vulkan.log_device, sample_buf, NULL));
+
+    alloc->heap_map[BOBi_VK_DEVICE_LOCAL_INDEX_BUFFER_MEMORY] = memory_type_index;
+    alloc->memory_heaps[memory_type_index].size += alloc->buffer_image_granularity + indx_buf_sz - (indx_buf_sz % alloc->buffer_image_granularity);
+
+    vkDestroyBuffer(renderer->vulkan.log_device, sample_buf, NULL);
+
+    //Initialising the device local memory
+    for(size_t i = 0; i < alloc->num_heaps; i++) {
+        if(alloc->memory_heaps[i].size != 0) {
+            BOBi_vk_init_fl_alloc(alloc->memory_heaps[i].size, renderer->vulkan.log_device, &alloc->memory_heaps[i]);
+        }
+    }
+
+    //Initialising the host-visible memory pools
+    buf_info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+    VULKAN_ERROR(vkCreateBuffer(renderer->vulkan.log_device, &buf_info, NULL, &sample_buf), "Failed to create a buffer");
+
+    //Getting the memory requirements for this buffer
+    vkGetBufferMemoryRequirements(renderer->vulkan.log_device, sample_buf, &mem_req);
+    VULKAN_ERROR(!BOBi_vk_find_memory_type(renderer, mem_req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &memory_type_index),
+                 "Failed to find memory type", vkDestroyBuffer(renderer->vulkan.log_device, sample_buf, NULL));
+
+    BOBi_vk_init_pool_allocator(renderer->vulkan.log_device, pool_sz, pool_reg_sz, memory_type_index, &alloc->host_memory_pools);
+
+    vkDestroyBuffer(renderer->vulkan.log_device, sample_buf, NULL);
+
+    return 1;
+}
+
+void BOBi_vk_destroy_allocator(BOBi_vk_Allocator *alloc, VkDevice device) {
+    BOBi_vk_destroy_pool_allocator(&alloc->host_memory_pools, device);
+    for(size_t i = 0; i < alloc->num_heaps; i++) {
+        if(alloc->memory_heaps[i].size != 0) {
+            BOBi_vk_destroy_fl_alloc(&alloc->memory_heaps[i], device);
+        }
+    }
+
+    free(alloc->memory_heaps);
+    alloc->memory_heaps = NULL;
+}
+
+// TODO: Take into account buffer-image granularity
+uint8_t BOBi_vk_allocate_mem(BOBi_vk_Allocator *alloc, BOBi_vk_Alloc_Memory_Type type, VkDeviceSize sz, VkDeviceSize alignment, BOBi_vk_Allocation_Header* out) {
+    switch(type) {
+        case BOBi_VK_DEVICE_LOCAL_IMAGE_COLOUR_MEMORY:
+        case BOBi_VK_DEVICE_LOCAL_IMAGE_DEPTH_MEMORY:
+        case BOBi_VK_DEVICE_LOCAL_VERTEX_BUFFER_MEMORY:
+        case BOBi_VK_DEVICE_LOCAL_INDEX_BUFFER_MEMORY:
+            out->type = type;
+            return BOBi_vk_fl_allocate_memory(&alloc->memory_heaps[alloc->heap_map[type]], sz, alignment, alloc->buffer_image_granularity, out);
+        case BOBi_VK_CPU_ACCESSIBLE_BUFFER_MEMORY: {
+            uint16_t idx;
+            if(!BOBi_vk_allocate_pool_mem(&alloc->host_memory_pools, sz, &idx)) return 0;
+
+            out->memory = alloc->host_memory_pools.memory_pools[idx].memory;
+            out->size = sz;
+            out->type = type;
+            out->cpu_acc.pool_idx = idx;
+            break;
+        }
+        default: return 0;
+    }
+
+    return 1;
+}
+
+void BOBi_vk_free_mem(BOBi_vk_Allocator *alloc, BOBi_vk_Allocation_Header *mem) {
+    switch (mem->type) {
+        case BOBi_VK_DEVICE_LOCAL_IMAGE_COLOUR_MEMORY:
+        case BOBi_VK_DEVICE_LOCAL_IMAGE_DEPTH_MEMORY:
+        case BOBi_VK_DEVICE_LOCAL_VERTEX_BUFFER_MEMORY:
+        case BOBi_VK_DEVICE_LOCAL_INDEX_BUFFER_MEMORY:
+            BOBi_vk_fl_free_memory(&alloc->memory_heaps[alloc->heap_map[mem->type]], mem);
+            break;
+        case BOBi_VK_CPU_ACCESSIBLE_BUFFER_MEMORY:
+            BOBi_vk_free_pool_mem(&alloc->host_memory_pools, mem->cpu_acc.pool_idx);
+            mem->memory = VK_NULL_HANDLE;
+            mem->cpu_acc.pool_idx = 0;
+            mem->size = 0;
+            break;
+        default: break;
+    }
 }
 
 // VULKAN BACKEND
@@ -2671,24 +3057,24 @@ uint8_t BOBi_vk_end_single_time_commands(BOBi_Renderer_Impl *renderer, VkCommand
     return 1;
 }
 
-//Gets the index of the memory type that matches our desired properties
-uint8_t BOBi_vk_find_memory_type(BOBi_Renderer_Impl *renderer, uint32_t type_filter, VkMemoryPropertyFlags properties, uint32_t *out) {
-    //Getting the properties used on our current physical device
-    VkPhysicalDeviceMemoryProperties mem_properties;
-    vkGetPhysicalDeviceMemoryProperties(renderer->vulkan.phy_device, &mem_properties);
-
-    //Search to find the one that matches our desired properties
-    for(size_t i = 0; i < mem_properties.memoryTypeCount; i++) {
-        if((type_filter & (1 << i)) && (mem_properties.memoryTypes[i].propertyFlags & properties) == properties) {
-            *out = i;
-            return 1;
-        }
-    }
-
-    //Throw an error on failure
-    printf("Failed to find suitable memory type\n");
-    return 0;
-}
+// //Gets the index of the memory type that matches our desired properties
+// uint8_t BOBi_vk_find_memory_type(BOBi_Renderer_Impl *renderer, uint32_t type_filter, VkMemoryPropertyFlags properties, uint32_t *out) {
+//     //Getting the properties used on our current physical device
+//     VkPhysicalDeviceMemoryProperties mem_properties;
+//     vkGetPhysicalDeviceMemoryProperties(renderer->vulkan.phy_device, &mem_properties);
+//
+//     //Search to find the one that matches our desired properties
+//     for(size_t i = 0; i < mem_properties.memoryTypeCount; i++) {
+//         if((type_filter & (1 << i)) && (mem_properties.memoryTypes[i].propertyFlags & properties) == properties) {
+//             *out = i;
+//             return 1;
+//         }
+//     }
+//
+//     //Throw an error on failure
+//     printf("Failed to find suitable memory type\n");
+//     return 0;
+// }
 
 void BOBi_vk_destroy_image(BOBi_Renderer_Impl *renderer, BOBi_Vulkan_Image *tex) {
     vkWaitForFences(renderer->vulkan.log_device, 1, &renderer->vulkan.draw_fence, VK_TRUE, UINT64_MAX); //Need to wait for the GPU to stop using these resources
@@ -2732,6 +3118,7 @@ uint8_t BOBi_vk_create_image(BOBi_Renderer_Impl *renderer, uint32_t width, uint3
     VkMemoryAllocateInfo alloc_info = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = NULL, .allocationSize = mem_req.size };
     VULKAN_ERROR(!BOBi_vk_find_memory_type(renderer, mem_req.memoryTypeBits, properties, &alloc_info.memoryTypeIndex), "Failed to find memory type",
                  vkDestroyImage(renderer->vulkan.log_device, out_image->image, NULL); out_image->image = NULL);
+    printf("Image memory type: %u\n", alloc_info.memoryTypeIndex);
     VULKAN_ERROR(vkAllocateMemory(renderer->vulkan.log_device, &alloc_info, NULL, &out_image->memory), "Failed to create image memory", BOBi_vk_destroy_image(renderer, out_image));
     //Bind the memory to the image properties
     VULKAN_ERROR(vkBindImageMemory(renderer->vulkan.log_device, out_image->image, out_image->memory, 0), "Failed to bind image memory", BOBi_vk_destroy_image(renderer, out_image));
@@ -2780,15 +3167,44 @@ uint8_t BOBi_vk_find_depth_format(BOBi_Renderer_Impl *renderer, VkFormat *out) {
 }
 
 //Destroys a BOBi_Vulkan_Buffer
-void BOBi_vk_destroy_buffer(VkDevice device, BOBi_Vulkan_Buffer *buf) {
+void BOBi_vk_destroy_buffer(BOBi_vk_Allocator *alloc, VkDevice device, BOBi_Vulkan_Buffer *buf) {
     if(buf->buffer != VK_NULL_HANDLE) vkDestroyBuffer(device, buf->buffer, NULL);
-    if(buf->memory != VK_NULL_HANDLE) vkFreeMemory(device, buf->memory, NULL);
-    buf->memory = VK_NULL_HANDLE;
     buf->buffer = VK_NULL_HANDLE;
+    BOBi_vk_free_mem(alloc, &buf->mem);
+    // if(buf->memory != VK_NULL_HANDLE) vkFreeMemory(device, buf->memory, NULL);
+    // buf->memory = VK_NULL_HANDLE;
 }
 
 //Creates buffers in GPU memory
-uint8_t BOBi_vk_create_buffer(BOBi_Renderer_Impl *renderer, VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, BOBi_Vulkan_Buffer *out_buf) {
+// uint8_t BOBi_vk_create_buffer_old(BOBi_Renderer_Impl *renderer, VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, BOBi_Vulkan_Buffer *out_buf) {
+//     //Creates the VKBuffer struct that stores the buffer's properties
+//     VkBufferCreateInfo buf_info = {
+//         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .pNext = NULL,
+//         .size = size, .usage = usage, .sharingMode = VK_SHARING_MODE_EXCLUSIVE
+//     };
+//     VULKAN_ERROR(vkCreateBuffer(renderer->vulkan.log_device, &buf_info, NULL, &out_buf->buffer), "Failed to create a buffer");
+//
+//     //Getting the memory requirements for this buffer
+//     VkMemoryRequirements mem_req;
+//     vkGetBufferMemoryRequirements(renderer->vulkan.log_device, out_buf->buffer, &mem_req);
+//
+//     //Allocating the memory region to store this buffer
+//     VkMemoryAllocateInfo mem_alloc_info = {
+//         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = NULL,
+//         .allocationSize = mem_req.size,
+//     };
+//
+//     if(!BOBi_vk_find_memory_type(renderer, mem_req.memoryTypeBits, properties, &mem_alloc_info.memoryTypeIndex)) return 0;
+//     VULKAN_ERROR(vkAllocateMemory(renderer->vulkan.log_device, &mem_alloc_info, NULL, &out_buf->memory), "Failed to allocate vertex buffer memory",
+//                           vkDestroyBuffer(renderer->vulkan.log_device, out_buf->buffer, NULL));
+//     //Bind the memory to this buffer properties struct
+//     VULKAN_ERROR(vkBindBufferMemory(renderer->vulkan.log_device, out_buf->buffer, out_buf->memory, 0), "Failed to bind buffer memory", 
+//                           BOBi_vk_destroy_buffer(&renderer->vulkan.vulkan_memory, renderer->vulkan.log_device, out_buf));
+//
+//     return 1;
+// }
+
+uint8_t BOBi_vk_create_buffer(BOBi_Renderer_Impl *renderer, VkDeviceSize size, VkBufferUsageFlags usage, BOBi_vk_Alloc_Memory_Type type, BOBi_Vulkan_Buffer *out_buf) {
     //Creates the VKBuffer struct that stores the buffer's properties
     VkBufferCreateInfo buf_info = {
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .pNext = NULL,
@@ -2796,32 +3212,22 @@ uint8_t BOBi_vk_create_buffer(BOBi_Renderer_Impl *renderer, VkDeviceSize size, V
     };
     VULKAN_ERROR(vkCreateBuffer(renderer->vulkan.log_device, &buf_info, NULL, &out_buf->buffer), "Failed to create a buffer");
 
-    //Getting the memory requirements for this buffer
-    VkMemoryRequirements mem_req;
-    vkGetBufferMemoryRequirements(renderer->vulkan.log_device, out_buf->buffer, &mem_req);
+    if(!BOBi_vk_allocate_mem(&renderer->vulkan.vulkan_memory, type, size, BOBi_MIN_ALIGNMENT, &out_buf->mem)) return 0;
 
-    //Allocating the memory region to store this buffer
-    VkMemoryAllocateInfo mem_alloc_info = {
-        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = NULL,
-        .allocationSize = mem_req.size,
-    };
-
-    if(!BOBi_vk_find_memory_type(renderer, mem_req.memoryTypeBits, properties, &mem_alloc_info.memoryTypeIndex)) return 0;
-    VULKAN_ERROR(vkAllocateMemory(renderer->vulkan.log_device, &mem_alloc_info, NULL, &out_buf->memory), "Failed to allocate vertex buffer memory",
-                          vkDestroyBuffer(renderer->vulkan.log_device, out_buf->buffer, NULL));
     //Bind the memory to this buffer properties struct
-    VULKAN_ERROR(vkBindBufferMemory(renderer->vulkan.log_device, out_buf->buffer, out_buf->memory, 0), "Failed to bind buffer memory", 
-                          BOBi_vk_destroy_buffer(renderer->vulkan.log_device, out_buf));
+    VULKAN_ERROR(vkBindBufferMemory(renderer->vulkan.log_device, out_buf->buffer, out_buf->mem.memory, 0), "Failed to bind buffer memory", 
+                          BOBi_vk_destroy_buffer(&renderer->vulkan.vulkan_memory, renderer->vulkan.log_device, out_buf));
 
     return 1;
 }
 
+
 //Streams data into a BOBi_Vulkan_Buffer
 uint8_t BOBi_vk_stream_to_buffer(VkDevice device, const void *src, size_t size, BOBi_Vulkan_Buffer *dst) {
     void *data;
-    VULKAN_ERROR(vkMapMemory(device, dst->memory, 0, size, 0, &data), "Failed to map GPU memory to CPU memory");
+    VULKAN_ERROR(vkMapMemory(device, dst->mem.memory, 0, size, 0, &data), "Failed to map GPU memory to CPU memory");
     memcpy(data, src, size);
-    vkUnmapMemory(device, dst->memory);
+    vkUnmapMemory(device, dst->mem.memory);
     return 1;
 }
 
@@ -3634,7 +4040,7 @@ void BOBi_vk_destroy_material(BOBi_Renderer_Impl *renderer, uint32_t index) {
     vkWaitForFences(renderer->vulkan.log_device, 1, &renderer->vulkan.draw_fence, VK_TRUE, UINT64_MAX);
     if(mat->vulkan.uniform_descriptor_set != VK_NULL_HANDLE) {vkFreeDescriptorSets(renderer->vulkan.log_device, renderer->vulkan.descriptor_pool, 1, &mat->vulkan.uniform_descriptor_set); mat->vulkan.uniform_descriptor_set = VK_NULL_HANDLE;}
     if(mat->vulkan.uniform_set_layout != VK_NULL_HANDLE) {vkDestroyDescriptorSetLayout(renderer->vulkan.log_device, mat->vulkan.uniform_set_layout, NULL); mat->vulkan.uniform_set_layout = VK_NULL_HANDLE;}
-    BOBi_vk_destroy_buffer(renderer->vulkan.log_device, &mat->vulkan.uniform_buffer);
+    BOBi_vk_destroy_buffer(&renderer->vulkan.vulkan_memory, renderer->vulkan.log_device, &mat->vulkan.uniform_buffer);
     if(mat->vulkan.layout!= VK_NULL_HANDLE) {vkDestroyPipelineLayout(renderer->vulkan.log_device, mat->vulkan.layout, NULL); mat->vulkan.layout = VK_NULL_HANDLE;}
     if(mat->vulkan.pipeline!= VK_NULL_HANDLE) {vkDestroyPipeline(renderer->vulkan.log_device, mat->vulkan.pipeline, NULL); mat->vulkan.pipeline = VK_NULL_HANDLE;}
 }
@@ -3663,10 +4069,10 @@ uint8_t BOBi_vk_create_material(BOBi_Renderer_Impl *renderer, uint32_t index, BO
     VULKAN_ERROR(!BOBi_vk_create_graphics_pipeline(renderer, mat, data, num_shaders), "Failed to create graphics pipeline", BOBi_vk_destroy_material(renderer, index));
 
     //Create the uniform buffer to hold the data:
-    VULKAN_ERROR(!BOBi_vk_create_buffer(renderer, offset, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+    VULKAN_ERROR(!BOBi_vk_create_buffer(renderer, offset, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, BOBi_VK_CPU_ACCESSIBLE_BUFFER_MEMORY,
                                 &mat->vulkan.uniform_buffer), "Failed to create uniform buffer", BOBi_vk_destroy_material(renderer, index));
 
-    VULKAN_ERROR(vkMapMemory(renderer->vulkan.log_device, mat->vulkan.uniform_buffer.memory, 0, offset, 0, &mat->vulkan.uniform_buffer_mapped),
+    VULKAN_ERROR(vkMapMemory(renderer->vulkan.log_device, mat->vulkan.uniform_buffer.mem.memory, 0, offset, 0, &mat->vulkan.uniform_buffer_mapped),
                  "Failed to map uniform buffer memory", BOBi_vk_destroy_material(renderer, index));
 
     return 1;
@@ -3735,20 +4141,28 @@ uint8_t BOBi_vk_init_vulkan_renderer(BOBi_Renderer_Impl *renderer, size_t width,
     VULKAN_ERROR(!BOBi_vk_create_command_buffer(renderer, &renderer->vulkan.command_buffer), "Failed to creation command buffer");
     VULKAN_ERROR(!BOBi_vk_create_sync_objects(renderer), "Failed to create sync objects");
 
+    //TODO: Make the magic numbers function arguments
+    // BOBi_vk_alloc_init(renderer, vert_buf_sz, index_buf_sz, 4096, 65336, 16777216, 32, &renderer->vulkan.vulkan_memory);
+    BOBi_vk_alloc_init(renderer, vert_buf_sz, index_buf_sz, 16777216, 16777216, 16777216, 32, &renderer->vulkan.vulkan_memory);
+
     //Create the vertex buffer
-    VULKAN_ERROR(!BOBi_vk_create_buffer(renderer, vert_buf_sz, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+    printf("Creating vertex buffer\n");
+    VULKAN_ERROR(!BOBi_vk_create_buffer(renderer, vert_buf_sz, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, BOBi_VK_DEVICE_LOCAL_VERTEX_BUFFER_MEMORY,
                                 &renderer->vulkan.vertex_buffer), "Failed to create vertex buffer");
     //Create the index buffer
+    printf("Creating index buffer\n");
     VULKAN_ERROR(!BOBi_vk_create_buffer(renderer, index_buf_sz, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,  &renderer->vulkan.index_buffer), "Failed to create index buffer");
+                  BOBi_VK_DEVICE_LOCAL_INDEX_BUFFER_MEMORY,  &renderer->vulkan.index_buffer), "Failed to create index buffer");
 
     //Create the staging buffer
+    printf("Creating staging buffers\n");
     if(!BOBi_vk_create_buffer(renderer, vert_buf_sz, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                  VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, &renderer->vulkan.vert_staging_buf)) return 0;
+                  BOBi_VK_CPU_ACCESSIBLE_BUFFER_MEMORY, &renderer->vulkan.vert_staging_buf)) return 0;
     if(!BOBi_vk_create_buffer(renderer, index_buf_sz, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                  VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, &renderer->vulkan.index_staging_buf)) return 0;
+                  BOBi_VK_CPU_ACCESSIBLE_BUFFER_MEMORY, &renderer->vulkan.index_staging_buf)) return 0;
     if(!BOBi_vk_create_buffer(renderer, 4096, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &renderer->vulkan.pbo_staging_buf)) return 0;
+                BOBi_VK_CPU_ACCESSIBLE_BUFFER_MEMORY, &renderer->vulkan.pbo_staging_buf)) return 0;
+    printf("Stopping\n");
     renderer->vulkan.pbo_staging_buf_sz = 4096;
 
     return 1;
@@ -3790,11 +4204,11 @@ uint8_t BOB_create_vulkan_renderer(size_t atlas_capacity, size_t pixelbuf_capaci
 
 void BOBi_vk_destroy_renderer(BOBi_Renderer_Impl *renderer) {
     vkDeviceWaitIdle(renderer->vulkan.log_device); //Need to wait for the GPU to stop using these resources
-    BOBi_vk_destroy_buffer(renderer->vulkan.log_device, &renderer->vulkan.vertex_buffer);
-    BOBi_vk_destroy_buffer(renderer->vulkan.log_device, &renderer->vulkan.index_buffer);
-    BOBi_vk_destroy_buffer(renderer->vulkan.log_device, &renderer->vulkan.index_staging_buf);
-    BOBi_vk_destroy_buffer(renderer->vulkan.log_device, &renderer->vulkan.vert_staging_buf);
-    BOBi_vk_destroy_buffer(renderer->vulkan.log_device, &renderer->vulkan.pbo_staging_buf);
+    BOBi_vk_destroy_buffer(&renderer->vulkan.vulkan_memory, renderer->vulkan.log_device, &renderer->vulkan.vertex_buffer);
+    BOBi_vk_destroy_buffer(&renderer->vulkan.vulkan_memory, renderer->vulkan.log_device, &renderer->vulkan.index_buffer);
+    BOBi_vk_destroy_buffer(&renderer->vulkan.vulkan_memory, renderer->vulkan.log_device, &renderer->vulkan.index_staging_buf);
+    BOBi_vk_destroy_buffer(&renderer->vulkan.vulkan_memory, renderer->vulkan.log_device, &renderer->vulkan.vert_staging_buf);
+    BOBi_vk_destroy_buffer(&renderer->vulkan.vulkan_memory, renderer->vulkan.log_device, &renderer->vulkan.pbo_staging_buf);
     vkDestroyDescriptorSetLayout(renderer->vulkan.log_device, renderer->vulkan.default_tex_layout, NULL);
     BOBi_vk_destroy_image(renderer, &renderer->vulkan.depth);
 
@@ -3815,6 +4229,7 @@ void BOBi_vk_destroy_renderer(BOBi_Renderer_Impl *renderer) {
     vkDestroyDescriptorPool(renderer->vulkan.log_device, renderer->vulkan.descriptor_pool, NULL);
     vkDestroyCommandPool(renderer->vulkan.log_device, renderer->vulkan.command_pool, NULL);
     vkDestroySwapchainKHR(renderer->vulkan.log_device, renderer->vulkan.swapchain, NULL);
+    BOBi_vk_destroy_allocator(&renderer->vulkan.vulkan_memory, renderer->vulkan.log_device);
     vkDestroyDevice(renderer->vulkan.log_device, NULL);
     vkDestroySurfaceKHR(bob_state.instance, renderer->vulkan.surface, NULL);
 }
@@ -3855,24 +4270,24 @@ uint8_t BOBi_vk_create_texture(BOBi_Renderer_Impl *renderer, uint32_t index, siz
 
     if(data != NULL) {
         //Create the staging buffer
-        VULKAN_ERROR(!BOBi_vk_create_buffer(renderer, width * height * (format + 1), VK_BUFFER_USAGE_TRANSFER_SRC_BIT,  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &staging_buf), "Failed to create staging buffer",
+        VULKAN_ERROR(!BOBi_vk_create_buffer(renderer, width * height * (format + 1), VK_BUFFER_USAGE_TRANSFER_SRC_BIT,  BOBi_VK_CPU_ACCESSIBLE_BUFFER_MEMORY, &staging_buf), "Failed to create staging buffer",
                      BOBi_vk_destroy_image(renderer, tex));
 
         has_staging = 1;
 
         //Map the staging buffer memory into CPU memory and copy the pixel data into it
         VULKAN_ERROR(!BOBi_vk_stream_to_buffer(renderer->vulkan.log_device, data, width * height * (format + 1), &staging_buf), "Failed to stream data into a Vulkan Buffer",
-            BOBi_vk_destroy_buffer(renderer->vulkan.log_device, &staging_buf), BOBi_vk_destroy_image(renderer, tex));
+            BOBi_vk_destroy_buffer(&renderer->vulkan.vulkan_memory, renderer->vulkan.log_device, &staging_buf), BOBi_vk_destroy_image(renderer, tex));
 
         BOBi_vk_copy_buffer_to_image(command_buf, staging_buf.buffer, tex->image, (BOB_Quad){0, 0, width, height});
     }
 
     VULKAN_ERROR(!BOBi_vk_transition_tex_layout(command_buf, tex->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL), "Failed to transition layout",
-                 BOBi_vk_destroy_buffer(renderer->vulkan.log_device, &staging_buf), BOBi_vk_destroy_image(renderer, tex));
+                 BOBi_vk_destroy_buffer(&renderer->vulkan.vulkan_memory, renderer->vulkan.log_device, &staging_buf), BOBi_vk_destroy_image(renderer, tex));
 
-    VULKAN_ERROR(!BOBi_vk_end_single_time_commands(renderer, command_buf), "Failed to end command buffer", BOBi_vk_destroy_buffer(renderer->vulkan.log_device, &staging_buf), BOBi_vk_destroy_image(renderer, tex));
+    VULKAN_ERROR(!BOBi_vk_end_single_time_commands(renderer, command_buf), "Failed to end command buffer", BOBi_vk_destroy_buffer(&renderer->vulkan.vulkan_memory, renderer->vulkan.log_device, &staging_buf), BOBi_vk_destroy_image(renderer, tex));
 
-    if(has_staging) BOBi_vk_destroy_buffer(renderer->vulkan.log_device, &staging_buf);
+    if(has_staging) BOBi_vk_destroy_buffer(&renderer->vulkan.vulkan_memory, renderer->vulkan.log_device, &staging_buf);
 
     //Create view for the image
     VULKAN_ERROR(!BOBi_vk_create_image_view(renderer, tex->image, BOBi_vk_convert_format(format),  VK_IMAGE_ASPECT_COLOR_BIT, &tex->view),
@@ -3891,7 +4306,7 @@ uint8_t BOBi_vk_create_texture(BOBi_Renderer_Impl *renderer, uint32_t index, siz
 void BOBi_vk_copy_data_tex(BOBi_Renderer_Impl *renderer, uint32_t tex_index, BOB_Format format, BOB_Quad region, uint8_t *pixels) {
     BOBi_Vulkan_Buffer staging_buf;
     BOBi_vk_create_buffer(renderer, (region.h * region.w), VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &staging_buf);
+                BOBi_VK_CPU_ACCESSIBLE_BUFFER_MEMORY, &staging_buf);
     BOBi_vk_stream_to_buffer(renderer->vulkan.log_device, pixels, region.h * region.w, &staging_buf);
 
     VkCommandBuffer buf;
@@ -3904,13 +4319,13 @@ void BOBi_vk_destroy_pbo(BOBi_Renderer_Impl *r, uint32_t index) {return;}
 uint8_t BOBi_vk_create_pbo(BOBi_Renderer_Impl *r, uint32_t index) {return 1;}
 
 uint8_t BOBi_vk_bind_pbo_mem(BOBi_Renderer_Impl *renderer, uint32_t pb_index, void **mapped_mem_ptr, size_t *mem_sz) {
-    VULKAN_ERROR(vkMapMemory(renderer->vulkan.log_device, renderer->vulkan.pbo_staging_buf.memory, 0, renderer->vulkan.pbo_staging_buf_sz, 0, mapped_mem_ptr), "Failed to map GPU memory to CPU memory");
+    VULKAN_ERROR(vkMapMemory(renderer->vulkan.log_device, renderer->vulkan.pbo_staging_buf.mem.memory, 0, renderer->vulkan.pbo_staging_buf_sz, 0, mapped_mem_ptr), "Failed to map GPU memory to CPU memory");
 
     *mem_sz = renderer->pixelbuffer_table[pb_index].buf_sz;
     return 1;
 }
 void BOBi_vk_unbind_pbo_mem(BOBi_Renderer_Impl *renderer, uint32_t index) {
-    vkUnmapMemory(renderer->vulkan.log_device, renderer->vulkan.pbo_staging_buf.memory);
+    vkUnmapMemory(renderer->vulkan.log_device, renderer->vulkan.pbo_staging_buf.mem.memory);
 }
 void BOBi_vk_upload_pbo_data(BOBi_Renderer_Impl *renderer, uint32_t pb_index) {
     VkCommandBuffer buf;
@@ -4033,13 +4448,13 @@ uint8_t BOBi_vk_draw(BOBi_Renderer_Impl *renderer) {
     //Map the staging buffer to CPU memory and copy the index data into it
     VULKAN_ERROR(!BOBi_vk_stream_to_buffer(renderer->vulkan.log_device, renderer->vertex_index_arena, index_sz, &renderer->vulkan.index_staging_buf), "Failed to stream data into a Vulkan Buffer");
     //Copy the data
-    VkBufferCopy copy_region = {0, 0, index_sz};
+    VkBufferCopy copy_region = {0, renderer->vulkan.index_buffer.mem.device_local.offset, index_sz};
     vkCmdCopyBuffer(buffer, renderer->vulkan.index_staging_buf.buffer, renderer->vulkan.index_buffer.buffer, 1, &copy_region);
 
     //Map the staging buffer to CPU memory and copy the vertex data into it
     VULKAN_ERROR(!BOBi_vk_stream_to_buffer(renderer->vulkan.log_device, renderer->vertex_arena, vertex_sz, &renderer->vulkan.vert_staging_buf), "Failed to stream data into a Vulkan Buffer");
     //Create the actual destination buffer and copy the staging buffer data into it
-    copy_region = (VkBufferCopy){0, 0, vertex_sz};
+    copy_region = (VkBufferCopy){0, renderer->vulkan.vertex_buffer.mem.device_local.offset, vertex_sz};
     vkCmdCopyBuffer(buffer, renderer->vulkan.vert_staging_buf.buffer, renderer->vulkan.vertex_buffer.buffer, 1, &copy_region);
 
     // IMPORTANT: synchronize the copies with vertex/index input
@@ -4053,7 +4468,7 @@ uint8_t BOBi_vk_draw(BOBi_Renderer_Impl *renderer) {
             .dstAccessMask = VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT,
 
             .buffer = renderer->vulkan.vertex_buffer.buffer,
-            .offset = 0,
+            .offset = renderer->vulkan.vertex_buffer.mem.device_local.offset,
             .size = vertex_sz,
         },
 
@@ -4066,7 +4481,7 @@ uint8_t BOBi_vk_draw(BOBi_Renderer_Impl *renderer) {
             .dstAccessMask = VK_ACCESS_2_INDEX_READ_BIT,
 
             .buffer = renderer->vulkan.index_buffer.buffer,
-            .offset = 0,
+            .offset = renderer->vulkan.index_buffer.mem.device_local.offset,
             .size = index_sz,
         }
     };
@@ -4094,9 +4509,9 @@ uint8_t BOBi_vk_draw(BOBi_Renderer_Impl *renderer) {
     BOBi_Material_Impl *mat = &renderer->material_table[index];
 
     //Bind the vertex buffer to the command buffer
-    vkCmdBindVertexBuffers(buffer, 0, 1, &renderer->vulkan.vertex_buffer.buffer, (VkDeviceSize[]){0});
+    vkCmdBindVertexBuffers(buffer, 0, 1, &renderer->vulkan.vertex_buffer.buffer, (VkDeviceSize[]){renderer->vulkan.vertex_buffer.mem.device_local.offset});
     //Bind the index buffer to the command buffer
-    vkCmdBindIndexBuffer(buffer, renderer->vulkan.index_buffer.buffer, 0, VK_INDEX_TYPE_UINT32);
+    vkCmdBindIndexBuffer(buffer, renderer->vulkan.index_buffer.buffer, renderer->vulkan.index_buffer.mem.device_local.offset, VK_INDEX_TYPE_UINT32);
 
     uint32_t old_mat = UINT32_MAX, old_tex = UINT32_MAX;
     for(size_t i = 0; i < renderer->num_draw_calls; i++) {
