@@ -455,7 +455,8 @@ typedef struct {
 typedef struct {
     VkImage image;
     VkImageView view;
-    VkDeviceMemory memory;
+    BOBi_vk_Allocation_Header memory;
+    // VkDeviceMemory memory;
     VkDescriptorSet descriptor;
 } BOBi_Vulkan_Image;
 #endif // BOB_INCLUDE_VULKAN
@@ -2752,7 +2753,7 @@ uint8_t BOBi_vk_free_pool_mem(BOBi_vk_Pool_Allocator *alloc, uint16_t pool_idx) 
     }
 
     for(size_t i = 0; i < alloc->num_used; i++) {
-        size_t lst_idx = (alloc->used_ptr + 1) % (alloc->num_used + alloc->num_free); //Calculate the circular index
+        size_t lst_idx = (alloc->used_ptr + i) % (alloc->num_used + alloc->num_free); //Calculate the circular index
 
         //Check if we have found the desired memory pool
         if(alloc->used_list[lst_idx] == pool_idx) {
@@ -3090,22 +3091,25 @@ void BOBi_vk_destroy_image(BOBi_Renderer_Impl *renderer, BOBi_Vulkan_Image *tex)
         vkDestroyImage(renderer->vulkan.log_device, tex->image, NULL);
         tex->image = VK_NULL_HANDLE;
     }
-    if(tex->memory != VK_NULL_HANDLE) {
-        vkFreeMemory(renderer->vulkan.log_device, tex->memory, NULL);
-        tex->memory = VK_NULL_HANDLE;
-    }
+    BOBi_vk_free_mem(&renderer->vulkan.vulkan_memory, &tex->memory);
+    // if(tex->memory != VK_NULL_HANDLE) {
+    //     vkFreeMemory(renderer->vulkan.log_device, tex->memory, NULL);
+    //     tex->memory = VK_NULL_HANDLE;
+    // }
 }
 
 //Creates an image and its allocated memory
 uint8_t BOBi_vk_create_image(BOBi_Renderer_Impl *renderer, uint32_t width, uint32_t height, VkFormat format, VkImageTiling tiling,
-                     VkImageUsageFlags usage, VkMemoryPropertyFlags properties, BOBi_Vulkan_Image *out_image) {
+                     BOBi_vk_Alloc_Memory_Type type, BOBi_Vulkan_Image *out_image) {
+    if(type != BOBi_VK_DEVICE_LOCAL_IMAGE_COLOUR_MEMORY && type != BOBi_VK_DEVICE_LOCAL_IMAGE_DEPTH_MEMORY) return 0;
     //Creating the struct that holds the image properties
     VkImageCreateInfo image_info = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .pNext = NULL,
         .imageType = VK_IMAGE_TYPE_2D, .format = format,
         .extent = {width, height, 1}, .mipLevels = 1, .arrayLayers = 1,
         .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = tiling,
-        .usage = usage, .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .usage = (type == BOBi_VK_DEVICE_LOCAL_IMAGE_COLOUR_MEMORY) ? VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT : VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
     };
     VULKAN_ERROR(vkCreateImage(renderer->vulkan.log_device, &image_info, NULL, &out_image->image), "Failed to create image");
@@ -3116,12 +3120,10 @@ uint8_t BOBi_vk_create_image(BOBi_Renderer_Impl *renderer, uint32_t width, uint3
 
     //Allocate the memory to store the image data
     VkMemoryAllocateInfo alloc_info = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = NULL, .allocationSize = mem_req.size };
-    VULKAN_ERROR(!BOBi_vk_find_memory_type(renderer, mem_req.memoryTypeBits, properties, &alloc_info.memoryTypeIndex), "Failed to find memory type",
-                 vkDestroyImage(renderer->vulkan.log_device, out_image->image, NULL); out_image->image = NULL);
-    printf("Image memory type: %u\n", alloc_info.memoryTypeIndex);
-    VULKAN_ERROR(vkAllocateMemory(renderer->vulkan.log_device, &alloc_info, NULL, &out_image->memory), "Failed to create image memory", BOBi_vk_destroy_image(renderer, out_image));
+    BOBi_vk_allocate_mem(&renderer->vulkan.vulkan_memory, type, mem_req.size, mem_req.alignment, &out_image->memory);
     //Bind the memory to the image properties
-    VULKAN_ERROR(vkBindImageMemory(renderer->vulkan.log_device, out_image->image, out_image->memory, 0), "Failed to bind image memory", BOBi_vk_destroy_image(renderer, out_image));
+    VULKAN_ERROR(vkBindImageMemory(renderer->vulkan.log_device, out_image->image, out_image->memory.memory, out_image->memory.device_local.offset),
+                 "Failed to bind image memory", BOBi_vk_destroy_image(renderer, out_image));
 
     return 1;
 }
@@ -3171,39 +3173,9 @@ void BOBi_vk_destroy_buffer(BOBi_vk_Allocator *alloc, VkDevice device, BOBi_Vulk
     if(buf->buffer != VK_NULL_HANDLE) vkDestroyBuffer(device, buf->buffer, NULL);
     buf->buffer = VK_NULL_HANDLE;
     BOBi_vk_free_mem(alloc, &buf->mem);
-    // if(buf->memory != VK_NULL_HANDLE) vkFreeMemory(device, buf->memory, NULL);
-    // buf->memory = VK_NULL_HANDLE;
 }
 
 //Creates buffers in GPU memory
-// uint8_t BOBi_vk_create_buffer_old(BOBi_Renderer_Impl *renderer, VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, BOBi_Vulkan_Buffer *out_buf) {
-//     //Creates the VKBuffer struct that stores the buffer's properties
-//     VkBufferCreateInfo buf_info = {
-//         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .pNext = NULL,
-//         .size = size, .usage = usage, .sharingMode = VK_SHARING_MODE_EXCLUSIVE
-//     };
-//     VULKAN_ERROR(vkCreateBuffer(renderer->vulkan.log_device, &buf_info, NULL, &out_buf->buffer), "Failed to create a buffer");
-//
-//     //Getting the memory requirements for this buffer
-//     VkMemoryRequirements mem_req;
-//     vkGetBufferMemoryRequirements(renderer->vulkan.log_device, out_buf->buffer, &mem_req);
-//
-//     //Allocating the memory region to store this buffer
-//     VkMemoryAllocateInfo mem_alloc_info = {
-//         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = NULL,
-//         .allocationSize = mem_req.size,
-//     };
-//
-//     if(!BOBi_vk_find_memory_type(renderer, mem_req.memoryTypeBits, properties, &mem_alloc_info.memoryTypeIndex)) return 0;
-//     VULKAN_ERROR(vkAllocateMemory(renderer->vulkan.log_device, &mem_alloc_info, NULL, &out_buf->memory), "Failed to allocate vertex buffer memory",
-//                           vkDestroyBuffer(renderer->vulkan.log_device, out_buf->buffer, NULL));
-//     //Bind the memory to this buffer properties struct
-//     VULKAN_ERROR(vkBindBufferMemory(renderer->vulkan.log_device, out_buf->buffer, out_buf->memory, 0), "Failed to bind buffer memory", 
-//                           BOBi_vk_destroy_buffer(&renderer->vulkan.vulkan_memory, renderer->vulkan.log_device, out_buf));
-//
-//     return 1;
-// }
-
 uint8_t BOBi_vk_create_buffer(BOBi_Renderer_Impl *renderer, VkDeviceSize size, VkBufferUsageFlags usage, BOBi_vk_Alloc_Memory_Type type, BOBi_Vulkan_Buffer *out_buf) {
     //Creates the VKBuffer struct that stores the buffer's properties
     VkBufferCreateInfo buf_info = {
@@ -3212,10 +3184,14 @@ uint8_t BOBi_vk_create_buffer(BOBi_Renderer_Impl *renderer, VkDeviceSize size, V
     };
     VULKAN_ERROR(vkCreateBuffer(renderer->vulkan.log_device, &buf_info, NULL, &out_buf->buffer), "Failed to create a buffer");
 
-    if(!BOBi_vk_allocate_mem(&renderer->vulkan.vulkan_memory, type, size, BOBi_MIN_ALIGNMENT, &out_buf->mem)) return 0;
+    //Get the memory requirements to store the buffer
+    VkMemoryRequirements mem_req;
+    vkGetBufferMemoryRequirements(renderer->vulkan.log_device, out_buf->buffer, &mem_req);
+
+    if(!BOBi_vk_allocate_mem(&renderer->vulkan.vulkan_memory, type, mem_req.size, mem_req.alignment, &out_buf->mem)) return 0;
 
     //Bind the memory to this buffer properties struct
-    VULKAN_ERROR(vkBindBufferMemory(renderer->vulkan.log_device, out_buf->buffer, out_buf->mem.memory, 0), "Failed to bind buffer memory", 
+    VULKAN_ERROR(vkBindBufferMemory(renderer->vulkan.log_device, out_buf->buffer, out_buf->mem.memory, (type == BOBi_VK_CPU_ACCESSIBLE_BUFFER_MEMORY) ? 0 : out_buf->mem.device_local.offset), "Failed to bind buffer memory", 
                           BOBi_vk_destroy_buffer(&renderer->vulkan.vulkan_memory, renderer->vulkan.log_device, out_buf));
 
     return 1;
@@ -3728,7 +3704,7 @@ uint8_t BOBi_vk_create_depth_resources(BOBi_Renderer_Impl *renderer) {
     if(!BOBi_vk_find_depth_format(renderer, &depth_format)) return 0;
 
     if(!BOBi_vk_create_image(renderer, renderer->vulkan.extent.width, renderer->vulkan.extent.height, depth_format, VK_IMAGE_TILING_OPTIMAL,
-                 VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &renderer->vulkan.depth)) return 0;
+                 BOBi_VK_DEVICE_LOCAL_IMAGE_DEPTH_MEMORY, &renderer->vulkan.depth)) return 0;
     if(!BOBi_vk_create_image_view(renderer, renderer->vulkan.depth.image, depth_format, VK_IMAGE_ASPECT_DEPTH_BIT, &renderer->vulkan.depth.view)) return 0;
 
     return 1;
@@ -4129,6 +4105,11 @@ uint8_t BOBi_vk_init_vulkan_renderer(BOBi_Renderer_Impl *renderer, size_t width,
     VULKAN_ERROR(!surface_func(bob_state.instance, &renderer->vulkan.surface), "Didn't create surface");
     VULKAN_ERROR(!BOBi_vk_pick_physical_device(renderer), "Didn't pick physical device");
     VULKAN_ERROR(!BOBi_vk_create_logical_device(renderer), "Didn't create logical device");
+
+    //TODO: Make the magic numbers function arguments
+    // BOBi_vk_alloc_init(renderer, vert_buf_sz, index_buf_sz, 4096, 65336, 16777216, 32, &renderer->vulkan.vulkan_memory);
+    BOBi_vk_alloc_init(renderer, vert_buf_sz, index_buf_sz, 16777216, 16777216, 16777216, 32, &renderer->vulkan.vulkan_memory);
+
     VULKAN_ERROR(!BOBi_vk_create_swapchain(renderer, width, height), "Didn't create swapchain");
     VULKAN_ERROR(!BOBi_vk_create_image_views(renderer), "Didn't create swapchain images");
     VULKAN_ERROR(!BOBi_vk_create_depth_resources(renderer), "Didn't create depth resources");
@@ -4140,10 +4121,6 @@ uint8_t BOBi_vk_init_vulkan_renderer(BOBi_Renderer_Impl *renderer, size_t width,
     VULKAN_ERROR(!BOBi_vk_create_texture_sampler(renderer, &renderer->vulkan.sampler), "Didn't create texture sampler");
     VULKAN_ERROR(!BOBi_vk_create_command_buffer(renderer, &renderer->vulkan.command_buffer), "Failed to creation command buffer");
     VULKAN_ERROR(!BOBi_vk_create_sync_objects(renderer), "Failed to create sync objects");
-
-    //TODO: Make the magic numbers function arguments
-    // BOBi_vk_alloc_init(renderer, vert_buf_sz, index_buf_sz, 4096, 65336, 16777216, 32, &renderer->vulkan.vulkan_memory);
-    BOBi_vk_alloc_init(renderer, vert_buf_sz, index_buf_sz, 16777216, 16777216, 16777216, 32, &renderer->vulkan.vulkan_memory);
 
     //Create the vertex buffer
     printf("Creating vertex buffer\n");
@@ -4257,8 +4234,7 @@ uint8_t BOBi_vk_create_texture(BOBi_Renderer_Impl *renderer, uint32_t index, siz
     BOBi_Vulkan_Image *tex = &renderer->texture_table[index].vulkan;
 
     //Create the image
-    if(!BOBi_vk_create_image(renderer, width, height, BOBi_vk_convert_format(format), VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, tex)) return 0;
+    if(!BOBi_vk_create_image(renderer, width, height, BOBi_vk_convert_format(format), VK_IMAGE_TILING_OPTIMAL, BOBi_VK_DEVICE_LOCAL_IMAGE_COLOUR_MEMORY, tex)) return 0;
 
     VkCommandBuffer command_buf;
     VULKAN_ERROR(!BOBi_vk_begin_single_time_commands(renderer, &command_buf), "Failed to begin command buffer");
@@ -4353,7 +4329,7 @@ uint8_t BOBi_vk_recreate_swapchain(BOBi_Renderer_Impl *renderer) {
     BOBi_vk_cleanup_swapchain(renderer);
     vkDestroyImageView(renderer->vulkan.log_device, renderer->vulkan.depth.view, NULL);
     vkDestroyImage(renderer->vulkan.log_device, renderer->vulkan.depth.image, NULL);
-    vkFreeMemory(renderer->vulkan.log_device, renderer->vulkan.depth.memory, NULL);
+    // vkFreeMemory(renderer->vulkan.log_device, renderer->vulkan.depth.memory, NULL);
     return BOBi_vk_create_swapchain(renderer, renderer->screen_width_px, renderer->screen_height_px) && BOBi_vk_create_image_views(renderer) && BOBi_vk_create_depth_resources(renderer);
 }
 
