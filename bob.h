@@ -1095,6 +1095,7 @@ static BOBi_RB_Direction BOBi_mem_rb_direction(const BOBi_RB_Node *n) {
 BOBi_RB_Node *BOBi_mem_rb_rotate_subtree(BOBi_Memory_RB_Tree *tree, BOBi_RB_Node *sub, int dir) {
     BOBi_RB_Node *sub_parent = sub->parent;
     BOBi_RB_Node *new_root = sub->child[1-dir];
+    if(new_root == NULL) return sub; // Early exit if nothing to rotate
     BOBi_RB_Node *new_child = new_root->child[dir];
 
     sub->child[1-dir] = new_child;
@@ -3058,25 +3059,6 @@ uint8_t BOBi_vk_end_single_time_commands(BOBi_Renderer_Impl *renderer, VkCommand
     return 1;
 }
 
-// //Gets the index of the memory type that matches our desired properties
-// uint8_t BOBi_vk_find_memory_type(BOBi_Renderer_Impl *renderer, uint32_t type_filter, VkMemoryPropertyFlags properties, uint32_t *out) {
-//     //Getting the properties used on our current physical device
-//     VkPhysicalDeviceMemoryProperties mem_properties;
-//     vkGetPhysicalDeviceMemoryProperties(renderer->vulkan.phy_device, &mem_properties);
-//
-//     //Search to find the one that matches our desired properties
-//     for(size_t i = 0; i < mem_properties.memoryTypeCount; i++) {
-//         if((type_filter & (1 << i)) && (mem_properties.memoryTypes[i].propertyFlags & properties) == properties) {
-//             *out = i;
-//             return 1;
-//         }
-//     }
-//
-//     //Throw an error on failure
-//     printf("Failed to find suitable memory type\n");
-//     return 0;
-// }
-
 void BOBi_vk_destroy_image(BOBi_Renderer_Impl *renderer, BOBi_Vulkan_Image *tex) {
     vkWaitForFences(renderer->vulkan.log_device, 1, &renderer->vulkan.draw_fence, VK_TRUE, UINT64_MAX); //Need to wait for the GPU to stop using these resources
     if(tex->descriptor != VK_NULL_HANDLE) {
@@ -3092,10 +3074,6 @@ void BOBi_vk_destroy_image(BOBi_Renderer_Impl *renderer, BOBi_Vulkan_Image *tex)
         tex->image = VK_NULL_HANDLE;
     }
     BOBi_vk_free_mem(&renderer->vulkan.vulkan_memory, &tex->memory);
-    // if(tex->memory != VK_NULL_HANDLE) {
-    //     vkFreeMemory(renderer->vulkan.log_device, tex->memory, NULL);
-    //     tex->memory = VK_NULL_HANDLE;
-    // }
 }
 
 //Creates an image and its allocated memory
