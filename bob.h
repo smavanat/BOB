@@ -25,9 +25,8 @@
 #include <stdint.h>
 #include <stddef.h>
 
-//TODO: Change the vulkan memory code to use our allocator so the PBO memory mapping works properly -> Maybe a ring allocator to ensure constant memory usage
-//      Fix image transitioning and blending in Vulkan backend
-//      Use texture arrays instead of binding textures every draw call 
+//TODO: Fix image transitioning and blending in Vulkan backend
+//      Use texture arrays instead of binding textures every draw call
 //      Let quads have rounded corners
 //
 //      Do proper error reporting and document what each error code means somewhere
@@ -602,7 +601,7 @@ typedef struct {
     VkMemoryType type;
 } BOBi_vk_FL_Allocator;
 
-//TODO: Handling different Vulkan Memory types:
+//NOTE: Handling different Vulkan Memory types:
 //      Pretty good blog post on the topic: https://blog.io7m.com/2023/11/11/vulkan-memory-allocation.xhtml
 //      AFAIK each GPU can have different memory regions. This means that there are different memory heaps you can access, with different properties
 //      Depending on what type of memory flags you require from your memory region, you will be pointed towards a different heap.
@@ -868,7 +867,6 @@ typedef struct {
 
             BOBi_vk_Allocator vulkan_memory;
 
-            //TODO: FIX VULKAN MEMORY
             BOBi_Vulkan_Buffer vert_staging_buf;
             BOBi_Vulkan_Buffer index_staging_buf;
             BOBi_Vulkan_Buffer pbo_staging_buf;
@@ -2829,8 +2827,6 @@ uint8_t BOBi_vk_find_memory_type(BOBi_Renderer_Impl *renderer, uint32_t type_fil
 //       https://docs.vulkan.org/spec/latest/chapters/resources.html#resources-bufferimagegranularity
 //       What defines linear/non-linear objects: https://docs.vulkan.org/spec/latest/appendices/glossary.html#glossary-linear-resource
 
-//TODO: Figure out what we are going to do about uniform buffers
-//      Change the free list allocator to account for image-buffer granularity
 uint8_t BOBi_vk_alloc_init(BOBi_Renderer_Impl *renderer, VkDeviceSize vert_buf_sz, VkDeviceSize indx_buf_sz, VkDeviceSize local_cimg_mem_sz, VkDeviceSize local_dimg_mem_sz, VkDeviceSize pool_reg_sz, size_t pool_sz, BOBi_vk_Allocator *alloc) {
     //Getting and allocating the number of distinct memory heaps:
     VkPhysicalDeviceMemoryProperties mem_prop;
@@ -2957,7 +2953,7 @@ void BOBi_vk_destroy_allocator(BOBi_vk_Allocator *alloc, VkDevice device) {
     alloc->memory_heaps = NULL;
 }
 
-// TODO: Take into account buffer-image granularity
+// TODO: Figure out why memory usage isn't always constant before and after freeing
 uint8_t BOBi_vk_allocate_mem(BOBi_vk_Allocator *alloc, BOBi_vk_Alloc_Memory_Type type, VkDeviceSize sz, VkDeviceSize alignment, BOBi_vk_Allocation_Header* out) {
     switch(type) {
         case BOBi_VK_DEVICE_LOCAL_IMAGE_COLOUR_MEMORY:
@@ -4085,7 +4081,6 @@ uint8_t BOBi_vk_init_vulkan_renderer(BOBi_Renderer_Impl *renderer, size_t width,
     VULKAN_ERROR(!BOBi_vk_create_logical_device(renderer), "Didn't create logical device");
 
     //TODO: Make the magic numbers function arguments
-    // BOBi_vk_alloc_init(renderer, vert_buf_sz, index_buf_sz, 4096, 65336, 16777216, 32, &renderer->vulkan.vulkan_memory);
     BOBi_vk_alloc_init(renderer, vert_buf_sz, index_buf_sz, 16777216, 16777216, 16777216, 32, &renderer->vulkan.vulkan_memory);
 
     VULKAN_ERROR(!BOBi_vk_create_swapchain(renderer, width, height), "Didn't create swapchain");
